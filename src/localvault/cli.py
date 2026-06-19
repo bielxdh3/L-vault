@@ -17,7 +17,7 @@ from .dedupe import build_duplicate_report
 from .gmail_api import backup_gmail_api as run_gmail_api
 from .gmail_maintenance import rename_existing_gmail_files
 from .gmail_takeout import ingest_gmail_takeout
-from .photos import ingest_google_photos_takeout, scan_existing_media
+from .photos import ingest_google_photos_local_sources, ingest_google_photos_takeout, scan_existing_media
 from .reports import RunReport, finish_run, start_run
 from .scheduler import generate_schedule_files, list_windows_tasks, run_powershell_script
 from .source_sync import sync_sources as run_source_sync
@@ -120,6 +120,7 @@ def ingest_all(root: Path = root_option(), dry_run: bool = dry_option(), skip_sy
     try:
         if not skip_sync:
             run_source_sync(p, report, dry_run=dry_run)
+        ingest_google_photos_local_sources(p, report, dry_run=dry_run)
         ingest_google_photos_takeout(p, report, dry_run=dry_run)
         ingest_gmail_takeout(p, report, dry_run=dry_run)
         ingest_whatsapp_exports(p, report, dry_run=dry_run)
@@ -143,6 +144,7 @@ def daily_backup(root: Path = root_option(), dry_run: bool = dry_option()):
     try:
         run_gmail_api(p, report, dry_run=dry_run)
         run_source_sync(p, report, dry_run=dry_run)
+        ingest_google_photos_local_sources(p, report, dry_run=dry_run)
         ingest_google_photos_takeout(p, report, dry_run=dry_run)
         ingest_gmail_takeout(p, report, dry_run=dry_run)
         ingest_whatsapp_exports(p, report, dry_run=dry_run)
@@ -158,6 +160,30 @@ def daily_backup(root: Path = root_option(), dry_run: bool = dry_option()):
 def rename_gmail_files(root: Path = root_option(), dry_run: bool = dry_option()):
     """Rename already imported Gmail .eml files with readable Windows-safe names."""
     print_summary(run_with_report(root, "gmail", "rename_files", rename_existing_gmail_files, dry_run=dry_run))
+
+
+@app.command("photos-sync-local")
+def photos_sync_local(root: Path = root_option(), dry_run: bool = dry_option()):
+    """Import photos/videos from configured local Google Photos folders."""
+    print_summary(run_with_report(root, "google_photos", "local_sources", ingest_google_photos_local_sources, dry_run=dry_run))
+
+
+@app.command("photos-add-source")
+def photos_add_source(folder: Path, root: Path = root_option()):
+    """Add a local folder that LocalVault should monitor for photos/videos."""
+    import yaml
+    p = prepare(root)
+    folder = folder.expanduser()
+    folder.mkdir(parents=True, exist_ok=True)
+    cfg_path = p.config / "config.yaml"
+    cfg = load_config(root)
+    sources = list(cfg.setdefault("google_photos", {}).get("local_media_sources", []))
+    text_folder = str(folder)
+    if text_folder not in sources:
+        sources.append(text_folder)
+    cfg["google_photos"]["local_media_sources"] = sources
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    console.print(f"[green]Google Photos local source added:[/] {folder}")
 
 
 @app.command("write-gmail-oauth")
