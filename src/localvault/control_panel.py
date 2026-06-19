@@ -15,6 +15,7 @@ from .vault_index import dashboard_data
 
 ALLOWED_COMMANDS = {
     "daily-backup": "Backup agora",
+    "photos-sync-local": "Backup fotos locais",
     "sync-sources": "Sincronizar fontes",
     "ingest-all": "Importar inbox",
     "verify": "Verificar cofre",
@@ -80,6 +81,7 @@ def _source_status(p: VaultPaths, cfg: dict[str, Any]) -> list[dict[str, Any]]:
     source_cfg = cfg.get("source_sync", {})
     items = []
     for label, values in [
+        ("Google Fotos local", cfg.get("google_photos", {}).get("local_media_sources", [])),
         ("Google Takeout/Drive", source_cfg.get("google_takeout_sources", [])),
         ("WhatsApp exports", source_cfg.get("whatsapp_export_sources", [])),
         ("WhatsApp media", source_cfg.get("whatsapp_media_sources", [])),

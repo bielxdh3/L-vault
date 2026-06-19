@@ -7,7 +7,7 @@ from pathlib import Path
 from PIL import Image, ExifTags
 
 from . import db
-from .config import VaultPaths
+from .config import VaultPaths, load_config
 from .extract import safe_extract_zip
 from .reports import RunReport
 from .utils import copy_preserve, guess_mime, sha256_file, unique_path
@@ -30,7 +30,24 @@ def ingest_google_photos_takeout(p: VaultPaths, report: RunReport, dry_run: bool
             for media in root.rglob("*"):
                 if media.is_file() and media.suffix.lower() in PHOTO_EXTS | VIDEO_EXTS:
                     try:
-                        _import_media(conn, p, media, root, report, dry_run)
+                        _import_media(conn, p, media, root, report, dry_run, source="google_photos_takeout")
+                    except Exception as exc:
+                        report.error(media, str(exc))
+    return report
+
+
+def ingest_google_photos_local_sources(p: VaultPaths, report: RunReport, dry_run: bool = False) -> RunReport:
+    cfg = load_config(p.root).get("google_photos", {})
+    sources = [Path(x).expanduser() for x in cfg.get("local_media_sources", []) if str(x).strip()]
+    with db.connect(p.db) as conn:
+        for source in sources:
+            if not source.exists():
+                report.warn(f"Google Photos local source not found: {source}")
+                continue
+            for media in source.rglob("*"):
+                if media.is_file() and media.suffix.lower() in PHOTO_EXTS | VIDEO_EXTS:
+                    try:
+                        _import_media(conn, p, media, source, report, dry_run, source="google_photos_local")
                     except Exception as exc:
                         report.error(media, str(exc))
     return report
@@ -47,7 +64,7 @@ def scan_existing_media(p: VaultPaths, report: RunReport, dry_run: bool = False)
     return report
 
 
-def _import_media(conn, p: VaultPaths, media: Path, root: Path, report: RunReport, dry_run: bool) -> None:
+def _import_media(conn, p: VaultPaths, media: Path, root: Path, report: RunReport, dry_run: bool, source: str) -> None:
     digest = sha256_file(media)
     if conn.execute("SELECT id FROM google_photos_items WHERE sha256=?", (digest,)).fetchone():
         report.skipped_duplicates += 1
@@ -66,7 +83,7 @@ def _import_media(conn, p: VaultPaths, media: Path, root: Path, report: RunRepor
         sidecar_dest = unique_path(dest.with_name(dest.name + ".json"))
         copy_preserve(sidecar, sidecar_dest, dry_run=dry_run)
     if not dry_run:
-        db.upsert_file(conn, sha256=digest, path=dest, original_path=media, media_type=kind, mime_type=guess_mime(dest), size=size, source="google_photos_takeout")
+        db.upsert_file(conn, sha256=digest, path=dest, original_path=media, media_type=kind, mime_type=guess_mime(dest), size=size, source=source)
         conn.execute("""INSERT OR IGNORE INTO google_photos_items
         (filename,path,sidecar_path,original_path,creation_date,exif_date,google_metadata_date,file_size,mime_type,sha256,width,height,album,media_type)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",

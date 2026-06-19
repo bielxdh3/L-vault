@@ -14,6 +14,8 @@ google_photos:
   takeout_only_default: true
   upload_enabled: false
   upload_album: LocalVault Uploads
+  local_media_sources:
+  - E:\LocalVault\inbox\google_photos_sync
 whatsapp:
   copy_media_from: ''
   adb_enabled: false
@@ -32,33 +34,12 @@ automation:
   task_prefix: LocalVault
   execution_time_limit_hours: 8
   tasks:
-    gmail_api_daily:
+    daily_backup:
       enabled: true
-      name: Gmail API Daily
-      command: backup-gmail-api
+      name: Daily Backup
+      command: daily-backup
       frequency: daily
       time: 02:00
-      days: []
-    source_sync_daily:
-      enabled: true
-      name: Source Sync Daily
-      command: sync-sources
-      frequency: daily
-      time: 02:30
-      days: []
-    ingest_all_daily:
-      enabled: true
-      name: All Sources Import Daily
-      command: ingest-all --skip-sync
-      frequency: daily
-      time: 03:00
-      days: []
-    dedupe_daily:
-      enabled: true
-      name: Dedupe Report Daily
-      command: dedupe
-      frequency: daily
-      time: 03:45
       days: []
     verify_weekly:
       enabled: true

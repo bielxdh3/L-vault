@@ -32,6 +32,8 @@ python -m localvault sync-sources --root E:\LocalVault
 python -m localvault ingest-all --root E:\LocalVault
 python -m localvault backup-gmail-api --root E:\LocalVault
 python -m localvault daily-backup --root E:\LocalVault
+python -m localvault photos-sync-local --root E:\LocalVault
+python -m localvault photos-add-source "C:\Caminho\Da\Pasta\Fotos" --root E:\LocalVault
 python -m localvault rename-gmail-files --root E:\LocalVault
 python -m localvault dedupe --root E:\LocalVault
 python -m localvault verify --root E:\LocalVault
@@ -58,6 +60,24 @@ python -m localvault schedule-install --root E:\LocalVault
 ## Limites Seguros
 
 Gmail pode ser automatico via API oficial. Google Photos completo deve usar Takeout; WhatsApp chats dependem de export oficial ou midia acessivel. O sistema nao rouba credenciais, nao descriptografa bancos do WhatsApp e nao apaga dados remotos.
+
+## Google Fotos local
+
+O LocalVault monitora por padrao:
+
+```text
+E:\LocalVault\inbox\google_photos_sync
+```
+
+Qualquer foto ou video colocado nessa pasta entra no backup diario e e copiado para `vault\google_photos`, com deduplicacao por SHA-256.
+
+Para adicionar uma pasta sincronizada do PC:
+
+```powershell
+python -m localvault photos-add-source "C:\Caminho\Da\Pasta\Fotos" --root E:\LocalVault
+```
+
+Observacao: isso monitora uma pasta local. O Google Photos nao oferece mais uma sincronizacao completa automatica da biblioteca antiga via Google Drive; para biblioteca historica completa, use Takeout.
 
 Os arquivos `.eml` do Gmail sao salvos com nomes legiveis no padrao `data_remetente_assunto_id.eml`. Para renomear e-mails antigos ja baixados:
 
