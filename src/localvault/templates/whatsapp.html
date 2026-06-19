@@ -1,0 +1,2 @@
+{% extends "base.html" %}{% block title %}WhatsApp - LocalVault{% endblock %}
+{% block content %}<h1>WhatsApp</h1><div class="list">{% for row in rows %}<a class="row" href="/whatsapp/{{ row.id }}"><strong>{{ row.chat_name }}</strong><span>{{ row.message_count }} messages</span></a>{% endfor %}</div>{% endblock %}

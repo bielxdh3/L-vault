@@ -1,0 +1,51 @@
+{% extends "base.html" %}{% block title %}Dashboard - LocalVault{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<section class="metrics">
+  <div><strong>{{ stats.emails }}</strong><span>Emails no disco</span></div>
+  <div><strong>{{ stats.attachments }}</strong><span>Anexos</span></div>
+  <div><strong>{{ stats.photos }}</strong><span>Fotos</span></div>
+  <div><strong>{{ stats.videos }}</strong><span>Videos</span></div>
+  <div><strong>{{ stats.chats }}</strong><span>Conversas WhatsApp</span></div>
+  <div><strong>{{ "%.2f"|format(stats.storage / 1024 / 1024 / 1024) }} GB</strong><span>Armazenado</span></div>
+</section>
+
+{% if stats.missing_files %}
+<section class="notice">
+  <div>
+    <strong>{{ stats.missing_files }} arquivo(s) ausente(s)</strong>
+    <span>Itens foram excluidos fisicamente e ainda estavam no indice.</span>
+  </div>
+  <form method="post" action="/maintenance/cleanup-missing">
+    <button>Atualizar indice</button>
+  </form>
+</section>
+{% endif %}
+
+<h2>Ultima execucao</h2>
+{% if stats.last_run %}
+<p>{{ stats.last_run.source }} - {{ stats.last_run.mode }} - {{ stats.last_run.status }}</p>
+{% else %}
+<p>Nenhuma execucao registrada.</p>
+{% endif %}
+
+<h2>Arquivos recentes</h2>
+<table>
+  <tr><th>Origem</th><th>Arquivo</th><th>Tamanho</th><th>Status</th><th>Acoes</th></tr>
+  {% for item in recent_files %}
+  <tr>
+    <td><span class="badge">{{ item.source }}</span></td>
+    <td>
+      {% if item.exists %}<a href="/file?path={{ item.path }}">{{ item.name }}</a>{% else %}{{ item.name }}{% endif %}
+      <div class="muted">{{ item.media_type }}</div>
+    </td>
+    <td>{{ "%.2f"|format(item.size / 1024 / 1024) }} MB</td>
+    <td>{% if item.exists %}<span class="ok">No disco</span>{% else %}<span class="missing">Ausente</span>{% endif %}</td>
+    <td class="actions">
+      <form method="post" action="/actions/open-folder?path={{ item.path|urlencode }}"><button type="submit">Pasta</button></form>
+      <form method="post" action="/actions/delete-file?path={{ item.path|urlencode }}" onsubmit="return confirm('Excluir este arquivo local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

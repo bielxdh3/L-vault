@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import email
+import mailbox
+from email import policy
+from pathlib import Path
+
+from . import db
+from .config import VaultPaths
+from .email_names import unique_friendly_email_path
+from .extract import safe_extract_zip
+from .reports import RunReport
+from .utils import guess_mime, sha256_bytes, unique_path
+
+
+def ingest_gmail_takeout(p: VaultPaths, report: RunReport, dry_run: bool = False) -> RunReport:
+    roots = [x for x in p.google_takeout_inbox.iterdir() if x.is_dir()]
+    extracted = p.manual_imports_inbox / "extracted_google_takeout"
+    for zip_path in sorted(p.google_takeout_inbox.glob("*.zip")):
+        try:
+            roots.append(safe_extract_zip(zip_path, extracted, dry_run=dry_run))
+        except Exception as exc:
+            report.error(zip_path, str(exc))
+    with db.connect(p.db) as conn:
+        for root in roots:
+            for mbox in root.rglob("*.mbox"):
+                _import_mbox(conn, p, mbox, report, dry_run)
+    return report
+
+
+def _import_mbox(conn, p: VaultPaths, mbox_path: Path, report: RunReport, dry_run: bool) -> None:
+    box = mailbox.mbox(mbox_path, factory=lambda f: email.message_from_binary_file(f, policy=policy.default))
+    for msg in box:
+        raw = msg.as_bytes(policy=policy.default)
+        digest = sha256_bytes(raw)
+        if conn.execute("SELECT id FROM gmail_messages WHERE raw_sha256=?", (digest,)).fetchone():
+            report.skipped_duplicates += 1
+            continue
+        dest = unique_friendly_email_path(
+            p.gmail_messages,
+            message_date=_h(msg.get("Date")),
+            sender=_h(msg.get("From")),
+            subject=_h(msg.get("Subject")),
+            unique_id=_h(msg.get("Message-ID")) or digest[:16],
+        )
+        if not dry_run:
+            dest.write_bytes(raw)
+            cur = conn.execute("""INSERT OR IGNORE INTO gmail_messages
+            (message_id_header,subject,sender,recipients,cc,bcc,message_date,labels,snippet,eml_path,raw_sha256,source)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (_h(msg.get("Message-ID")), _h(msg.get("Subject")), _h(msg.get("From")), _h(msg.get("To")), _h(msg.get("Cc")), _h(msg.get("Bcc")), _h(msg.get("Date")), _h(msg.get("X-Gmail-Labels")), _snippet(msg), str(dest), digest, "gmail_takeout"))
+            db_id = int(cur.lastrowid)
+            for part in msg.iter_attachments():
+                payload = part.get_payload(decode=True)
+                if payload:
+                    name = part.get_filename() or "attachment.bin"
+                    adigest = sha256_bytes(payload)
+                    adest = unique_path(p.gmail_attachments / digest[:2] / digest / name)
+                    adest.parent.mkdir(parents=True, exist_ok=True)
+                    adest.write_bytes(payload)
+                    conn.execute("INSERT INTO gmail_attachments (gmail_message_id,filename,path,sha256,size,mime_type) VALUES (?,?,?,?,?,?)", (db_id, name, str(adest), adigest, len(payload), part.get_content_type()))
+                    db.upsert_file(conn, sha256=adigest, path=adest, media_type="gmail_attachment", mime_type=part.get_content_type() or guess_mime(adest), size=len(payload), source="gmail_takeout_attachment")
+            db.upsert_file(conn, sha256=digest, path=dest, original_path=mbox_path, media_type="email", mime_type="message/rfc822", size=len(raw), source="gmail_takeout")
+        report.imported_count += 1
+        report.storage_added += len(raw)
+
+
+def _h(value: str | None) -> str | None:
+    return " ".join(str(value).split()) if value else None
+
+
+def _snippet(msg, limit: int = 220) -> str | None:
+    try:
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() == "text/plain":
+                    return " ".join(part.get_content().split())[:limit]
+        if msg.get_content_type() == "text/plain":
+            return " ".join(msg.get_content().split())[:limit]
+    except Exception:
+        return None
+    return None
