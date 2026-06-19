@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 
 from . import db
 from .config import load_config, paths
+from .control_panel import control_panel_data, start_background_command
 from .vault_index import cleanup_missing_index_entries, dashboard_data, delete_local_file_and_index, open_in_explorer, safe_vault_path
 
 PACKAGE_DIR = Path(__file__).parent
@@ -28,10 +29,24 @@ def create_app(root: Path | None = None) -> FastAPI:
         data["request"] = request
         return templates.TemplateResponse(request, "dashboard.html", data)
 
+    @app.get("/control", response_class=HTMLResponse)
+    def control(request: Request):
+        data = control_panel_data(p)
+        data["request"] = request
+        return templates.TemplateResponse(request, "control.html", data)
+
+    @app.post("/control/run")
+    def control_run(command: str = Query(...)):
+        try:
+            start_background_command(p, command)
+        except ValueError:
+            raise HTTPException(400)
+        return RedirectResponse("/control", status_code=303)
+
     @app.post("/maintenance/cleanup-missing")
     def cleanup_missing():
         cleanup_missing_index_entries(p)
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/control", status_code=303)
 
     @app.post("/actions/open-folder")
     def open_folder(path: str = Query(...)):

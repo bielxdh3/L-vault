@@ -1,0 +1,102 @@
+{% extends "base.html" %}{% block title %}Controle - LocalVault{% endblock %}
+{% block content %}
+<h1>Painel de Controle</h1>
+
+<section class="control-grid">
+  <article>
+    <h2>Gmail</h2>
+    {% if gmail_status.ready %}
+      <p><span class="ok">Conectado</span></p>
+    {% else %}
+      <p><span class="missing">Precisa configurar</span></p>
+    {% endif %}
+    <p class="muted">API: {{ "ativa" if gmail_status.api_enabled else "desativada" }} - Token: {{ "ok" if gmail_status.token_exists else "ausente" }}</p>
+  </article>
+
+  <article>
+    <h2>Backup automatico</h2>
+    {% if schedule_status %}
+      {% for task in schedule_status %}
+        <p><span class="badge">{{ task.state }}</span> {{ task.name }}</p>
+      {% endfor %}
+    {% else %}
+      <p><span class="missing">Nenhuma tarefa encontrada</span></p>
+    {% endif %}
+  </article>
+
+  <article>
+    <h2>Arquivos</h2>
+    <p><strong>{{ stats.emails }}</strong> e-mails - <strong>{{ stats.photos }}</strong> fotos - <strong>{{ stats.videos }}</strong> videos</p>
+    {% if stats.missing_files %}
+      <p><span class="missing">{{ stats.missing_files }} ausente(s)</span></p>
+    {% else %}
+      <p><span class="ok">Indice limpo</span></p>
+    {% endif %}
+  </article>
+</section>
+
+<h2>Acoes rapidas</h2>
+<section class="quick-actions">
+  {% for command, label in commands.items() %}
+  <form method="post" action="/control/run?command={{ command }}">
+    <button type="submit">{{ label }}</button>
+  </form>
+  {% endfor %}
+  <form method="post" action="/maintenance/cleanup-missing">
+    <button type="submit">Atualizar indice</button>
+  </form>
+</section>
+
+<h2>Fontes monitoradas</h2>
+<table>
+  <tr><th>Tipo</th><th>Pasta</th><th>Status</th></tr>
+  {% for item in source_status %}
+  <tr>
+    <td>{{ item.label }}</td>
+    <td>{{ item.path }}</td>
+    <td>{% if item.exists %}<span class="ok">Encontrada</span>{% else %}<span class="missing">Ausente</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>Trabalhos manuais</h2>
+{% if running_jobs %}
+<table>
+  <tr><th>Comando</th><th>Status</th><th>Finalizado</th><th>Log</th></tr>
+  {% for job in running_jobs %}
+  <tr>
+    <td>{{ job.command }}</td>
+    <td><span class="badge">{{ job.status }}</span></td>
+    <td>{{ job.finished_at or job.started_at or "" }}</td>
+    <td>{{ job.get("log", "") }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">Nenhum trabalho manual recente.</p>
+{% endif %}
+
+<h2>Ultimas execucoes</h2>
+<table>
+  <tr><th>Inicio</th><th>Origem</th><th>Modo</th><th>Status</th><th>Importados</th><th>Falhas</th></tr>
+  {% for row in runs %}
+  <tr>
+    <td>{{ row.started_at }}</td>
+    <td>{{ row.source }}</td>
+    <td>{{ row.mode }}</td>
+    <td>{{ row.status }}</td>
+    <td>{{ row.imported_count }}</td>
+    <td>{{ row.failed_count }}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+{% if errors %}
+<h2>Erros recentes</h2>
+<ul>
+  {% for row in errors %}
+    <li>{{ row.source }} - {{ row.item_path }} - {{ row.error }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}
