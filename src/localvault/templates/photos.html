@@ -1,0 +1,28 @@
+{% extends "base.html" %}{% block title %}Fotos - LocalVault{% endblock %}
+{% block content %}
+<h1>Drive/Fotos</h1>
+<form class="toolbar">
+  <input name="q" value="{{ q }}" placeholder="Buscar data, arquivo, album">
+  <select name="media_type"><option value="">Todos</option><option value="photo" {% if media_type=="photo" %}selected{% endif %}>Fotos</option><option value="video" {% if media_type=="video" %}selected{% endif %}>Videos</option></select>
+  <button>Filtrar</button>
+</form>
+<section class="grid">
+  {% for item in rows %}
+  <article class="tile">
+    {% if item.exists %}
+      <a href="/file?path={{ item.path }}">{% if item.media_type=="photo" %}<img src="/file?path={{ item.path }}" alt="{{ item.filename }}">{% else %}<div class="video">Video</div>{% endif %}</a>
+    {% else %}
+      <div class="video missing-tile">Ausente</div>
+    {% endif %}
+    <span class="badge">Drive/Fotos</span>
+    <strong>{{ item.filename }}</strong>
+    <span>{% if item.exists %}<span class="ok">No disco</span>{% else %}<span class="missing">Ausente</span>{% endif %}</span>
+    <div class="actions">
+      <form method="post" action="/actions/open-folder?path={{ item.path|urlencode }}"><button type="submit">Pasta</button></form>
+      <form method="post" action="/actions/delete-file?path={{ item.path|urlencode }}" onsubmit="return confirm('Excluir este arquivo local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>
+    </div>
+  </article>
+  {% endfor %}
+</section>
+<p><a href="?q={{ q }}&media_type={{ media_type }}&page={{ page + 1 }}">Proxima pagina</a></p>
+{% endblock %}

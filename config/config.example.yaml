@@ -1,0 +1,70 @@
+vault_root: E:\LocalVault
+viewer:
+  host: 127.0.0.1
+  port: 8787
+  allow_lan: false
+  page_size: 60
+gmail:
+  api_enabled: false
+  credentials_file: E:\LocalVault\config\google_oauth_client_secret.json
+  token_file: E:\LocalVault\config\gmail_token.json
+  modify_remote: false
+  batch_size: 100
+google_photos:
+  takeout_only_default: true
+  upload_enabled: false
+  upload_album: LocalVault Uploads
+whatsapp:
+  copy_media_from: ''
+  adb_enabled: false
+source_sync:
+  enabled: true
+  google_takeout_sources:
+  - C:\Users\bielx\Downloads
+  whatsapp_export_sources:
+  - C:\Users\bielx\Downloads
+  whatsapp_media_sources: []
+safety:
+  minimum_free_gb: 20
+  hash_algorithm: sha256
+  never_delete_sources: true
+automation:
+  task_prefix: LocalVault
+  execution_time_limit_hours: 8
+  tasks:
+    gmail_api_daily:
+      enabled: true
+      name: Gmail API Daily
+      command: backup-gmail-api
+      frequency: daily
+      time: 02:00
+      days: []
+    source_sync_daily:
+      enabled: true
+      name: Source Sync Daily
+      command: sync-sources
+      frequency: daily
+      time: 02:30
+      days: []
+    ingest_all_daily:
+      enabled: true
+      name: All Sources Import Daily
+      command: ingest-all --skip-sync
+      frequency: daily
+      time: 03:00
+      days: []
+    dedupe_daily:
+      enabled: true
+      name: Dedupe Report Daily
+      command: dedupe
+      frequency: daily
+      time: 03:45
+      days: []
+    verify_weekly:
+      enabled: true
+      name: Verify Weekly
+      command: verify
+      frequency: weekly
+      time: 04:00
+      days:
+      - Sunday

@@ -1,0 +1,22 @@
+{% extends "base.html" %}{% block title %}Gmail - LocalVault{% endblock %}
+{% block content %}
+<h1>Gmail</h1>
+<form class="toolbar"><input name="q" value="{{ q }}" placeholder="Buscar remetente, assunto, texto"><button>Buscar</button></form>
+<table>
+  <tr><th>Tipo</th><th>Data</th><th>Remetente</th><th>Assunto</th><th>Status</th><th>Acoes</th></tr>
+  {% for row in rows %}
+  <tr>
+    <td><span class="badge">E-mail</span></td>
+    <td>{{ row.message_date or "" }}</td>
+    <td>{{ row.sender or "" }}</td>
+    <td><a href="/gmail/{{ row.id }}">{{ row.subject or "(sem assunto)" }}</a><div class="muted">{{ row.snippet or "" }}</div></td>
+    <td>{% if row.exists %}<span class="ok">No disco</span>{% else %}<span class="missing">Ausente</span>{% endif %}</td>
+    <td class="actions">
+      {% if row.eml_path %}<form method="post" action="/actions/open-folder?path={{ row.eml_path|urlencode }}"><button type="submit">Pasta</button></form>{% endif %}
+      {% if row.eml_path %}<form method="post" action="/actions/delete-file?path={{ row.eml_path|urlencode }}" onsubmit="return confirm('Excluir este e-mail local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+<p><a href="?q={{ q }}&page={{ page + 1 }}">Proxima pagina</a></p>
+{% endblock %}

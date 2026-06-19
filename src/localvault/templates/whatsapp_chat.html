@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block title %}{{ chat.chat_name }} - LocalVault{% endblock %}
+{% block content %}
+<h1>{{ chat.chat_name }}</h1><form><input name="q" value="{{ q }}" placeholder="Search messages"><button>Search</button></form>
+<section class="chat">{% for row in rows %}<article><small>{{ row.message_dt or "" }} {% if row.sender %}· {{ row.sender }}{% endif %}</small><p>{{ row.text }}</p></article>{% endfor %}</section>
+<p><a href="?q={{ q }}&page={{ page + 1 }}">Next page</a></p>
+{% endblock %}

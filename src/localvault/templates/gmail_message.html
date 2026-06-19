@@ -1,0 +1,23 @@
+{% extends "base.html" %}{% block title %}Email - LocalVault{% endblock %}
+{% block content %}
+<h1>{{ message.subject or "(sem assunto)" }}</h1>
+<p>{{ message.sender }} - {{ message.message_date }} - <span class="badge">E-mail</span></p>
+{% if message.eml_path %}
+<div class="actions">
+  <form method="post" action="/actions/open-folder?path={{ message.eml_path|urlencode }}"><button type="submit">Visualizar na pasta</button></form>
+  <form method="post" action="/actions/delete-file?path={{ message.eml_path|urlencode }}" onsubmit="return confirm('Excluir este e-mail local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>
+</div>
+{% endif %}
+{% if not message.exists %}<p class="missing">Arquivo .eml ausente no disco.</p>{% endif %}
+{% if attachments %}
+<h2>Anexos</h2>
+<ul>
+  {% for item in attachments %}
+  <li>
+    {% if item.exists %}<a href="/file?path={{ item.path }}">{{ item.filename }}</a>{% else %}{{ item.filename }} <span class="missing">ausente</span>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+<pre class="body">{{ body }}</pre>
+{% endblock %}

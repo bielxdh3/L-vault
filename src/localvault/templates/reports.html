@@ -1,0 +1,5 @@
+{% extends "base.html" %}{% block title %}Reports - LocalVault{% endblock %}
+{% block content %}
+<h1>Reports</h1><table><tr><th>Started</th><th>Source</th><th>Mode</th><th>Status</th><th>Imported</th><th>Failed</th></tr>{% for row in runs %}<tr><td>{{ row.started_at }}</td><td>{{ row.source }}</td><td>{{ row.mode }}</td><td>{{ row.status }}</td><td>{{ row.imported_count }}</td><td>{{ row.failed_count }}</td></tr>{% endfor %}</table>
+<h2>Errors</h2><ul>{% for row in errors %}<li>{{ row.source }} · {{ row.item_path }} · {{ row.error }}</li>{% endfor %}</ul>
+{% endblock %}
