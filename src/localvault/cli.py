@@ -17,6 +17,7 @@ from .dedupe import build_duplicate_report
 from .gmail_api import backup_gmail_api as run_gmail_api
 from .gmail_maintenance import rename_existing_gmail_files
 from .gmail_takeout import ingest_gmail_takeout
+from .health import health_snapshot
 from .photos import ingest_google_photos_local_sources, ingest_google_photos_takeout, scan_existing_media
 from .reports import RunReport, finish_run, start_run
 from .scheduler import generate_schedule_files, list_windows_tasks, run_powershell_script
@@ -24,6 +25,7 @@ from .source_sync import sync_sources as run_source_sync
 from .utils import free_space_bytes, utc_now
 from .verify import verify_vault
 from .viewer import create_app
+from .vault_index import cleanup_missing_index_entries
 from .whatsapp import copy_whatsapp_media_folder, ingest_whatsapp_exports
 
 app = typer.Typer(help="LocalVault Backup Manager", invoke_without_command=True)
@@ -142,6 +144,9 @@ def daily_backup(root: Path = root_option(), dry_run: bool = dry_option()):
     p = prepare(root)
     report = start_run(p.db, RunReport(source="localvault", mode="daily_backup_dry_run" if dry_run else "daily_backup"))
     try:
+        removed = cleanup_missing_index_entries(p)
+        if removed:
+            report.warn(f"Cleaned {removed} missing index entries before backup.")
         run_gmail_api(p, report, dry_run=dry_run)
         run_source_sync(p, report, dry_run=dry_run)
         ingest_google_photos_local_sources(p, report, dry_run=dry_run)
@@ -149,6 +154,7 @@ def daily_backup(root: Path = root_option(), dry_run: bool = dry_option()):
         ingest_gmail_takeout(p, report, dry_run=dry_run)
         ingest_whatsapp_exports(p, report, dry_run=dry_run)
         build_duplicate_report(p, report, dry_run=dry_run)
+        verify_vault(p, report, dry_run=False, sample_limit=100)
         status = "ok" if report.failed_count == 0 else "warning"
     except Exception as exc:
         report.error("daily_backup", str(exc)); status = "failed"
@@ -265,6 +271,23 @@ def dedupe(root: Path = root_option(), dry_run: bool = dry_option()):
 @app.command("verify")
 def verify(root: Path = root_option(), sample_limit: Optional[int] = typer.Option(None, "--sample-limit")):
     print_summary(run_with_report(root, "vault", "verify", verify_vault, dry_run=False, sample_limit=sample_limit))
+
+
+@app.command("repair-index")
+def repair_index(root: Path = root_option()):
+    p = prepare(root)
+    removed = cleanup_missing_index_entries(p)
+    console.print(f"Removed missing index entries: {removed}")
+
+
+@app.command("health-check")
+def health_check(root: Path = root_option()):
+    p = prepare(root)
+    health = health_snapshot(p)
+    console.print(f"Status: {health['status']}")
+    for item in health["checks"]:
+        marker = "OK" if item["ok"] else "ATENCAO"
+        console.print(f"{marker} - {item['name']}: {item['detail']}")
 
 
 @app.command("serve")

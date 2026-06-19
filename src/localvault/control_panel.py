@@ -10,6 +10,7 @@ from typing import Any
 
 from . import db
 from .config import VaultPaths, load_config
+from .health import health_snapshot
 from .vault_index import dashboard_data
 
 
@@ -19,6 +20,8 @@ ALLOWED_COMMANDS = {
     "sync-sources": "Sincronizar fontes",
     "ingest-all": "Importar inbox",
     "verify": "Verificar cofre",
+    "health-check": "Checar saude",
+    "repair-index": "Reparar indice",
     "dedupe": "Relatorio de duplicados",
 }
 
@@ -31,6 +34,7 @@ def control_panel_data(p: VaultPaths) -> dict[str, Any]:
         errors = conn.execute("SELECT * FROM import_errors ORDER BY id DESC LIMIT 8").fetchall()
     return {
         "stats": dash["stats"],
+        "health": health_snapshot(p),
         "gmail_status": _gmail_status(p, cfg),
         "source_status": _source_status(p, cfg),
         "schedule_status": _schedule_status(cfg),

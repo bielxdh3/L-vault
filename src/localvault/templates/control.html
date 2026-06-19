@@ -2,6 +2,22 @@
 {% block content %}
 <h1>Painel de Controle</h1>
 
+<section class="health-panel {{ health.status }}">
+  <div>
+    <h2>Saude do backup</h2>
+    {% if health.status == "ok" %}
+      <p><span class="ok">Tudo certo</span></p>
+    {% else %}
+      <p><span class="missing">Precisa de atencao</span></p>
+    {% endif %}
+  </div>
+  <div class="health-checks">
+    {% for check in health.checks %}
+      <p>{% if check.ok %}<span class="ok">OK</span>{% else %}<span class="missing">Atencao</span>{% endif %} - <strong>{{ check.name }}</strong>: {{ check.detail }}</p>
+    {% endfor %}
+  </div>
+</section>
+
 <section class="control-grid">
   <article>
     <h2>Gmail</h2>
