@@ -39,7 +39,9 @@ def auto_takeout(p: VaultPaths, report: RunReport, dry_run: bool = False) -> Run
                 moved += 1
                 report.imported_count += 1
                 report.storage_added += dest.stat().st_size
-            except (OSError, zipfile.BadZipFile, ValueError) as exc:
+            except zipfile.BadZipFile as exc:
+                report.warn(f"Ignored invalid ZIP: {zip_path} ({exc})")
+            except (OSError, ValueError) as exc:
                 report.error(zip_path, str(exc))
     if moved:
         ingest_photos_takeout(p, report, dry_run=False)
@@ -64,12 +66,12 @@ def _candidate_zip(path: Path) -> bool:
 def _is_takeout_zip(zip_path: Path) -> bool:
     infos = safe_zip_infos(zip_path)
     for info in infos:
-        if info.is_dir():
-            continue
         name = safe_zip_member_name(info.filename).lower()
         parts = [part for part in name.split("/") if part]
         if any(part in {"takeout", "google photos", "google fotos", "mail", "gmail"} for part in parts):
             return True
+        if info.is_dir():
+            continue
         if Path(name).suffix.lower() == ".mbox":
             return True
         if "takeout" in parts and Path(name).suffix.lower() in PHOTO_EXTS | VIDEO_EXTS:
