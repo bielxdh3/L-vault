@@ -48,6 +48,11 @@ def create_app(root: Path | None = None) -> FastAPI:
         start_background_command(p, "daily-backup")
         return RedirectResponse("/", status_code=303)
 
+    @app.get("/dashboard/backup-now")
+    def dashboard_backup_now_get():
+        start_background_command(p, "daily-backup")
+        return RedirectResponse("/", status_code=303)
+
     @app.post("/maintenance/cleanup-missing")
     def cleanup_missing():
         cleanup_missing_index_entries(p)
