@@ -35,6 +35,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "execution_time_limit_hours": 8,
         "tasks": {
             "daily_backup": {"enabled": True, "name": "Daily Backup", "command": "daily-backup", "frequency": "daily", "time": "02:00", "days": []},
+            "weekly_takeout": {"enabled": True, "name": "Weekly Takeout Import", "command": "auto-takeout", "frequency": "weekly", "time": "03:00", "days": ["Sunday"]},
             "verify_weekly": {"enabled": True, "name": "Verify Weekly", "command": "verify", "frequency": "weekly", "time": "04:00", "days": ["Sunday"]},
         },
     },

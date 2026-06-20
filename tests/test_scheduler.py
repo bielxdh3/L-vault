@@ -28,6 +28,14 @@ def test_schedule_uses_daily_backup_and_start_when_available(tmp_path: Path):
                     "time": "04:00",
                     "days": ["Sunday"],
                 },
+                "weekly_takeout": {
+                    "enabled": True,
+                    "name": "Weekly Takeout Import",
+                    "command": "auto-takeout",
+                    "frequency": "weekly",
+                    "time": "03:00",
+                    "days": ["Sunday"],
+                },
             }
         }
     }), encoding="utf-8")
@@ -36,6 +44,9 @@ def test_schedule_uses_daily_backup_and_start_when_available(tmp_path: Path):
     install = files.install.read_text(encoding="utf-8")
     assert "LocalVault Daily Backup" in install
     assert 'Command="daily-backup"' in install
+    assert "LocalVault Weekly Takeout Import" in install
+    assert 'Command="auto-takeout"' in install
+    assert 'Frequency="Weekly"' in install
     assert "-StartWhenAvailable" in install
     assert "-RunLevel Highest" in install
     assert "LocalVault Gmail API Daily" not in install
