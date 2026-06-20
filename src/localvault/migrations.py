@@ -7,6 +7,7 @@ import yaml
 
 from . import db
 from .config import VaultPaths, load_config
+from .utils import sha256_file
 
 
 OLD_MEDIA_ROOT = "vault\\google_photos"
@@ -50,9 +51,12 @@ def _merge_tree(source: Path, target: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists():
             if item.stat().st_size == dest.stat().st_size:
-                item.unlink()
-                continue
-            dest = _unique_path(dest)
+                if sha256_file(item) == sha256_file(dest):
+                    item.unlink()
+                    continue
+                dest = _unique_path(dest)
+            else:
+                dest = _unique_path(dest)
         shutil.move(str(item), str(dest))
 
 

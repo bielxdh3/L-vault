@@ -47,3 +47,22 @@ def test_migration_moves_old_photo_vault_and_rewrites_database(tmp_path: Path):
     cfg = yaml.safe_load((p.config / "config.yaml").read_text(encoding="utf-8"))
     assert "google_photos" not in cfg
     assert cfg["photos"]["takeout_enabled"] is True
+
+
+def test_migration_preserves_same_size_files_with_different_content(tmp_path: Path):
+    root = tmp_path / "vault"
+    p = ensure_directories(root)
+    db.init_db(p.db)
+    old_photo = p.root / "vault" / "google_photos" / "photos" / "2026" / "06" / "photo.jpg"
+    new_photo = p.root / "vault" / "fotos" / "imagens" / "2026" / "06" / "photo.jpg"
+    old_photo.parent.mkdir(parents=True)
+    new_photo.parent.mkdir(parents=True)
+    old_photo.write_bytes(b"old!")
+    new_photo.write_bytes(b"new!")
+
+    migrate_to_takeout_photos(p)
+
+    preserved_old_photo = new_photo.with_name("photo_1.jpg")
+    assert new_photo.read_bytes() == b"new!"
+    assert preserved_old_photo.read_bytes() == b"old!"
+    assert not old_photo.exists()
