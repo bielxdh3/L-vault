@@ -32,6 +32,7 @@ def control_panel_data(p: VaultPaths) -> dict[str, Any]:
     with db.connect(p.db) as conn:
         runs = conn.execute("SELECT * FROM backup_runs ORDER BY id DESC LIMIT 8").fetchall()
         errors = conn.execute("SELECT * FROM import_errors ORDER BY id DESC LIMIT 8").fetchall()
+        cleanup = conn.execute("SELECT status,COUNT(*) count FROM local_source_cleanup_queue GROUP BY status").fetchall()
     return {
         "stats": dash["stats"],
         "health": health_snapshot(p),
@@ -42,6 +43,7 @@ def control_panel_data(p: VaultPaths) -> dict[str, Any]:
         "errors": errors,
         "commands": ALLOWED_COMMANDS,
         "running_jobs": _running_jobs(p),
+        "cleanup_queue": cleanup,
     }
 
 

@@ -11,6 +11,7 @@ from .config import VaultPaths, load_config
 from .email_names import sanitize_filename_component
 from .extract import safe_extract_zip
 from .reports import RunReport
+from .source_cleanup import maybe_queue_cleanup
 from .utils import copy_preserve, guess_mime, sha256_file, unique_path
 
 PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".tif", ".tiff", ".bmp"}
@@ -84,6 +85,9 @@ def _import_media(conn, p: VaultPaths, media: Path, root: Path, report: RunRepor
             base = base / part
     dest = unique_path(base / year / month / media.name)
     size = copy_preserve(media, dest, dry_run=dry_run)
+    if not dry_run and sha256_file(dest) != digest:
+        dest.unlink(missing_ok=True)
+        raise ValueError("Copied file failed SHA-256 verification.")
     sidecar_dest = None
     if sidecar:
         sidecar_dest = unique_path(dest.with_name(dest.name + ".json"))
@@ -94,6 +98,7 @@ def _import_media(conn, p: VaultPaths, media: Path, root: Path, report: RunRepor
         (filename,path,sidecar_path,original_path,creation_date,exif_date,google_metadata_date,file_size,mime_type,sha256,width,height,album,media_type)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (dest.name, str(dest), str(sidecar_dest) if sidecar_dest else None, str(media), created, exif_date, gdate, size, guess_mime(dest), digest, width, height, _album(media, root), kind))
+        maybe_queue_cleanup(conn, p, original=media, vault_path=dest, sha256=digest, source=source, run_id=report.run_id)
     report.imported_count += 1
     report.storage_added += size
 
