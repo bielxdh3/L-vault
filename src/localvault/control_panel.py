@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,8 @@ ALLOWED_COMMANDS = {
     "repair-index": "Reparar indice",
     "dedupe": "Relatorio de duplicados",
 }
+BACKUP_LOCK_TIMEOUT = timedelta(hours=12)
+BACKUP_COMMANDS = {"daily-backup", "photos-ingest-takeout", "backup-gmail-api", "ingest-all"}
 
 
 def control_panel_data(p: VaultPaths) -> dict[str, Any]:
@@ -52,7 +54,7 @@ def start_background_command(p: VaultPaths, command: str) -> Path:
     if command not in ALLOWED_COMMANDS:
         raise ValueError("Unsupported command.")
     p.logs.mkdir(parents=True, exist_ok=True)
-    if command in {"daily-backup", "photos-ingest-takeout", "backup-gmail-api", "ingest-all"} and _backup_running(p):
+    if command in BACKUP_COMMANDS and _backup_running(p):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         status_path = p.logs / f"manual_{stamp}_{command}_skipped.json"
         status_path.write_text(json.dumps({
@@ -148,9 +150,28 @@ def _backup_running(p: VaultPaths) -> bool:
             continue
         if payload.get("status") != "running":
             continue
-        if payload.get("command") in {"daily-backup", "photos-ingest-takeout", "backup-gmail-api", "ingest-all"}:
+        if payload.get("command") in BACKUP_COMMANDS and _running_status_is_fresh(payload, status):
             return True
     return False
+
+
+def _running_status_is_fresh(payload: dict[str, Any], status_path: Path) -> bool:
+    started = _parse_datetime(payload.get("started_at"))
+    if started is None:
+        started = datetime.fromtimestamp(status_path.stat().st_mtime, timezone.utc)
+    return datetime.now(timezone.utc) - started <= BACKUP_LOCK_TIMEOUT
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        return None
 
 
 def _python_executable() -> str:

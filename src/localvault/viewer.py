@@ -156,9 +156,9 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.get("/file")
     def file(path: str = Query(...)):
-        requested = Path(path).resolve()
-        root_resolved = p.root.resolve()
-        if root_resolved != requested and root_resolved not in requested.parents:
+        try:
+            requested = safe_vault_path(p.root, path, require_vault=True)
+        except ValueError:
             raise HTTPException(403)
         if not requested.exists() or not requested.is_file():
             raise HTTPException(404)

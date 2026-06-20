@@ -68,6 +68,12 @@ def run_with_report(root: Path, source: str, mode: str, func, dry_run: bool = Fa
     return report
 
 
+def finish_cli_command(report: RunReport) -> None:
+    print_summary(report)
+    if report.status == "failed":
+        raise typer.Exit(1)
+
+
 @app.callback()
 def main(version: bool = typer.Option(False, "--version", help="Show version and exit.")):
     if version:
@@ -86,7 +92,7 @@ def init(root: Path = root_option()):
 
 @app.command("sync-sources")
 def sync_sources(root: Path = root_option(), dry_run: bool = dry_option()):
-    print_summary(run_with_report(root, "source_sync", "sync_sources", run_source_sync, dry_run=dry_run))
+    finish_cli_command(run_with_report(root, "source_sync", "sync_sources", run_source_sync, dry_run=dry_run))
 
 
 @app.command("ingest-takeout")
@@ -100,7 +106,7 @@ def ingest_takeout(root: Path = root_option(), dry_run: bool = dry_option()):
     except Exception as exc:
         report.error("google_takeout", str(exc)); status = "failed"
     finish_run(p.db, p.reports, report, status=status)
-    print_summary(report)
+    finish_cli_command(report)
 
 
 @app.command("ingest-whatsapp")
@@ -115,7 +121,7 @@ def ingest_whatsapp(root: Path = root_option(), dry_run: bool = dry_option(), me
     except Exception as exc:
         report.error("whatsapp", str(exc)); status = "failed"
     finish_run(p.db, p.reports, report, status=status)
-    print_summary(report)
+    finish_cli_command(report)
 
 
 @app.command("ingest-all")
@@ -133,12 +139,12 @@ def ingest_all(root: Path = root_option(), dry_run: bool = dry_option(), skip_sy
     except Exception as exc:
         report.error("all_sources", str(exc)); status = "failed"
     finish_run(p.db, p.reports, report, status=status)
-    print_summary(report)
+    finish_cli_command(report)
 
 
 @app.command("backup-gmail-api")
 def backup_gmail_api(root: Path = root_option(), dry_run: bool = dry_option(), max_messages: Optional[int] = typer.Option(None, "--max-messages")):
-    print_summary(run_with_report(root, "gmail", "api", run_gmail_api, dry_run=dry_run, max_messages=max_messages))
+    finish_cli_command(run_with_report(root, "gmail", "api", run_gmail_api, dry_run=dry_run, max_messages=max_messages))
 
 
 @app.command("daily-backup")
@@ -155,37 +161,36 @@ def daily_backup(root: Path = root_option(), dry_run: bool = dry_option()):
         ingest_gmail_takeout(p, report, dry_run=dry_run)
         ingest_whatsapp_exports(p, report, dry_run=dry_run)
         build_duplicate_report(p, report, dry_run=dry_run)
-        verify_vault(p, report, dry_run=False, sample_limit=100)
         verify_vault(p, report, dry_run=False, sample_limit=None)
         status = "ok" if report.failed_count == 0 else "warning"
     except Exception as exc:
         report.error("daily_backup", str(exc)); status = "failed"
     finish_run(p.db, p.reports, report, status=status)
-    print_summary(report)
+    finish_cli_command(report)
 
 
 @app.command("rename-gmail-files")
 def rename_gmail_files(root: Path = root_option(), dry_run: bool = dry_option()):
     """Rename already imported Gmail .eml files with readable Windows-safe names."""
-    print_summary(run_with_report(root, "gmail", "rename_files", rename_existing_gmail_files, dry_run=dry_run))
+    finish_cli_command(run_with_report(root, "gmail", "rename_files", rename_existing_gmail_files, dry_run=dry_run))
 
 
 @app.command("gmail-dedupe-audit")
 def gmail_dedupe_audit(root: Path = root_option(), dry_run: bool = dry_option()):
     """Generate a Gmail duplicate/orphan audit report without deleting anything."""
-    print_summary(run_with_report(root, "gmail", "dedupe_audit", audit_gmail_duplicates, dry_run=dry_run))
+    finish_cli_command(run_with_report(root, "gmail", "dedupe_audit", audit_gmail_duplicates, dry_run=dry_run))
 
 
 @app.command("gmail-repair-runs")
 def gmail_repair_runs(root: Path = root_option(), dry_run: bool = dry_option(), older_than_hours: int = typer.Option(6, "--older-than-hours")):
     """Mark old stuck Gmail runs as warning so the dashboard is not misleading."""
-    print_summary(run_with_report(root, "gmail", "repair_runs", repair_stale_gmail_runs, dry_run=dry_run, older_than_hours=older_than_hours))
+    finish_cli_command(run_with_report(root, "gmail", "repair_runs", repair_stale_gmail_runs, dry_run=dry_run, older_than_hours=older_than_hours))
 
 
 @app.command("photos-ingest-takeout")
 def photos_ingest_takeout(root: Path = root_option(), dry_run: bool = dry_option()):
     """Import photos and videos from Google Takeout ZIPs in the inbox."""
-    print_summary(run_with_report(root, "photos_takeout", "takeout", ingest_photos_takeout, dry_run=dry_run))
+    finish_cli_command(run_with_report(root, "photos_takeout", "takeout", ingest_photos_takeout, dry_run=dry_run))
 
 
 @app.command("write-gmail-oauth")
@@ -255,18 +260,18 @@ def open_inboxes(root: Path = root_option()):
 
 @app.command("scan-media")
 def scan_media(root: Path = root_option(), dry_run: bool = dry_option()):
-    print_summary(run_with_report(root, "vault", "scan_media", scan_existing_media, dry_run=dry_run))
+    finish_cli_command(run_with_report(root, "vault", "scan_media", scan_existing_media, dry_run=dry_run))
 
 
 @app.command("dedupe")
 def dedupe(root: Path = root_option(), dry_run: bool = dry_option()):
     report = run_with_report(root, "vault", "dedupe", build_duplicate_report, dry_run=dry_run)
-    print_summary(report)
+    finish_cli_command(report)
 
 
 @app.command("verify")
 def verify(root: Path = root_option(), sample_limit: Optional[int] = typer.Option(None, "--sample-limit")):
-    print_summary(run_with_report(root, "vault", "verify", verify_vault, dry_run=False, sample_limit=sample_limit))
+    finish_cli_command(run_with_report(root, "vault", "verify", verify_vault, dry_run=False, sample_limit=sample_limit))
 
 
 @app.command("repair-index")
