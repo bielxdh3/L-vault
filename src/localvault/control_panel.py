@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import ctypes
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -79,7 +80,16 @@ def start_background_command(p: VaultPaths, command: str) -> Path:
     )
     runner = p.logs / f"manual_{stamp}_{command}.ps1"
     runner.write_text(script, encoding="utf-8")
-    subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(runner)], cwd=str(p.root), creationflags=_hidden_process_flag())
+    if command == "onedrive-backup-cleanup" and os.name == "nt" and not _is_elevated():
+        status_path.write_text(json.dumps({
+            "command": command,
+            "status": "waiting_for_permission",
+            "reason": "Windows UAC permission is required to clean protected OneDrive folders.",
+            "started_at": datetime.now().isoformat(),
+        }, ensure_ascii=False), encoding="utf-8")
+        _start_elevated_runner(runner, p.root)
+    else:
+        subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(runner)], cwd=str(p.root), creationflags=_hidden_process_flag())
     return log_path
 
 
@@ -161,3 +171,22 @@ def _python_executable() -> str:
 
 def _hidden_process_flag() -> int:
     return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
+def _is_elevated() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _start_elevated_runner(runner: Path, cwd: Path) -> None:
+    runner_arg = str(runner).replace('"', '`"')
+    command = (
+        "Start-Process -FilePath powershell.exe "
+        f"-ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{runner_arg}\"' "
+        "-Verb RunAs -WindowStyle Hidden"
+    )
+    subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], cwd=str(cwd), creationflags=_hidden_process_flag())
