@@ -5,9 +5,13 @@
     <h1>Dashboard</h1>
     <p class="muted">Resumo local do cofre e dos backups.</p>
   </div>
-  <form method="post" action="/dashboard/backup-now" onsubmit="return confirm('Iniciar backup agora?')">
-    <button class="primary-action" type="submit">Fazer backup agora</button>
-  </form>
+  <div class="backup-form">
+    {% for value, label in backup_choices.items() %}
+      <form method="post" action="/dashboard/run-backup?command={{ value }}" onsubmit="return confirm('Iniciar {{ label }}?')">
+        <button class="{{ 'primary-action' if loop.first else '' }}" type="submit">{{ label }}</button>
+      </form>
+    {% endfor %}
+  </div>
 </section>
 <section class="metrics">
   <div><strong>{{ stats.emails }}</strong><span>Emails no disco</span></div>
@@ -50,7 +54,7 @@
     <td>{{ "%.2f"|format(item.size / 1024 / 1024) }} MB</td>
     <td>{% if item.exists %}<span class="ok">No disco</span>{% else %}<span class="missing">Ausente</span>{% endif %}</td>
     <td class="actions">
-      <form method="post" action="/actions/open-folder?path={{ item.path|urlencode }}"><button type="submit">Pasta</button></form>
+      <form method="post" action="/actions/open-folder?path={{ item.path|urlencode }}"><button type="submit">Vault</button></form>
       <form method="post" action="/actions/delete-file?path={{ item.path|urlencode }}" onsubmit="return confirm('Excluir este arquivo local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>
     </td>
   </tr>

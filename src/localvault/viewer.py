@@ -27,6 +27,11 @@ def create_app(root: Path | None = None) -> FastAPI:
     def dashboard(request: Request):
         data = dashboard_data(p)
         data["request"] = request
+        data["backup_choices"] = {
+            "onedrive-backup-cleanup": "OneDrive/Fotos e liberar espaco",
+            "backup-gmail-api": "Somente Gmail",
+            "daily-backup": "Tudo: Gmail, fotos e WhatsApp",
+        }
         return templates.TemplateResponse(request, "dashboard.html", data)
 
     @app.get("/control", response_class=HTMLResponse)
@@ -45,12 +50,19 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.post("/dashboard/backup-now")
     def dashboard_backup_now():
-        start_background_command(p, "daily-backup")
+        start_background_command(p, "onedrive-backup-cleanup")
         return RedirectResponse("/", status_code=303)
 
     @app.get("/dashboard/backup-now")
     def dashboard_backup_now_get():
-        start_background_command(p, "daily-backup")
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/dashboard/run-backup")
+    def dashboard_run_backup(command: str = Query("onedrive-backup-cleanup")):
+        try:
+            start_background_command(p, command)
+        except ValueError:
+            raise HTTPException(400)
         return RedirectResponse("/", status_code=303)
 
     @app.post("/maintenance/cleanup-missing")
