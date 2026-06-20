@@ -19,9 +19,7 @@ def safe_extract_zip(zip_path: Path, dest_root: Path, dry_run: bool = False) -> 
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path) as archive:
         for info in archive.infolist():
-            name = info.filename.replace("\\", "/")
-            if name.startswith("/") or name.startswith("../") or "/../" in name:
-                raise ValueError(f"Unsafe ZIP path blocked: {info.filename}")
+            name = safe_zip_member_name(info.filename)
             target = dest / name
             if not is_within_directory(dest, target):
                 raise ValueError(f"Unsafe ZIP path blocked: {info.filename}")
@@ -32,3 +30,18 @@ def safe_extract_zip(zip_path: Path, dest_root: Path, dry_run: bool = False) -> 
                 with archive.open(info) as src, target.open("wb") as out:
                     out.write(src.read())
     return dest
+
+
+def safe_zip_member_name(filename: str) -> str:
+    name = filename.replace("\\", "/")
+    if name.startswith("/") or name.startswith("../") or "/../" in name:
+        raise ValueError(f"Unsafe ZIP path blocked: {filename}")
+    return name
+
+
+def safe_zip_infos(zip_path: Path) -> list[zipfile.ZipInfo]:
+    with zipfile.ZipFile(zip_path) as archive:
+        infos = archive.infolist()
+        for info in infos:
+            safe_zip_member_name(info.filename)
+    return infos

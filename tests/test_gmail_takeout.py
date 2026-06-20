@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from email.message import EmailMessage
 from pathlib import Path
+from zipfile import ZipFile
 
 from localvault import db
 from localvault.config import ensure_directories
@@ -31,6 +32,23 @@ def test_gmail_takeout_sanitizes_dangerous_attachment_filename(tmp_path: Path):
     assert attachment_path.is_file()
     assert p.gmail_attachments in attachment_path.parents
     assert attachment_path.read_bytes() == b"payload"
+
+
+def test_gmail_takeout_dry_run_counts_mbox_inside_zip_without_extracting(tmp_path: Path):
+    p = ensure_directories(tmp_path / "vault")
+    db.init_db(p.db)
+    archive = p.google_takeout_inbox / "takeout.zip"
+    with ZipFile(archive, "w") as zf:
+        zf.writestr("Takeout/Mail/mail.mbox", _mbox_message_with_attachment("safe.txt"))
+
+    report = ingest_gmail_takeout(p, RunReport(source="gmail", mode="takeout"), dry_run=True)
+
+    assert report.imported_count == 1
+    assert not (p.manual_imports_inbox / "extracted_google_takeout").exists()
+    assert not any(p.gmail_messages.rglob("*.eml"))
+    with db.connect(p.db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM gmail_messages").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM gmail_attachments").fetchone()[0] == 0
 
 
 def _mbox_message_with_attachment(filename: str) -> str:

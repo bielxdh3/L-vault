@@ -9,7 +9,7 @@ from PIL import Image, ExifTags
 from . import db
 from .config import VaultPaths
 from .email_names import sanitize_filename_component
-from .extract import safe_extract_zip
+from .extract import safe_extract_zip, safe_zip_infos, safe_zip_member_name
 from .reports import RunReport
 from .utils import copy_preserve, guess_mime, sha256_file, unique_path
 
@@ -22,7 +22,10 @@ def ingest_photos_takeout(p: VaultPaths, report: RunReport, dry_run: bool = Fals
     roots = []
     for zip_path in sorted(p.google_takeout_inbox.glob("*.zip")):
         try:
-            roots.append(safe_extract_zip(zip_path, extracted_root, dry_run=dry_run))
+            if dry_run:
+                _dry_run_photos_zip(zip_path, report)
+            else:
+                roots.append(safe_extract_zip(zip_path, extracted_root, dry_run=dry_run))
         except Exception as exc:
             report.error(zip_path, str(exc))
     roots.extend([x for x in p.google_takeout_inbox.iterdir() if x.is_dir()])
@@ -35,6 +38,16 @@ def ingest_photos_takeout(p: VaultPaths, report: RunReport, dry_run: bool = Fals
                     except Exception as exc:
                         report.error(media, str(exc))
     return report
+
+
+def _dry_run_photos_zip(zip_path: Path, report: RunReport) -> None:
+    for info in safe_zip_infos(zip_path):
+        if info.is_dir():
+            continue
+        name = safe_zip_member_name(info.filename)
+        if Path(name).suffix.lower() in PHOTO_EXTS | VIDEO_EXTS:
+            report.imported_count += 1
+            report.storage_added += int(info.file_size or 0)
 
 
 def scan_existing_media(p: VaultPaths, report: RunReport, dry_run: bool = False) -> RunReport:
