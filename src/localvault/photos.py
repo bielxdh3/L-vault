@@ -8,6 +8,7 @@ from PIL import Image, ExifTags
 
 from . import db
 from .config import VaultPaths, load_config
+from .email_names import sanitize_filename_component
 from .extract import safe_extract_zip
 from .reports import RunReport
 from .utils import copy_preserve, guess_mime, sha256_file, unique_path
@@ -39,6 +40,7 @@ def ingest_google_photos_takeout(p: VaultPaths, report: RunReport, dry_run: bool
 def ingest_google_photos_local_sources(p: VaultPaths, report: RunReport, dry_run: bool = False) -> RunReport:
     cfg = load_config(p.root).get("google_photos", {})
     sources = [Path(x).expanduser() for x in cfg.get("local_media_sources", []) if str(x).strip()]
+    preserve_folders = bool(cfg.get("preserve_folder_structure", True))
     with db.connect(p.db) as conn:
         for source in sources:
             if not source.exists():
@@ -47,7 +49,7 @@ def ingest_google_photos_local_sources(p: VaultPaths, report: RunReport, dry_run
             for media in source.rglob("*"):
                 if media.is_file() and media.suffix.lower() in PHOTO_EXTS | VIDEO_EXTS:
                     try:
-                        _import_media(conn, p, media, source, report, dry_run, source="google_photos_local")
+                        _import_media(conn, p, media, source, report, dry_run, source="google_photos_local", preserve_folders=preserve_folders)
                     except Exception as exc:
                         report.error(media, str(exc))
     return report
@@ -64,7 +66,7 @@ def scan_existing_media(p: VaultPaths, report: RunReport, dry_run: bool = False)
     return report
 
 
-def _import_media(conn, p: VaultPaths, media: Path, root: Path, report: RunReport, dry_run: bool, source: str) -> None:
+def _import_media(conn, p: VaultPaths, media: Path, root: Path, report: RunReport, dry_run: bool, source: str, preserve_folders: bool = False) -> None:
     digest = sha256_file(media)
     if conn.execute("SELECT id FROM google_photos_items WHERE sha256=?", (digest,)).fetchone():
         report.skipped_duplicates += 1
@@ -76,7 +78,11 @@ def _import_media(conn, p: VaultPaths, media: Path, root: Path, report: RunRepor
     created = gdate or exif_date or datetime.fromtimestamp(media.stat().st_mtime, timezone.utc).isoformat()
     year, month = _year_month(created)
     kind = "video" if media.suffix.lower() in VIDEO_EXTS else "photo"
-    dest = unique_path((p.videos if kind == "video" else p.photos) / year / month / media.name)
+    base = p.videos if kind == "video" else p.photos
+    if preserve_folders:
+        for part in _folder_parts(media, root):
+            base = base / part
+    dest = unique_path(base / year / month / media.name)
     size = copy_preserve(media, dest, dry_run=dry_run)
     sidecar_dest = None
     if sidecar:
@@ -141,3 +147,14 @@ def _album(path: Path, root: Path) -> str | None:
         return rel.parts[-2] if len(rel.parts) >= 2 else None
     except Exception:
         return None
+
+
+def _folder_parts(path: Path, root: Path) -> list[str]:
+    try:
+        rel_parent = path.relative_to(root).parent
+        raw_parts = list(rel_parent.parts)
+    except Exception:
+        raw_parts = []
+    if not raw_parts or raw_parts == ["."]:
+        raw_parts = [root.name]
+    return [sanitize_filename_component(part, "pasta", max_length=48) for part in raw_parts[-3:]]

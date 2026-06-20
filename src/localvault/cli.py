@@ -192,6 +192,36 @@ def photos_add_source(folder: Path, root: Path = root_option()):
     console.print(f"[green]Google Photos local source added:[/] {folder}")
 
 
+@app.command("photos-connect-onedrive")
+def photos_connect_onedrive(root: Path = root_option()):
+    """Detect OneDrive Pictures and add it as a monitored photo/video source."""
+    import yaml
+    p = prepare(root)
+    onedrive = Path(os.environ.get("OneDriveConsumer") or os.environ.get("OneDrive") or "")
+    candidates = [
+        onedrive / "Imagens",
+        onedrive / "Pictures",
+        onedrive / "Fotos",
+        onedrive / "Photos",
+    ] if str(onedrive) else []
+    existing = [path for path in candidates if path.exists()]
+    if not existing:
+        raise typer.BadParameter("OneDrive Pictures folder not found.")
+    cfg_path = p.config / "config.yaml"
+    cfg = load_config(root)
+    google_photos = cfg.setdefault("google_photos", {})
+    sources = list(google_photos.get("local_media_sources", []))
+    for folder in existing:
+        text_folder = str(folder)
+        if text_folder not in sources:
+            sources.append(text_folder)
+    google_photos["local_media_sources"] = sources
+    google_photos["preserve_folder_structure"] = True
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    for folder in existing:
+        console.print(f"[green]OneDrive source connected:[/] {folder}")
+
+
 @app.command("write-gmail-oauth")
 def write_gmail_oauth(
     root: Path = root_option(),
