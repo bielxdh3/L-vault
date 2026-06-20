@@ -177,6 +177,24 @@ def photos_sync_local(root: Path = root_option(), dry_run: bool = dry_option()):
     print_summary(run_with_report(root, "google_photos", "local_sources", ingest_google_photos_local_sources, dry_run=dry_run))
 
 
+@app.command("onedrive-backup-cleanup")
+def onedrive_backup_cleanup(root: Path = root_option(), dry_run: bool = dry_option()):
+    """Back up OneDrive photos/videos to the Vault, verify hashes, then remove verified OneDrive originals."""
+    p = prepare(root)
+    report = start_run(p.db, RunReport(source="onedrive", mode="backup_cleanup_dry_run" if dry_run else "backup_cleanup"))
+    try:
+        process_cleanup_queue(p, report, dry_run=dry_run)
+        ingest_google_photos_local_sources(p, report, dry_run=dry_run)
+        queue_existing_local_source_cleanup(p, report)
+        process_cleanup_queue(p, report, dry_run=dry_run, include_current_run=True)
+        verify_vault(p, report, dry_run=False, sample_limit=None)
+        status = "ok" if report.failed_count == 0 else "warning"
+    except Exception as exc:
+        report.error("onedrive_backup_cleanup", str(exc)); status = "failed"
+    finish_run(p.db, p.reports, report, status=status)
+    print_summary(report)
+
+
 @app.command("photos-add-source")
 def photos_add_source(folder: Path, root: Path = root_option()):
     """Add a local folder that LocalVault should monitor for photos/videos."""

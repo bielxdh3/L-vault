@@ -15,7 +15,9 @@ from .vault_index import dashboard_data
 
 
 ALLOWED_COMMANDS = {
-    "daily-backup": "Backup agora",
+    "onedrive-backup-cleanup": "OneDrive: backup e liberar espaco",
+    "daily-backup": "Tudo: Gmail, fotos e WhatsApp",
+    "backup-gmail-api": "Somente Gmail",
     "photos-sync-local": "Backup fotos locais",
     "sync-sources": "Sincronizar fontes",
     "ingest-all": "Importar inbox",
@@ -51,6 +53,16 @@ def start_background_command(p: VaultPaths, command: str) -> Path:
     if command not in ALLOWED_COMMANDS:
         raise ValueError("Unsupported command.")
     p.logs.mkdir(parents=True, exist_ok=True)
+    if command in {"daily-backup", "onedrive-backup-cleanup", "backup-gmail-api", "photos-sync-local", "ingest-all"} and _backup_running(p):
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        status_path = p.logs / f"manual_{stamp}_{command}_skipped.json"
+        status_path.write_text(json.dumps({
+            "command": command,
+            "status": "skipped",
+            "reason": "Outro backup ja esta rodando.",
+            "finished_at": datetime.now().isoformat(),
+        }, ensure_ascii=False), encoding="utf-8")
+        return status_path
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = p.logs / f"manual_{stamp}_{command}.log"
     status_path = p.logs / f"manual_{stamp}_{command}.json"
@@ -128,6 +140,19 @@ def _running_jobs(p: VaultPaths) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
     return jobs
+
+
+def _backup_running(p: VaultPaths) -> bool:
+    for status in sorted(p.logs.glob("manual_*.json"), reverse=True)[:20]:
+        try:
+            payload = json.loads(status.read_text(encoding="utf-8-sig"))
+        except json.JSONDecodeError:
+            continue
+        if payload.get("status") != "running":
+            continue
+        if payload.get("command") in {"daily-backup", "onedrive-backup-cleanup", "backup-gmail-api", "photos-sync-local", "ingest-all"}:
+            return True
+    return False
 
 
 def _python_executable() -> str:

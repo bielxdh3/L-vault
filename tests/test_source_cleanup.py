@@ -81,3 +81,20 @@ def test_queue_existing_local_source_cleanup(tmp_path: Path):
         db.upsert_file(conn, sha256=digest, path=vault_copy, original_path=original, media_type="photo", size=5, source="google_photos_local")
 
     assert queue_existing_local_source_cleanup(p) == 1
+
+
+def test_cleanup_can_include_current_run_when_explicit(tmp_path: Path):
+    root = tmp_path / "vault"
+    source = tmp_path / "OneDrive" / "Imagens"
+    source.mkdir(parents=True)
+    original = source / "photo.jpg"
+    original.write_bytes(b"photo")
+    p = ensure_directories(root)
+    _config(p, source)
+    db.init_db(p.db)
+
+    report = RunReport(source="test", mode="first", run_id=1)
+    ingest_google_photos_local_sources(p, report)
+
+    assert process_cleanup_queue(p, report, include_current_run=True) == 1
+    assert not original.exists()

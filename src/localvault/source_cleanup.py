@@ -59,17 +59,20 @@ def queue_existing_local_source_cleanup(p: VaultPaths, report: RunReport | None 
     return queued
 
 
-def process_cleanup_queue(p: VaultPaths, report: RunReport, dry_run: bool = False) -> int:
+def process_cleanup_queue(p: VaultPaths, report: RunReport, dry_run: bool = False, include_current_run: bool = False) -> int:
     cfg = cleanup_config(p)
     if not cfg["enabled"]:
         return 0
     deleted = 0
     with db.connect(p.db) as conn:
-        rows = conn.execute("""
-            SELECT * FROM local_source_cleanup_queue
-            WHERE status='pending' AND (queued_run_id IS NULL OR queued_run_id != ?)
-            ORDER BY id
-        """, (report.run_id,)).fetchall()
+        if include_current_run:
+            rows = conn.execute("SELECT * FROM local_source_cleanup_queue WHERE status='pending' ORDER BY id").fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM local_source_cleanup_queue
+                WHERE status='pending' AND (queued_run_id IS NULL OR queued_run_id != ?)
+                ORDER BY id
+            """, (report.run_id,)).fetchall()
         for row in rows:
             original = Path(row["original_path"])
             vault_path = Path(row["vault_path"])
