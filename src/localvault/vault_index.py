@@ -39,7 +39,11 @@ def open_in_explorer(path: Path) -> None:
         return
     target = path if path.exists() else path.parent
     if path.exists() and path.is_file():
-        subprocess.Popen(["explorer.exe", f"/select,{path}"])
+        try:
+            subprocess.Popen(f'explorer.exe /select,"{path}"')
+        except OSError:
+            if path.parent.exists():
+                os.startfile(path.parent)  # type: ignore[attr-defined]
     elif target.exists():
         os.startfile(target)  # type: ignore[attr-defined]
 
