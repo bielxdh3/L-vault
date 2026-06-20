@@ -32,6 +32,8 @@ python -m localvault sync-sources --root E:\LocalVault
 python -m localvault ingest-all --root E:\LocalVault
 python -m localvault photos-ingest-takeout --root E:\LocalVault
 python -m localvault backup-gmail-api --root E:\LocalVault
+python -m localvault gmail-dedupe-audit --root E:\LocalVault
+python -m localvault gmail-repair-runs --root E:\LocalVault
 python -m localvault daily-backup --root E:\LocalVault
 python -m localvault rename-gmail-files --root E:\LocalVault
 python -m localvault dedupe --root E:\LocalVault
@@ -88,3 +90,11 @@ Os arquivos `.eml` do Gmail sao salvos com nomes legiveis no padrao `data_remete
 ```powershell
 python -m localvault rename-gmail-files --root E:\LocalVault
 ```
+
+Para conferir se existe duplicacao real no backup do Gmail, rode:
+
+```powershell
+python -m localvault gmail-dedupe-audit --root E:\LocalVault
+```
+
+O backup Gmail API e incremental: depois do primeiro indice, ele busca somente mensagens recentes com uma pequena margem de seguranca e pula e-mails ja salvos por `gmail_id` ou hash SHA-256.

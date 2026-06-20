@@ -17,6 +17,8 @@ from .vault_index import dashboard_data
 ALLOWED_COMMANDS = {
     "daily-backup": "Tudo: Gmail, fotos e WhatsApp",
     "backup-gmail-api": "Somente Gmail",
+    "gmail-dedupe-audit": "Auditar duplicatas Gmail",
+    "gmail-repair-runs": "Reparar historico Gmail",
     "photos-ingest-takeout": "Fotos: importar Takeout",
     "sync-sources": "Sincronizar fontes",
     "ingest-all": "Importar inbox",
@@ -157,4 +159,3 @@ def _python_executable() -> str:
 
 def _hidden_process_flag() -> int:
     return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-

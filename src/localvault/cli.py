@@ -15,6 +15,7 @@ from . import __version__, db
 from .config import DEFAULT_ROOT, ensure_config, ensure_directories, load_config, paths
 from .dedupe import build_duplicate_report
 from .gmail_api import backup_gmail_api as run_gmail_api
+from .gmail_audit import audit_gmail_duplicates, repair_stale_gmail_runs
 from .gmail_maintenance import rename_existing_gmail_files
 from .gmail_takeout import ingest_gmail_takeout
 from .health import health_snapshot
@@ -167,6 +168,18 @@ def daily_backup(root: Path = root_option(), dry_run: bool = dry_option()):
 def rename_gmail_files(root: Path = root_option(), dry_run: bool = dry_option()):
     """Rename already imported Gmail .eml files with readable Windows-safe names."""
     print_summary(run_with_report(root, "gmail", "rename_files", rename_existing_gmail_files, dry_run=dry_run))
+
+
+@app.command("gmail-dedupe-audit")
+def gmail_dedupe_audit(root: Path = root_option(), dry_run: bool = dry_option()):
+    """Generate a Gmail duplicate/orphan audit report without deleting anything."""
+    print_summary(run_with_report(root, "gmail", "dedupe_audit", audit_gmail_duplicates, dry_run=dry_run))
+
+
+@app.command("gmail-repair-runs")
+def gmail_repair_runs(root: Path = root_option(), dry_run: bool = dry_option(), older_than_hours: int = typer.Option(6, "--older-than-hours")):
+    """Mark old stuck Gmail runs as warning so the dashboard is not misleading."""
+    print_summary(run_with_report(root, "gmail", "repair_runs", repair_stale_gmail_runs, dry_run=dry_run, older_than_hours=older_than_hours))
 
 
 @app.command("photos-ingest-takeout")
