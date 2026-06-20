@@ -1,6 +1,14 @@
 {% extends "base.html" %}{% block title %}Dashboard - LocalVault{% endblock %}
 {% block content %}
-<h1>Dashboard</h1>
+<section class="page-head">
+  <div>
+    <h1>Dashboard</h1>
+    <p class="muted">Resumo local do cofre e dos backups.</p>
+  </div>
+  <form method="post" action="/dashboard/backup-now" onsubmit="return confirm('Iniciar backup agora?')">
+    <button class="primary-action" type="submit">Fazer backup agora</button>
+  </form>
+</section>
 <section class="metrics">
   <div><strong>{{ stats.emails }}</strong><span>Emails no disco</span></div>
   <div><strong>{{ stats.attachments }}</strong><span>Anexos</span></div>
