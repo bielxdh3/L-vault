@@ -102,7 +102,8 @@ foreach ($Task in $Tasks) {{
   $ActionArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$Runner`" -TaskName `"$($Task.FullName)`" -CommandArgs `"$($Task.Command)`""
   $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $ActionArgs
   $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit $ExecutionTimeLimit
-  Register-ScheduledTask -TaskName $Task.FullName -Action $Action -Trigger (New-LocalVaultTrigger $Task) -Settings $Settings -Description "LocalVault Backup Manager: $($Task.Command)" -Force | Out-Null
+  $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+  Register-ScheduledTask -TaskName $Task.FullName -Action $Action -Trigger (New-LocalVaultTrigger $Task) -Settings $Settings -Principal $Principal -Description "LocalVault Backup Manager: $($Task.Command)" -Force | Out-Null
   Write-Host "Registered: $($Task.FullName)"
 }}
 """

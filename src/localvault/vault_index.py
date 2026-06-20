@@ -22,11 +22,15 @@ def source_label(row: Any) -> str:
     return "Arquivo"
 
 
-def safe_vault_path(root: Path, value: str) -> Path:
+def safe_vault_path(root: Path, value: str, *, require_vault: bool = False) -> Path:
     requested = Path(value).resolve()
     root_resolved = root.resolve()
     if root_resolved != requested and root_resolved not in requested.parents:
         raise ValueError("Path is outside LocalVault.")
+    if require_vault:
+        vault_resolved = (root / "vault").resolve()
+        if vault_resolved != requested and vault_resolved not in requested.parents:
+            raise ValueError("Path is outside the Vault storage folder.")
     return requested
 
 
@@ -41,6 +45,7 @@ def open_in_explorer(path: Path) -> None:
 
 
 def dashboard_data(p: VaultPaths) -> dict[str, Any]:
+    vault_root = p.root / "vault"
     with db.connect(p.db) as conn:
         gmail_rows = conn.execute("SELECT eml_path FROM gmail_messages").fetchall()
         attachment_rows = conn.execute("SELECT path FROM gmail_attachments").fetchall()
@@ -61,6 +66,8 @@ def dashboard_data(p: VaultPaths) -> dict[str, Any]:
     recent = []
     for row in file_rows:
         path = Path(row["path"])
+        if not _is_under(path, vault_root):
+            continue
         recent.append({
             "path": str(path),
             "name": path.name,
@@ -118,3 +125,12 @@ def _delete_index_for_path(conn, path: str) -> int:
 
 def _existing_count(paths) -> int:
     return sum(1 for value in paths if value and Path(value).exists())
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    try:
+        resolved = path.resolve()
+        root_resolved = root.resolve()
+        return resolved == root_resolved or root_resolved in resolved.parents
+    except Exception:
+        return False

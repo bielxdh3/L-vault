@@ -37,4 +37,5 @@ def test_schedule_uses_daily_backup_and_start_when_available(tmp_path: Path):
     assert "LocalVault Daily Backup" in install
     assert 'Command="daily-backup"' in install
     assert "-StartWhenAvailable" in install
+    assert "-RunLevel Highest" in install
     assert "LocalVault Gmail API Daily" not in install

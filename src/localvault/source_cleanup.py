@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +91,7 @@ def process_cleanup_queue(p: VaultPaths, report: RunReport, dry_run: bool = Fals
                 if sha256_file(original) != row["sha256"]:
                     raise ValueError("Original hash changed after backup.")
                 if not dry_run:
-                    original.unlink()
+                    _unlink_source_file(original)
                     conn.execute("UPDATE local_source_cleanup_queue SET status='deleted',deleted_at=?,last_error=NULL WHERE id=?", (utc_now(), row["id"]))
                 deleted += 1
             except Exception as exc:
@@ -104,3 +106,12 @@ def _allowed_original(path: Path, cfg: dict[str, Any]) -> bool:
     text = str(path).lower()
     needles = [str(x).lower() for x in cfg.get("only_if_path_contains", []) if str(x).strip()]
     return bool(needles) and any(needle in text for needle in needles)
+
+
+def _unlink_source_file(path: Path) -> None:
+    try:
+        path.unlink()
+    except PermissionError:
+        if os.name == "nt":
+            os.chmod(path, stat.S_IWRITE)
+        path.unlink()

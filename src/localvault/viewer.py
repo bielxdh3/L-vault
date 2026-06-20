@@ -73,7 +73,7 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.post("/actions/open-folder")
     def open_folder(path: str = Query(...)):
         try:
-            open_in_explorer(safe_vault_path(p.root, path))
+            open_in_explorer(safe_vault_path(p.root, path, require_vault=True))
         except ValueError:
             raise HTTPException(403)
         return RedirectResponse("/", status_code=303)
@@ -81,7 +81,7 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.post("/actions/delete-file")
     def delete_file(path: str = Query(...)):
         try:
-            target = safe_vault_path(p.root, path)
+            target = safe_vault_path(p.root, path, require_vault=True)
         except ValueError:
             raise HTTPException(403)
         delete_local_file_and_index(p, target)

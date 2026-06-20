@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import stat
 
 import yaml
 
@@ -95,6 +97,25 @@ def test_cleanup_can_include_current_run_when_explicit(tmp_path: Path):
 
     report = RunReport(source="test", mode="first", run_id=1)
     ingest_google_photos_local_sources(p, report)
+
+    assert process_cleanup_queue(p, report, include_current_run=True) == 1
+    assert not original.exists()
+
+
+def test_cleanup_removes_readonly_onedrive_file_after_verification(tmp_path: Path):
+    root = tmp_path / "vault"
+    source = tmp_path / "OneDrive" / "Imagens"
+    source.mkdir(parents=True)
+    original = source / "photo.jpg"
+    original.write_bytes(b"photo")
+    p = ensure_directories(root)
+    _config(p, source)
+    db.init_db(p.db)
+
+    report = RunReport(source="test", mode="first", run_id=1)
+    ingest_google_photos_local_sources(p, report)
+    if os.name == "nt":
+        original.chmod(stat.S_IREAD)
 
     assert process_cleanup_queue(p, report, include_current_run=True) == 1
     assert not original.exists()

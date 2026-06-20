@@ -2,7 +2,7 @@ from pathlib import Path
 
 from localvault import db
 from localvault.config import ensure_directories
-from localvault.vault_index import cleanup_missing_index_entries, dashboard_data, delete_local_file_and_index
+from localvault.vault_index import cleanup_missing_index_entries, dashboard_data, delete_local_file_and_index, safe_vault_path
 
 
 def test_cleanup_missing_index_entries_updates_dashboard_counts(tmp_path: Path):
@@ -43,3 +43,37 @@ def test_delete_local_file_and_index_removes_file_and_rows(tmp_path: Path):
     with db.connect(p.db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM google_photos_items").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0
+
+
+def test_dashboard_recent_files_only_shows_vault_paths(tmp_path: Path):
+    root = tmp_path / "vault"
+    p = ensure_directories(root)
+    db.init_db(p.db)
+    photo = p.photos / "2026" / "06" / "photo.jpg"
+    photo.parent.mkdir(parents=True, exist_ok=True)
+    photo.write_bytes(b"photo")
+    outside = p.root / "inbox" / "google_photos_sync" / "outside.jpg"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_bytes(b"outside")
+    with db.connect(p.db) as conn:
+        db.upsert_file(conn, sha256="hash2", path=photo, media_type="photo", mime_type="image/jpeg", size=5, source="google_photos")
+        db.upsert_file(conn, sha256="hash3", path=outside, media_type="photo", mime_type="image/jpeg", size=7, source="google_photos_local")
+
+    recent = dashboard_data(p)["recent_files"]
+
+    assert [Path(item["path"]).name for item in recent] == ["photo.jpg"]
+
+
+def test_safe_vault_path_can_require_storage_folder(tmp_path: Path):
+    root = tmp_path / "vault"
+    p = ensure_directories(root)
+    target = p.photos / "photo.jpg"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"photo")
+    assert safe_vault_path(p.root, str(target), require_vault=True) == target.resolve()
+    try:
+        safe_vault_path(p.root, str(p.inbox / "photo.jpg"), require_vault=True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected inbox path to be blocked")

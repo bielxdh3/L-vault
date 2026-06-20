@@ -69,7 +69,12 @@ def scan_existing_media(p: VaultPaths, report: RunReport, dry_run: bool = False)
 
 def _import_media(conn, p: VaultPaths, media: Path, root: Path, report: RunReport, dry_run: bool, source: str, preserve_folders: bool = False) -> None:
     digest = sha256_file(media)
-    if conn.execute("SELECT id FROM google_photos_items WHERE sha256=?", (digest,)).fetchone():
+    existing = conn.execute("SELECT path FROM google_photos_items WHERE sha256=? ORDER BY id LIMIT 1", (digest,)).fetchone()
+    if existing:
+        if not dry_run:
+            vault_path = Path(existing["path"])
+            if vault_path.exists() and sha256_file(vault_path) == digest:
+                maybe_queue_cleanup(conn, p, original=media, vault_path=vault_path, sha256=digest, source=source, run_id=report.run_id)
         report.skipped_duplicates += 1
         return
     sidecar = _sidecar(media)

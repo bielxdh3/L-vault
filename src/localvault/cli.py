@@ -215,7 +215,7 @@ def photos_add_source(folder: Path, root: Path = root_option()):
 
 @app.command("photos-connect-onedrive")
 def photos_connect_onedrive(root: Path = root_option()):
-    """Detect OneDrive Pictures and add it as a monitored photo/video source."""
+    """Detect OneDrive media folders and add them as monitored photo/video sources."""
     import yaml
     p = prepare(root)
     onedrive = Path(os.environ.get("OneDriveConsumer") or os.environ.get("OneDrive") or "")
@@ -224,6 +224,11 @@ def photos_connect_onedrive(root: Path = root_option()):
         onedrive / "Pictures",
         onedrive / "Fotos",
         onedrive / "Photos",
+        onedrive / "Videos",
+        onedrive / "Vídeos",
+        onedrive / "Documentos",
+        onedrive / "Documents",
+        onedrive / "Downloads",
     ] if str(onedrive) else []
     existing = [path for path in candidates if path.exists()]
     if not existing:
