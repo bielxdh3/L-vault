@@ -49,6 +49,17 @@
       <p><span class="ok">Indice limpo</span></p>
     {% endif %}
   </article>
+
+  <article>
+    <h2>Limpeza OneDrive</h2>
+    {% if cleanup_queue %}
+      {% for row in cleanup_queue %}
+        <p><span class="badge">{{ row.status }}</span> {{ row.count }} arquivo(s)</p>
+      {% endfor %}
+    {% else %}
+      <p class="muted">Nenhum arquivo pendente.</p>
+    {% endif %}
+  </article>
 </section>
 
 <h2>Acoes rapidas</h2>

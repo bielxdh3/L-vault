@@ -21,6 +21,7 @@ from .health import health_snapshot
 from .photos import ingest_google_photos_local_sources, ingest_google_photos_takeout, scan_existing_media
 from .reports import RunReport, finish_run, start_run
 from .scheduler import generate_schedule_files, list_windows_tasks, run_powershell_script
+from .source_cleanup import process_cleanup_queue, queue_existing_local_source_cleanup
 from .source_sync import sync_sources as run_source_sync
 from .utils import free_space_bytes, utc_now
 from .verify import verify_vault
@@ -147,6 +148,7 @@ def daily_backup(root: Path = root_option(), dry_run: bool = dry_option()):
         removed = cleanup_missing_index_entries(p)
         if removed:
             report.warn(f"Cleaned {removed} missing index entries before backup.")
+        process_cleanup_queue(p, report, dry_run=dry_run)
         run_gmail_api(p, report, dry_run=dry_run)
         run_source_sync(p, report, dry_run=dry_run)
         ingest_google_photos_local_sources(p, report, dry_run=dry_run)
@@ -155,6 +157,7 @@ def daily_backup(root: Path = root_option(), dry_run: bool = dry_option()):
         ingest_whatsapp_exports(p, report, dry_run=dry_run)
         build_duplicate_report(p, report, dry_run=dry_run)
         verify_vault(p, report, dry_run=False, sample_limit=100)
+        verify_vault(p, report, dry_run=False, sample_limit=None)
         status = "ok" if report.failed_count == 0 else "warning"
     except Exception as exc:
         report.error("daily_backup", str(exc)); status = "failed"
@@ -220,6 +223,14 @@ def photos_connect_onedrive(root: Path = root_option()):
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     for folder in existing:
         console.print(f"[green]OneDrive source connected:[/] {folder}")
+
+
+@app.command("photos-queue-onedrive-cleanup")
+def photos_queue_onedrive_cleanup(root: Path = root_option()):
+    """Queue already backed up OneDrive photo/video originals for deletion on the next backup."""
+    p = prepare(root)
+    queued = queue_existing_local_source_cleanup(p)
+    console.print(f"Queued OneDrive cleanup entries: {queued}")
 
 
 @app.command("write-gmail-oauth")
