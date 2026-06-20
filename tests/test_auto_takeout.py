@@ -46,6 +46,36 @@ def test_auto_takeout_ignores_incomplete_downloads(tmp_path: Path):
     assert incomplete.exists()
 
 
+def test_auto_takeout_ignores_corrupt_zip(tmp_path: Path):
+    p, downloads = _prepared(tmp_path)
+    broken = downloads / "broken.zip"
+    broken.write_bytes(b"not a zip")
+
+    report = auto_takeout(p, RunReport(source="google_takeout", mode="auto"))
+
+    assert report.failed_count == 0
+    assert report.imported_count == 0
+    assert broken.exists()
+
+
+def test_auto_takeout_moves_three_split_takeout_zips(tmp_path: Path):
+    p, downloads = _prepared(tmp_path)
+    for index in range(1, 4):
+        _zip(downloads / f"takeout-{index:03}.zip", {
+            f"Takeout/Google Photos/photo-{index}.jpg": f"photo-{index}".encode("utf-8")
+        })
+
+    report = auto_takeout(p, RunReport(source="google_takeout", mode="auto"))
+
+    assert report.imported_count >= 3
+    assert not list(downloads.glob("takeout-*.zip"))
+    assert sorted(path.name for path in p.google_takeout_inbox.glob("takeout-*.zip")) == [
+        "takeout-001.zip",
+        "takeout-002.zip",
+        "takeout-003.zip",
+    ]
+
+
 def test_auto_takeout_dry_run_does_not_move_or_import(monkeypatch, tmp_path: Path):
     p, downloads = _prepared(tmp_path)
     archive = downloads / "takeout.zip"
