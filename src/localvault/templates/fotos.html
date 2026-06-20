@@ -1,6 +1,6 @@
 {% extends "base.html" %}{% block title %}Fotos - LocalVault{% endblock %}
 {% block content %}
-<h1>Drive/Fotos</h1>
+<h1>Fotos</h1>
 <form class="toolbar">
   <input name="q" value="{{ q }}" placeholder="Buscar data, arquivo, album">
   <select name="media_type"><option value="">Todos</option><option value="photo" {% if media_type=="photo" %}selected{% endif %}>Fotos</option><option value="video" {% if media_type=="video" %}selected{% endif %}>Videos</option></select>
@@ -14,7 +14,7 @@
     {% else %}
       <div class="video missing-tile">Ausente</div>
     {% endif %}
-    <span class="badge">Drive/Fotos</span>
+    <span class="badge">Fotos</span>
     <strong>{{ item.filename }}</strong>
     <span>{% if item.exists %}<span class="ok">No disco</span>{% else %}<span class="missing">Ausente</span>{% endif %}</span>
     <div class="actions">

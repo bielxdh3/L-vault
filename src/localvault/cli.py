@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import os
@@ -18,10 +18,10 @@ from .gmail_api import backup_gmail_api as run_gmail_api
 from .gmail_maintenance import rename_existing_gmail_files
 from .gmail_takeout import ingest_gmail_takeout
 from .health import health_snapshot
-from .photos import ingest_google_photos_local_sources, ingest_google_photos_takeout, scan_existing_media
+from .migrations import migrate_to_takeout_photos
+from .photos import ingest_photos_takeout, scan_existing_media
 from .reports import RunReport, finish_run, start_run
 from .scheduler import generate_schedule_files, list_windows_tasks, run_powershell_script
-from .source_cleanup import process_cleanup_queue, queue_existing_local_source_cleanup
 from .source_sync import sync_sources as run_source_sync
 from .utils import free_space_bytes, utc_now
 from .verify import verify_vault
@@ -44,6 +44,7 @@ def dry_option() -> bool:
 def prepare(root: Path):
     p = ensure_directories(root)
     db.init_db(p.db)
+    migrate_to_takeout_photos(p)
     configure_logging(p.logs)
     return p
 
@@ -92,7 +93,7 @@ def ingest_takeout(root: Path = root_option(), dry_run: bool = dry_option()):
     p = prepare(root)
     report = start_run(p.db, RunReport(source="google_takeout", mode="photos_and_gmail_dry_run" if dry_run else "photos_and_gmail"))
     try:
-        ingest_google_photos_takeout(p, report, dry_run=dry_run)
+        ingest_photos_takeout(p, report, dry_run=dry_run)
         ingest_gmail_takeout(p, report, dry_run=dry_run)
         status = "ok" if report.failed_count == 0 else "warning"
     except Exception as exc:
@@ -123,8 +124,7 @@ def ingest_all(root: Path = root_option(), dry_run: bool = dry_option(), skip_sy
     try:
         if not skip_sync:
             run_source_sync(p, report, dry_run=dry_run)
-        ingest_google_photos_local_sources(p, report, dry_run=dry_run)
-        ingest_google_photos_takeout(p, report, dry_run=dry_run)
+        ingest_photos_takeout(p, report, dry_run=dry_run)
         ingest_gmail_takeout(p, report, dry_run=dry_run)
         ingest_whatsapp_exports(p, report, dry_run=dry_run)
         build_duplicate_report(p, report, dry_run=dry_run)
@@ -148,11 +148,9 @@ def daily_backup(root: Path = root_option(), dry_run: bool = dry_option()):
         removed = cleanup_missing_index_entries(p)
         if removed:
             report.warn(f"Cleaned {removed} missing index entries before backup.")
-        process_cleanup_queue(p, report, dry_run=dry_run)
         run_gmail_api(p, report, dry_run=dry_run)
         run_source_sync(p, report, dry_run=dry_run)
-        ingest_google_photos_local_sources(p, report, dry_run=dry_run)
-        ingest_google_photos_takeout(p, report, dry_run=dry_run)
+        ingest_photos_takeout(p, report, dry_run=dry_run)
         ingest_gmail_takeout(p, report, dry_run=dry_run)
         ingest_whatsapp_exports(p, report, dry_run=dry_run)
         build_duplicate_report(p, report, dry_run=dry_run)
@@ -171,89 +169,10 @@ def rename_gmail_files(root: Path = root_option(), dry_run: bool = dry_option())
     print_summary(run_with_report(root, "gmail", "rename_files", rename_existing_gmail_files, dry_run=dry_run))
 
 
-@app.command("photos-sync-local")
-def photos_sync_local(root: Path = root_option(), dry_run: bool = dry_option()):
-    """Import photos/videos from configured local Google Photos folders."""
-    print_summary(run_with_report(root, "google_photos", "local_sources", ingest_google_photos_local_sources, dry_run=dry_run))
-
-
-@app.command("onedrive-backup-cleanup")
-def onedrive_backup_cleanup(root: Path = root_option(), dry_run: bool = dry_option()):
-    """Back up OneDrive photos/videos to the Vault, verify hashes, then remove verified OneDrive originals."""
-    p = prepare(root)
-    report = start_run(p.db, RunReport(source="onedrive", mode="backup_cleanup_dry_run" if dry_run else "backup_cleanup"))
-    try:
-        process_cleanup_queue(p, report, dry_run=dry_run)
-        ingest_google_photos_local_sources(p, report, dry_run=dry_run)
-        queue_existing_local_source_cleanup(p, report)
-        process_cleanup_queue(p, report, dry_run=dry_run, include_current_run=True)
-        verify_vault(p, report, dry_run=False, sample_limit=None)
-        status = "ok" if report.failed_count == 0 else "warning"
-    except Exception as exc:
-        report.error("onedrive_backup_cleanup", str(exc)); status = "failed"
-    finish_run(p.db, p.reports, report, status=status)
-    print_summary(report)
-
-
-@app.command("photos-add-source")
-def photos_add_source(folder: Path, root: Path = root_option()):
-    """Add a local folder that LocalVault should monitor for photos/videos."""
-    import yaml
-    p = prepare(root)
-    folder = folder.expanduser()
-    folder.mkdir(parents=True, exist_ok=True)
-    cfg_path = p.config / "config.yaml"
-    cfg = load_config(root)
-    sources = list(cfg.setdefault("google_photos", {}).get("local_media_sources", []))
-    text_folder = str(folder)
-    if text_folder not in sources:
-        sources.append(text_folder)
-    cfg["google_photos"]["local_media_sources"] = sources
-    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
-    console.print(f"[green]Google Photos local source added:[/] {folder}")
-
-
-@app.command("photos-connect-onedrive")
-def photos_connect_onedrive(root: Path = root_option()):
-    """Detect OneDrive media folders and add them as monitored photo/video sources."""
-    import yaml
-    p = prepare(root)
-    onedrive = Path(os.environ.get("OneDriveConsumer") or os.environ.get("OneDrive") or "")
-    candidates = [
-        onedrive / "Imagens",
-        onedrive / "Pictures",
-        onedrive / "Fotos",
-        onedrive / "Photos",
-        onedrive / "Videos",
-        onedrive / "Vídeos",
-        onedrive / "Documentos",
-        onedrive / "Documents",
-        onedrive / "Downloads",
-    ] if str(onedrive) else []
-    existing = [path for path in candidates if path.exists()]
-    if not existing:
-        raise typer.BadParameter("OneDrive Pictures folder not found.")
-    cfg_path = p.config / "config.yaml"
-    cfg = load_config(root)
-    google_photos = cfg.setdefault("google_photos", {})
-    sources = list(google_photos.get("local_media_sources", []))
-    for folder in existing:
-        text_folder = str(folder)
-        if text_folder not in sources:
-            sources.append(text_folder)
-    google_photos["local_media_sources"] = sources
-    google_photos["preserve_folder_structure"] = True
-    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
-    for folder in existing:
-        console.print(f"[green]OneDrive source connected:[/] {folder}")
-
-
-@app.command("photos-queue-onedrive-cleanup")
-def photos_queue_onedrive_cleanup(root: Path = root_option()):
-    """Queue already backed up OneDrive photo/video originals for deletion on the next backup."""
-    p = prepare(root)
-    queued = queue_existing_local_source_cleanup(p)
-    console.print(f"Queued OneDrive cleanup entries: {queued}")
+@app.command("photos-ingest-takeout")
+def photos_ingest_takeout(root: Path = root_option(), dry_run: bool = dry_option()):
+    """Import photos and videos from Google Takeout ZIPs in the inbox."""
+    print_summary(run_with_report(root, "photos_takeout", "takeout", ingest_photos_takeout, dry_run=dry_run))
 
 
 @app.command("write-gmail-oauth")
@@ -268,7 +187,7 @@ def write_gmail_oauth(
     if not client_id:
         client_id = typer.prompt("Client ID")
     if not client_secret:
-        console.print("[yellow]Cole o Client Secret completo aqui. Ele normalmente começa com GOCSPX-.[/]")
+        console.print("[yellow]Cole o Client Secret completo aqui. Ele normalmente comeÃ§a com GOCSPX-.[/]")
         client_secret = typer.prompt("Client Secret")
     client_id = client_id.strip()
     client_secret = client_secret.strip()
@@ -276,7 +195,7 @@ def write_gmail_oauth(
     if not client_id.endswith(".apps.googleusercontent.com"):
         raise typer.BadParameter("Client ID parece incorreto. Ele deve terminar com .apps.googleusercontent.com")
     if len(client_secret) < 20 or not client_secret.startswith("GOCSPX-"):
-        raise typer.BadParameter("Client Secret parece incorreto. Copie o valor completo que começa com GOCSPX-, não o texto mascarado.")
+        raise typer.BadParameter("Client Secret parece incorreto. Copie o valor completo que comeÃ§a com GOCSPX-, nÃ£o o texto mascarado.")
     payload = {
         "installed": {
             "client_id": client_id,
@@ -421,3 +340,4 @@ def print_summary(report: RunReport) -> None:
     console.print(f"Storage added/indexed: {report.storage_added / (1024**2):.2f} MB")
     if report.report_path:
         console.print(f"Report: {report.report_path}")
+

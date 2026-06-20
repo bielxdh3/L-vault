@@ -7,18 +7,17 @@ from pathlib import Path
 from PIL import Image, ExifTags
 
 from . import db
-from .config import VaultPaths, load_config
+from .config import VaultPaths
 from .email_names import sanitize_filename_component
 from .extract import safe_extract_zip
 from .reports import RunReport
-from .source_cleanup import maybe_queue_cleanup
 from .utils import copy_preserve, guess_mime, sha256_file, unique_path
 
 PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".tif", ".tiff", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v"}
 
 
-def ingest_google_photos_takeout(p: VaultPaths, report: RunReport, dry_run: bool = False) -> RunReport:
+def ingest_photos_takeout(p: VaultPaths, report: RunReport, dry_run: bool = False) -> RunReport:
     extracted_root = p.manual_imports_inbox / "extracted_google_takeout"
     roots = []
     for zip_path in sorted(p.google_takeout_inbox.glob("*.zip")):
@@ -32,25 +31,7 @@ def ingest_google_photos_takeout(p: VaultPaths, report: RunReport, dry_run: bool
             for media in root.rglob("*"):
                 if media.is_file() and media.suffix.lower() in PHOTO_EXTS | VIDEO_EXTS:
                     try:
-                        _import_media(conn, p, media, root, report, dry_run, source="google_photos_takeout")
-                    except Exception as exc:
-                        report.error(media, str(exc))
-    return report
-
-
-def ingest_google_photos_local_sources(p: VaultPaths, report: RunReport, dry_run: bool = False) -> RunReport:
-    cfg = load_config(p.root).get("google_photos", {})
-    sources = [Path(x).expanduser() for x in cfg.get("local_media_sources", []) if str(x).strip()]
-    preserve_folders = bool(cfg.get("preserve_folder_structure", True))
-    with db.connect(p.db) as conn:
-        for source in sources:
-            if not source.exists():
-                report.warn(f"Google Photos local source not found: {source}")
-                continue
-            for media in source.rglob("*"):
-                if media.is_file() and media.suffix.lower() in PHOTO_EXTS | VIDEO_EXTS:
-                    try:
-                        _import_media(conn, p, media, source, report, dry_run, source="google_photos_local", preserve_folders=preserve_folders)
+                        _import_media(conn, p, media, root, report, dry_run, source="photos_takeout")
                     except Exception as exc:
                         report.error(media, str(exc))
     return report
@@ -69,12 +50,8 @@ def scan_existing_media(p: VaultPaths, report: RunReport, dry_run: bool = False)
 
 def _import_media(conn, p: VaultPaths, media: Path, root: Path, report: RunReport, dry_run: bool, source: str, preserve_folders: bool = False) -> None:
     digest = sha256_file(media)
-    existing = conn.execute("SELECT path FROM google_photos_items WHERE sha256=? ORDER BY id LIMIT 1", (digest,)).fetchone()
+    existing = conn.execute("SELECT path FROM photo_items WHERE sha256=? ORDER BY id LIMIT 1", (digest,)).fetchone()
     if existing:
-        if not dry_run:
-            vault_path = Path(existing["path"])
-            if vault_path.exists() and sha256_file(vault_path) == digest:
-                maybe_queue_cleanup(conn, p, original=media, vault_path=vault_path, sha256=digest, source=source, run_id=report.run_id)
         report.skipped_duplicates += 1
         return
     sidecar = _sidecar(media)
@@ -99,11 +76,10 @@ def _import_media(conn, p: VaultPaths, media: Path, root: Path, report: RunRepor
         copy_preserve(sidecar, sidecar_dest, dry_run=dry_run)
     if not dry_run:
         db.upsert_file(conn, sha256=digest, path=dest, original_path=media, media_type=kind, mime_type=guess_mime(dest), size=size, source=source)
-        conn.execute("""INSERT OR IGNORE INTO google_photos_items
+        conn.execute("""INSERT OR IGNORE INTO photo_items
         (filename,path,sidecar_path,original_path,creation_date,exif_date,google_metadata_date,file_size,mime_type,sha256,width,height,album,media_type)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (dest.name, str(dest), str(sidecar_dest) if sidecar_dest else None, str(media), created, exif_date, gdate, size, guess_mime(dest), digest, width, height, _album(media, root), kind))
-        maybe_queue_cleanup(conn, p, original=media, vault_path=dest, sha256=digest, source=source, run_id=report.run_id)
     report.imported_count += 1
     report.storage_added += size
 

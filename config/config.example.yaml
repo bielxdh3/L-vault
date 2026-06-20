@@ -10,13 +10,8 @@ gmail:
   token_file: E:\LocalVault\config\gmail_token.json
   modify_remote: false
   batch_size: 100
-google_photos:
-  takeout_only_default: true
-  upload_enabled: false
-  upload_album: LocalVault Uploads
-  local_media_sources:
-  - E:\LocalVault\inbox\google_photos_sync
-  preserve_folder_structure: true
+photos:
+  takeout_enabled: true
 whatsapp:
   copy_media_from: ''
   adb_enabled: false

@@ -28,7 +28,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         data = dashboard_data(p)
         data["request"] = request
         data["backup_choices"] = {
-            "onedrive-backup-cleanup": "OneDrive/Fotos e liberar espaco",
+            "photos-ingest-takeout": "Importar Takeout/Fotos",
             "backup-gmail-api": "Somente Gmail",
             "daily-backup": "Tudo: Gmail, fotos e WhatsApp",
         }
@@ -50,7 +50,7 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.post("/dashboard/backup-now")
     def dashboard_backup_now():
-        start_background_command(p, "onedrive-backup-cleanup")
+        start_background_command(p, "photos-ingest-takeout")
         return RedirectResponse("/", status_code=303)
 
     @app.get("/dashboard/backup-now")
@@ -58,7 +58,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         return RedirectResponse("/", status_code=303)
 
     @app.post("/dashboard/run-backup")
-    def dashboard_run_backup(command: str = Query("onedrive-backup-cleanup")):
+    def dashboard_run_backup(command: str = Query("photos-ingest-takeout")):
         try:
             start_background_command(p, command)
         except ValueError:
@@ -109,7 +109,11 @@ def create_app(root: Path | None = None) -> FastAPI:
         attachment_items = [{**dict(item), "exists": bool(item["path"] and Path(item["path"]).exists())} for item in attachments]
         return templates.TemplateResponse(request, "gmail_message.html", {"message": message, "attachments": attachment_items, "body": body})
 
-    @app.get("/photos", response_class=HTMLResponse)
+    @app.get("/photos")
+    def photos_redirect():
+        return RedirectResponse("/fotos", status_code=307)
+
+    @app.get("/fotos", response_class=HTMLResponse)
     def photos_page(request: Request, q: str = "", media_type: str = "", page: int = 1):
         clauses, params = [], []
         if q:
@@ -120,9 +124,9 @@ def create_app(root: Path | None = None) -> FastAPI:
             params.append(media_type)
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         with db.connect(p.db) as conn:
-            rows = conn.execute(f"SELECT * FROM google_photos_items {where} ORDER BY creation_date DESC LIMIT 80 OFFSET ?", (*params, max(0, page - 1) * 80)).fetchall()
+            rows = conn.execute(f"SELECT * FROM photo_items {where} ORDER BY creation_date DESC LIMIT 80 OFFSET ?", (*params, max(0, page - 1) * 80)).fetchall()
         items = [{**dict(row), "exists": bool(row["path"] and Path(row["path"]).exists())} for row in rows]
-        return templates.TemplateResponse(request, "photos.html", {"rows": items, "q": q, "media_type": media_type, "page": page})
+        return templates.TemplateResponse(request, "fotos.html", {"rows": items, "q": q, "media_type": media_type, "page": page})
 
     @app.get("/whatsapp", response_class=HTMLResponse)
     def whatsapp_page(request: Request):

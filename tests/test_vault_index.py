@@ -36,13 +36,13 @@ def test_delete_local_file_and_index_removes_file_and_rows(tmp_path: Path):
     photo.parent.mkdir(parents=True, exist_ok=True)
     photo.write_bytes(b"photo")
     with db.connect(p.db) as conn:
-        conn.execute("INSERT INTO google_photos_items (filename,path,media_type,sha256,file_size) VALUES (?,?,?,?,?)", ("photo.jpg", str(photo), "photo", "hash2", 5))
-        db.upsert_file(conn, sha256="hash2", path=photo, media_type="photo", mime_type="image/jpeg", size=5, source="google_photos")
+        conn.execute("INSERT INTO photo_items (filename,path,media_type,sha256,file_size) VALUES (?,?,?,?,?)", ("photo.jpg", str(photo), "photo", "hash2", 5))
+        db.upsert_file(conn, sha256="hash2", path=photo, media_type="photo", mime_type="image/jpeg", size=5, source="photos_takeout")
 
     delete_local_file_and_index(p, photo)
     assert not photo.exists()
     with db.connect(p.db) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM google_photos_items").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM photo_items").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0
 
 
@@ -53,12 +53,12 @@ def test_dashboard_recent_files_only_shows_vault_paths(tmp_path: Path):
     photo = p.photos / "2026" / "06" / "photo.jpg"
     photo.parent.mkdir(parents=True, exist_ok=True)
     photo.write_bytes(b"photo")
-    outside = p.root / "inbox" / "google_photos_sync" / "outside.jpg"
+    outside = p.root / "inbox" / "manual_imports" / "outside.jpg"
     outside.parent.mkdir(parents=True, exist_ok=True)
     outside.write_bytes(b"outside")
     with db.connect(p.db) as conn:
-        db.upsert_file(conn, sha256="hash2", path=photo, media_type="photo", mime_type="image/jpeg", size=5, source="google_photos")
-        db.upsert_file(conn, sha256="hash3", path=outside, media_type="photo", mime_type="image/jpeg", size=7, source="google_photos_local")
+        db.upsert_file(conn, sha256="hash2", path=photo, media_type="photo", mime_type="image/jpeg", size=5, source="photos_takeout")
+        db.upsert_file(conn, sha256="hash3", path=outside, media_type="photo", mime_type="image/jpeg", size=7, source="manual_import")
 
     recent = dashboard_data(p)["recent_files"]
 
