@@ -54,7 +54,7 @@ def _copy_filtered(conn, source: Path, dest_dir: Path, report: RunReport, dry_ru
 
 def _is_takeout(path: Path) -> bool:
     name = path.name.lower()
-    return path.suffix.lower() == ".zip" and ("takeout" in name or "google photos" in name or "google fotos" in name or "gmail" in name)
+    return path.suffix.lower() == ".zip" and ("takeout" in name or "gmail" in name)
 
 
 def _is_whatsapp_export(path: Path) -> bool:

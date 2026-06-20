@@ -4,7 +4,6 @@ import json
 import os
 import subprocess
 import sys
-import ctypes
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,10 +15,9 @@ from .vault_index import dashboard_data
 
 
 ALLOWED_COMMANDS = {
-    "onedrive-backup-cleanup": "OneDrive: backup e liberar espaco",
     "daily-backup": "Tudo: Gmail, fotos e WhatsApp",
     "backup-gmail-api": "Somente Gmail",
-    "photos-sync-local": "Backup fotos locais",
+    "photos-ingest-takeout": "Fotos: importar Takeout",
     "sync-sources": "Sincronizar fontes",
     "ingest-all": "Importar inbox",
     "verify": "Verificar cofre",
@@ -35,7 +33,6 @@ def control_panel_data(p: VaultPaths) -> dict[str, Any]:
     with db.connect(p.db) as conn:
         runs = conn.execute("SELECT * FROM backup_runs ORDER BY id DESC LIMIT 8").fetchall()
         errors = conn.execute("SELECT * FROM import_errors ORDER BY id DESC LIMIT 8").fetchall()
-        cleanup = conn.execute("SELECT status,COUNT(*) count FROM local_source_cleanup_queue GROUP BY status").fetchall()
     return {
         "stats": dash["stats"],
         "health": health_snapshot(p),
@@ -46,7 +43,6 @@ def control_panel_data(p: VaultPaths) -> dict[str, Any]:
         "errors": errors,
         "commands": ALLOWED_COMMANDS,
         "running_jobs": _running_jobs(p),
-        "cleanup_queue": cleanup,
     }
 
 
@@ -54,7 +50,7 @@ def start_background_command(p: VaultPaths, command: str) -> Path:
     if command not in ALLOWED_COMMANDS:
         raise ValueError("Unsupported command.")
     p.logs.mkdir(parents=True, exist_ok=True)
-    if command in {"daily-backup", "onedrive-backup-cleanup", "backup-gmail-api", "photos-sync-local", "ingest-all"} and _backup_running(p):
+    if command in {"daily-backup", "photos-ingest-takeout", "backup-gmail-api", "ingest-all"} and _backup_running(p):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         status_path = p.logs / f"manual_{stamp}_{command}_skipped.json"
         status_path.write_text(json.dumps({
@@ -80,16 +76,7 @@ def start_background_command(p: VaultPaths, command: str) -> Path:
     )
     runner = p.logs / f"manual_{stamp}_{command}.ps1"
     runner.write_text(script, encoding="utf-8")
-    if command == "onedrive-backup-cleanup" and os.name == "nt" and not _is_elevated():
-        status_path.write_text(json.dumps({
-            "command": command,
-            "status": "waiting_for_permission",
-            "reason": "Windows UAC permission is required to clean protected OneDrive folders.",
-            "started_at": datetime.now().isoformat(),
-        }, ensure_ascii=False), encoding="utf-8")
-        _start_elevated_runner(runner, p.root)
-    else:
-        subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(runner)], cwd=str(p.root), creationflags=_hidden_process_flag())
+    subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(runner)], cwd=str(p.root), creationflags=_hidden_process_flag())
     return log_path
 
 
@@ -109,8 +96,7 @@ def _source_status(p: VaultPaths, cfg: dict[str, Any]) -> list[dict[str, Any]]:
     source_cfg = cfg.get("source_sync", {})
     items = []
     for label, values in [
-        ("Google Fotos local", cfg.get("google_photos", {}).get("local_media_sources", [])),
-        ("Google Takeout/Drive", source_cfg.get("google_takeout_sources", [])),
+        ("Google Takeout", source_cfg.get("google_takeout_sources", [])),
         ("WhatsApp exports", source_cfg.get("whatsapp_export_sources", [])),
         ("WhatsApp media", source_cfg.get("whatsapp_media_sources", [])),
     ]:
@@ -160,7 +146,7 @@ def _backup_running(p: VaultPaths) -> bool:
             continue
         if payload.get("status") != "running":
             continue
-        if payload.get("command") in {"daily-backup", "onedrive-backup-cleanup", "backup-gmail-api", "photos-sync-local", "ingest-all"}:
+        if payload.get("command") in {"daily-backup", "photos-ingest-takeout", "backup-gmail-api", "ingest-all"}:
             return True
     return False
 
@@ -172,21 +158,3 @@ def _python_executable() -> str:
 def _hidden_process_flag() -> int:
     return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
-
-def _is_elevated() -> bool:
-    if os.name != "nt":
-        return False
-    try:
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return False
-
-
-def _start_elevated_runner(runner: Path, cwd: Path) -> None:
-    runner_arg = str(runner).replace('"', '`"')
-    command = (
-        "Start-Process -FilePath powershell.exe "
-        f"-ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{runner_arg}\"' "
-        "-Verb RunAs -WindowStyle Hidden"
-    )
-    subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], cwd=str(cwd), creationflags=_hidden_process_flag())

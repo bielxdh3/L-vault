@@ -17,8 +17,8 @@ def source_label(row: Any) -> str:
         return "E-mail"
     if "whatsapp" in source or "whatsapp" in media_type or "whatsapp" in path:
         return "WhatsApp"
-    if "photo" in source or "google_photos" in source or media_type in {"photo", "video"}:
-        return "Drive/Fotos"
+    if "photo" in source or "photos" in source or media_type in {"photo", "video"}:
+        return "Fotos"
     return "Arquivo"
 
 
@@ -53,7 +53,7 @@ def dashboard_data(p: VaultPaths) -> dict[str, Any]:
     with db.connect(p.db) as conn:
         gmail_rows = conn.execute("SELECT eml_path FROM gmail_messages").fetchall()
         attachment_rows = conn.execute("SELECT path FROM gmail_attachments").fetchall()
-        photo_rows = conn.execute("SELECT path,media_type FROM google_photos_items").fetchall()
+        photo_rows = conn.execute("SELECT path,media_type FROM photo_items").fetchall()
         file_rows = conn.execute("SELECT * FROM files ORDER BY first_seen_at DESC, id DESC LIMIT 25").fetchall()
         existing_files = conn.execute("SELECT path,size FROM files").fetchall()
         stats = {
@@ -101,9 +101,9 @@ def cleanup_missing_index_entries(p: VaultPaths) -> int:
             if not Path(row["path"]).exists():
                 conn.execute("DELETE FROM gmail_attachments WHERE id=?", (row["id"],))
                 removed += 1
-        for row in conn.execute("SELECT id,path FROM google_photos_items WHERE path IS NOT NULL AND path != ''").fetchall():
+        for row in conn.execute("SELECT id,path FROM photo_items WHERE path IS NOT NULL AND path != ''").fetchall():
             if not Path(row["path"]).exists():
-                conn.execute("DELETE FROM google_photos_items WHERE id=?", (row["id"],))
+                conn.execute("DELETE FROM photo_items WHERE id=?", (row["id"],))
                 removed += 1
     return removed
 
@@ -122,7 +122,7 @@ def _delete_index_for_path(conn, path: str) -> int:
     removed = 0
     removed += conn.execute("DELETE FROM files WHERE path=?", (path,)).rowcount
     removed += conn.execute("DELETE FROM gmail_attachments WHERE path=?", (path,)).rowcount
-    removed += conn.execute("DELETE FROM google_photos_items WHERE path=?", (path,)).rowcount
+    removed += conn.execute("DELETE FROM photo_items WHERE path=?", (path,)).rowcount
     removed += conn.execute("DELETE FROM gmail_messages WHERE eml_path=?", (path,)).rowcount
     return removed
 

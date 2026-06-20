@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS gmail_attachments (
   id INTEGER PRIMARY KEY AUTOINCREMENT, gmail_message_id INTEGER, filename TEXT, path TEXT,
   sha256 TEXT, size INTEGER, mime_type TEXT, imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE TABLE IF NOT EXISTS google_photos_items (
+CREATE TABLE IF NOT EXISTS photo_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, path TEXT NOT NULL UNIQUE,
   sidecar_path TEXT, original_path TEXT, creation_date TEXT, exif_date TEXT,
   google_metadata_date TEXT, file_size INTEGER, mime_type TEXT, sha256 TEXT,
@@ -57,21 +57,14 @@ CREATE TABLE IF NOT EXISTS duplicate_files (
   id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL, file_id INTEGER NOT NULL,
   UNIQUE(group_id, file_id)
 );
-CREATE TABLE IF NOT EXISTS local_source_cleanup_queue (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, original_path TEXT NOT NULL UNIQUE,
-  vault_path TEXT NOT NULL, sha256 TEXT NOT NULL, source TEXT NOT NULL,
-  queued_run_id INTEGER, queued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  status TEXT NOT NULL DEFAULT 'pending', deleted_at TEXT, last_error TEXT
-);
 CREATE INDEX IF NOT EXISTS idx_files_sha256 ON files(sha256);
 CREATE INDEX IF NOT EXISTS idx_gmail_sender ON gmail_messages(sender);
 CREATE INDEX IF NOT EXISTS idx_gmail_subject ON gmail_messages(subject);
 CREATE INDEX IF NOT EXISTS idx_gmail_date ON gmail_messages(message_date);
-CREATE INDEX IF NOT EXISTS idx_photos_date ON google_photos_items(creation_date);
-CREATE INDEX IF NOT EXISTS idx_photos_hash ON google_photos_items(sha256);
+CREATE INDEX IF NOT EXISTS idx_photos_date ON photo_items(creation_date);
+CREATE INDEX IF NOT EXISTS idx_photos_hash ON photo_items(sha256);
 CREATE INDEX IF NOT EXISTS idx_whatsapp_dt ON whatsapp_messages(message_dt);
 CREATE INDEX IF NOT EXISTS idx_whatsapp_sender ON whatsapp_messages(sender);
-CREATE INDEX IF NOT EXISTS idx_cleanup_status ON local_source_cleanup_queue(status);
 """
 
 

@@ -21,18 +21,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "modify_remote": False,
         "batch_size": 100,
     },
-    "google_photos": {
-        "takeout_only_default": True,
-        "upload_enabled": False,
-        "upload_album": "LocalVault Uploads",
-        "local_media_sources": [str(DEFAULT_ROOT / "inbox" / "google_photos_sync")],
-        "preserve_folder_structure": True,
-        "cleanup_originals": {
-            "enabled": False,
-            "only_if_path_contains": ["OneDrive"],
-            "delete_after_next_backup": True,
-        },
-    },
+    "photos": {"takeout_enabled": True},
     "whatsapp": {"copy_media_from": "", "adb_enabled": False},
     "source_sync": {
         "enabled": True,
@@ -57,7 +46,6 @@ class VaultPaths:
     root: Path
     inbox: Path
     google_takeout_inbox: Path
-    google_photos_sync_inbox: Path
     whatsapp_exports_inbox: Path
     manual_imports_inbox: Path
     gmail_messages: Path
@@ -78,13 +66,12 @@ def paths(root: Path = DEFAULT_ROOT) -> VaultPaths:
         root=root,
         inbox=root / "inbox",
         google_takeout_inbox=root / "inbox" / "google_takeout",
-        google_photos_sync_inbox=root / "inbox" / "google_photos_sync",
         whatsapp_exports_inbox=root / "inbox" / "whatsapp_exports",
         manual_imports_inbox=root / "inbox" / "manual_imports",
         gmail_messages=root / "vault" / "gmail" / "messages",
         gmail_attachments=root / "vault" / "gmail" / "attachments",
-        photos=root / "vault" / "google_photos" / "photos",
-        videos=root / "vault" / "google_photos" / "videos",
+        photos=root / "vault" / "fotos" / "imagens",
+        videos=root / "vault" / "fotos" / "videos",
         whatsapp_chats=root / "vault" / "whatsapp" / "chats",
         whatsapp_media=root / "vault" / "whatsapp" / "media",
         db=root / "db" / "localvault.sqlite",
