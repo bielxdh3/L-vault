@@ -1,8 +1,9 @@
 from pathlib import Path
+import os
 
 from localvault import db
 from localvault.config import ensure_directories
-from localvault.vault_index import cleanup_missing_index_entries, dashboard_data, delete_local_file_and_index, safe_vault_path
+from localvault.vault_index import cleanup_missing_index_entries, dashboard_data, delete_local_file_and_index, open_in_explorer, safe_vault_path
 
 
 def test_cleanup_missing_index_entries_updates_dashboard_counts(tmp_path: Path):
@@ -77,3 +78,18 @@ def test_safe_vault_path_can_require_storage_folder(tmp_path: Path):
         pass
     else:
         raise AssertionError("expected inbox path to be blocked")
+
+
+def test_open_in_explorer_quotes_selected_file(monkeypatch, tmp_path: Path):
+    if os.name != "nt":
+        return
+    target = tmp_path / "folder with spaces" / "file with spaces.mp4"
+    target.parent.mkdir()
+    target.write_bytes(b"video")
+    calls = []
+
+    monkeypatch.setattr("localvault.vault_index.subprocess.Popen", lambda command: calls.append(command))
+
+    open_in_explorer(target)
+
+    assert calls == [f'explorer.exe /select,"{target}"']
