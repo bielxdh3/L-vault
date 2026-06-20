@@ -1,4 +1,5 @@
 from pathlib import Path
+from zipfile import ZipFile
 
 from localvault import db
 from localvault.config import ensure_directories
@@ -41,3 +42,21 @@ def test_ingest_photos_takeout_skips_duplicates(tmp_path: Path):
     assert first.imported_count == 1
     assert second.skipped_duplicates == 1
     assert len(list(p.photos.rglob("photo.jpg"))) == 1
+
+
+def test_ingest_photos_takeout_dry_run_counts_media_inside_zip_without_extracting(tmp_path: Path):
+    root = tmp_path / "vault"
+    p = ensure_directories(root)
+    db.init_db(p.db)
+    archive = p.google_takeout_inbox / "takeout.zip"
+    with ZipFile(archive, "w") as zf:
+        zf.writestr("Takeout/Google Photos/photo.jpg", b"fake jpg")
+
+    report = ingest_photos_takeout(p, RunReport(source="test", mode="takeout"), dry_run=True)
+
+    assert report.imported_count == 1
+    assert report.storage_added == len(b"fake jpg")
+    assert not (p.manual_imports_inbox / "extracted_google_takeout").exists()
+    assert not any(p.photos.rglob("*"))
+    with db.connect(p.db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM photo_items").fetchone()[0] == 0
