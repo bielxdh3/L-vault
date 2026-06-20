@@ -26,6 +26,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "upload_enabled": False,
         "upload_album": "LocalVault Uploads",
         "local_media_sources": [str(DEFAULT_ROOT / "inbox" / "google_photos_sync")],
+        "preserve_folder_structure": True,
     },
     "whatsapp": {"copy_media_from": "", "adb_enabled": False},
     "source_sync": {

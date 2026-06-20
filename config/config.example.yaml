@@ -16,6 +16,7 @@ google_photos:
   upload_album: LocalVault Uploads
   local_media_sources:
   - E:\LocalVault\inbox\google_photos_sync
+  preserve_folder_structure: true
 whatsapp:
   copy_media_from: ''
   adb_enabled: false
