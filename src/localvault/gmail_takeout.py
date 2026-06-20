@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import db
 from .config import VaultPaths
-from .email_names import unique_friendly_email_path
+from .email_names import sanitize_filename_component, unique_friendly_email_path
 from .extract import safe_extract_zip
 from .reports import RunReport
 from .utils import guess_mime, sha256_bytes, unique_path
@@ -53,7 +53,8 @@ def _import_mbox(conn, p: VaultPaths, mbox_path: Path, report: RunReport, dry_ru
             for part in msg.iter_attachments():
                 payload = part.get_payload(decode=True)
                 if payload:
-                    name = part.get_filename() or "attachment.bin"
+                    raw_name = part.get_filename() or "attachment.bin"
+                    name = sanitize_filename_component(raw_name, "attachment.bin", max_length=120)
                     adigest = sha256_bytes(payload)
                     adest = unique_path(p.gmail_attachments / digest[:2] / digest / name)
                     adest.parent.mkdir(parents=True, exist_ok=True)
