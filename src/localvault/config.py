@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -113,8 +114,8 @@ def ensure_config(root: Path = DEFAULT_ROOT) -> dict[str, Any]:
 def load_config(root: Path = DEFAULT_ROOT) -> dict[str, Any]:
     config_file = paths(root).config / "config.yaml"
     if not config_file.exists():
-        return DEFAULT_CONFIG.copy()
-    return _deep_merge(DEFAULT_CONFIG.copy(), yaml.safe_load(config_file.read_text(encoding="utf-8")) or {})
+        return deepcopy(DEFAULT_CONFIG)
+    return _deep_merge(deepcopy(DEFAULT_CONFIG), yaml.safe_load(config_file.read_text(encoding="utf-8")) or {})
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
