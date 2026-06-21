@@ -37,6 +37,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "tasks": {
             "daily_backup": {"enabled": True, "name": "Daily Backup", "command": "daily-backup", "frequency": "daily", "time": "02:00", "days": []},
             "weekly_takeout": {"enabled": True, "name": "Weekly Takeout Import", "command": "auto-takeout", "frequency": "weekly", "time": "03:00", "days": ["Sunday"]},
+            "weekly_whatsapp": {"enabled": False, "name": "Weekly WhatsApp Import", "command": "auto-whatsapp", "frequency": "weekly", "time": "03:30", "days": ["Sunday"]},
             "verify_weekly": {"enabled": True, "name": "Verify Weekly", "command": "verify", "frequency": "weekly", "time": "04:00", "days": ["Sunday"]},
         },
     },
