@@ -12,16 +12,10 @@ gmail:
   batch_size: 100
 photos:
   takeout_enabled: true
-whatsapp:
-  copy_media_from: ''
-  adb_enabled: false
 source_sync:
   enabled: true
   google_takeout_sources:
   - C:\Users\bielx\Downloads
-  whatsapp_export_sources:
-  - C:\Users\bielx\Downloads
-  whatsapp_media_sources: []
 safety:
   minimum_free_gb: 20
   hash_algorithm: sha256
@@ -37,6 +31,14 @@ automation:
       frequency: daily
       time: 02:00
       days: []
+    weekly_takeout:
+      enabled: true
+      name: Weekly Takeout Import
+      command: auto-takeout
+      frequency: weekly
+      time: 03:00
+      days:
+      - Sunday
     verify_weekly:
       enabled: true
       name: Verify Weekly

@@ -15,7 +15,7 @@ from .vault_index import dashboard_data
 
 
 ALLOWED_COMMANDS = {
-    "daily-backup": "Tudo: Gmail, fotos e WhatsApp",
+    "daily-backup": "Tudo: Gmail, fotos e Takeout",
     "backup-gmail-api": "Somente Gmail",
     "gmail-dedupe-audit": "Auditar duplicatas Gmail",
     "gmail-repair-runs": "Reparar historico Gmail",
@@ -101,14 +101,11 @@ def _source_status(p: VaultPaths, cfg: dict[str, Any]) -> list[dict[str, Any]]:
     items = []
     for label, values in [
         ("Google Takeout", source_cfg.get("google_takeout_sources", [])),
-        ("WhatsApp exports", source_cfg.get("whatsapp_export_sources", [])),
-        ("WhatsApp media", source_cfg.get("whatsapp_media_sources", [])),
     ]:
         for value in values:
             path = Path(value)
             items.append({"label": label, "path": str(path), "exists": path.exists()})
     items.append({"label": "Inbox Google Takeout", "path": str(p.google_takeout_inbox), "exists": p.google_takeout_inbox.exists()})
-    items.append({"label": "Inbox WhatsApp", "path": str(p.whatsapp_exports_inbox), "exists": p.whatsapp_exports_inbox.exists()})
     return items
 
 

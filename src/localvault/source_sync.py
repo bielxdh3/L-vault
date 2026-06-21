@@ -8,8 +8,6 @@ from .config import VaultPaths, load_config
 from .reports import RunReport
 from .utils import copy_preserve, guess_mime, media_kind, sha256_file, unique_path
 
-WHATSAPP_MEDIA_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".3gp", ".opus", ".ogg", ".mp3", ".m4a", ".pdf", ".doc", ".docx", ".xls", ".xlsx"}
-
 
 def sync_sources(p: VaultPaths, report: RunReport, dry_run: bool = False) -> RunReport:
     cfg = load_config(p.root).get("source_sync", {})
@@ -19,10 +17,6 @@ def sync_sources(p: VaultPaths, report: RunReport, dry_run: bool = False) -> Run
     with db.connect(p.db) as conn:
         for source in _paths(cfg.get("google_takeout_sources", [])):
             _copy_filtered(conn, source, p.google_takeout_inbox, report, dry_run, "source_sync_google_takeout", _is_takeout)
-        for source in _paths(cfg.get("whatsapp_export_sources", [])):
-            _copy_filtered(conn, source, p.whatsapp_exports_inbox, report, dry_run, "source_sync_whatsapp_export", _is_whatsapp_export)
-        for source in _paths(cfg.get("whatsapp_media_sources", [])):
-            _copy_filtered(conn, source, p.whatsapp_media / "synced", report, dry_run, "source_sync_whatsapp_media", lambda x: x.suffix.lower() in WHATSAPP_MEDIA_EXTS)
     return report
 
 
@@ -55,8 +49,3 @@ def _copy_filtered(conn, source: Path, dest_dir: Path, report: RunReport, dry_ru
 def _is_takeout(path: Path) -> bool:
     name = path.name.lower()
     return path.suffix.lower() == ".zip" and ("takeout" in name or "gmail" in name)
-
-
-def _is_whatsapp_export(path: Path) -> bool:
-    name = path.name.lower()
-    return path.suffix.lower() in {".zip", ".txt"} and ("whatsapp" in name or "whats app" in name or "_chat" in name or "conversa" in name)

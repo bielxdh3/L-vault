@@ -36,14 +36,6 @@ def test_schedule_uses_daily_backup_and_start_when_available(tmp_path: Path):
                     "time": "03:00",
                     "days": ["Sunday"],
                 },
-                "weekly_whatsapp": {
-                    "enabled": True,
-                    "name": "Weekly WhatsApp Import",
-                    "command": "auto-whatsapp",
-                    "frequency": "weekly",
-                    "time": "03:30",
-                    "days": ["Sunday"],
-                },
             }
         }
     }), encoding="utf-8")
@@ -54,8 +46,6 @@ def test_schedule_uses_daily_backup_and_start_when_available(tmp_path: Path):
     assert 'Command="daily-backup"' in install
     assert "LocalVault Weekly Takeout Import" in install
     assert 'Command="auto-takeout"' in install
-    assert "LocalVault Weekly WhatsApp Import" in install
-    assert 'Command="auto-whatsapp"' in install
     assert 'Frequency="Weekly"' in install
     assert "-StartWhenAvailable" in install
     assert "-RunLevel Highest" in install

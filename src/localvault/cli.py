@@ -14,7 +14,6 @@ from rich.console import Console
 from . import __version__, db
 from .config import DEFAULT_ROOT, ensure_config, ensure_directories, load_config, paths
 from .auto_takeout import auto_takeout as run_auto_takeout
-from .auto_whatsapp import auto_whatsapp as run_auto_whatsapp
 from .dedupe import build_duplicate_report
 from .gmail_api import backup_gmail_api as run_gmail_api
 from .gmail_audit import audit_gmail_duplicates, repair_stale_gmail_runs
@@ -30,7 +29,6 @@ from .utils import free_space_bytes, utc_now
 from .verify import verify_vault
 from .viewer import create_app
 from .vault_index import cleanup_missing_index_entries
-from .whatsapp import copy_whatsapp_media_folder, ingest_whatsapp_exports
 
 app = typer.Typer(help="LocalVault Backup Manager", invoke_without_command=True)
 console = Console()
@@ -111,21 +109,6 @@ def ingest_takeout(root: Path = root_option(), dry_run: bool = dry_option()):
     finish_cli_command(report)
 
 
-@app.command("ingest-whatsapp")
-def ingest_whatsapp(root: Path = root_option(), dry_run: bool = dry_option(), media_folder: Optional[Path] = typer.Option(None, "--media-folder")):
-    p = prepare(root)
-    report = start_run(p.db, RunReport(source="whatsapp", mode="exports_dry_run" if dry_run else "exports"))
-    try:
-        ingest_whatsapp_exports(p, report, dry_run=dry_run)
-        if media_folder:
-            copy_whatsapp_media_folder(p, media_folder, report, dry_run=dry_run)
-        status = "ok" if report.failed_count == 0 else "warning"
-    except Exception as exc:
-        report.error("whatsapp", str(exc)); status = "failed"
-    finish_run(p.db, p.reports, report, status=status)
-    finish_cli_command(report)
-
-
 @app.command("ingest-all")
 def ingest_all(root: Path = root_option(), dry_run: bool = dry_option(), skip_sync: bool = typer.Option(False, "--skip-sync")):
     p = prepare(root)
@@ -135,7 +118,6 @@ def ingest_all(root: Path = root_option(), dry_run: bool = dry_option(), skip_sy
             run_source_sync(p, report, dry_run=dry_run)
         ingest_photos_takeout(p, report, dry_run=dry_run)
         ingest_gmail_takeout(p, report, dry_run=dry_run)
-        ingest_whatsapp_exports(p, report, dry_run=dry_run)
         build_duplicate_report(p, report, dry_run=dry_run)
         status = "ok" if report.failed_count == 0 else "warning"
     except Exception as exc:
@@ -161,7 +143,6 @@ def daily_backup(root: Path = root_option(), dry_run: bool = dry_option()):
         run_source_sync(p, report, dry_run=dry_run)
         ingest_photos_takeout(p, report, dry_run=dry_run)
         ingest_gmail_takeout(p, report, dry_run=dry_run)
-        ingest_whatsapp_exports(p, report, dry_run=dry_run)
         build_duplicate_report(p, report, dry_run=dry_run)
         verify_vault(p, report, dry_run=False, sample_limit=None)
         status = "ok" if report.failed_count == 0 else "warning"
@@ -199,12 +180,6 @@ def photos_ingest_takeout(root: Path = root_option(), dry_run: bool = dry_option
 def auto_takeout(root: Path = root_option(), dry_run: bool = dry_option()):
     """Move valid Google Takeout ZIPs from configured source folders and import them once."""
     finish_cli_command(run_with_report(root, "google_takeout", "auto_takeout", run_auto_takeout, dry_run=dry_run))
-
-
-@app.command("auto-whatsapp")
-def auto_whatsapp(root: Path = root_option(), dry_run: bool = dry_option()):
-    """Move valid WhatsApp exports from configured source folders and import them once."""
-    finish_cli_command(run_with_report(root, "whatsapp", "auto_whatsapp", run_auto_whatsapp, dry_run=dry_run))
 
 
 @app.command("write-gmail-oauth")
@@ -254,18 +229,17 @@ def sources_status(root: Path = root_option()):
     p = prepare(root); cfg = load_config(root).get("source_sync", {})
     console.print("[bold]Automatic Source Sync[/]")
     console.print(f"Enabled: {cfg.get('enabled', True)}")
-    for name, values in [("Google Takeout", cfg.get("google_takeout_sources", [])), ("WhatsApp exports", cfg.get("whatsapp_export_sources", [])), ("WhatsApp media", cfg.get("whatsapp_media_sources", []))]:
+    for name, values in [("Google Takeout", cfg.get("google_takeout_sources", []))]:
         console.print(f"{name}:")
         for value in values:
             console.print(f"- {value}")
     console.print(f"Takeout ZIPs in inbox: {len(list(p.google_takeout_inbox.glob('*.zip')))}")
-    console.print(f"WhatsApp exports in inbox: {len(list(p.whatsapp_exports_inbox.glob('*.zip'))) + len(list(p.whatsapp_exports_inbox.glob('*.txt')))}")
 
 
 @app.command("open-inboxes")
 def open_inboxes(root: Path = root_option()):
     p = prepare(root)
-    for folder in (p.google_takeout_inbox, p.whatsapp_exports_inbox, p.manual_imports_inbox):
+    for folder in (p.google_takeout_inbox, p.manual_imports_inbox):
         if os.name == "nt":
             os.startfile(folder)  # type: ignore[attr-defined]
         else:
