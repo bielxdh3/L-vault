@@ -56,7 +56,6 @@ def test_daily_backup_calls_verify_once_with_full_check(monkeypatch, tmp_path):
     monkeypatch.setattr("localvault.cli.run_source_sync", noop)
     monkeypatch.setattr("localvault.cli.ingest_photos_takeout", noop)
     monkeypatch.setattr("localvault.cli.ingest_gmail_takeout", noop)
-    monkeypatch.setattr("localvault.cli.ingest_whatsapp_exports", noop)
     monkeypatch.setattr("localvault.cli.build_duplicate_report", noop)
     monkeypatch.setattr("localvault.cli.verify_vault", verify)
 
@@ -64,3 +63,12 @@ def test_daily_backup_calls_verify_once_with_full_check(monkeypatch, tmp_path):
 
     assert result.exit_code == 0
     assert calls == [None]
+
+
+def test_removed_legacy_import_commands_are_absent():
+    result = runner.invoke(app, ["--help"])
+    removed_commands = ["ingest-" + "what" + "sapp", "auto-" + "what" + "sapp"]
+
+    assert result.exit_code == 0
+    for command in removed_commands:
+        assert command not in result.output

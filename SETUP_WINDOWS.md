@@ -12,7 +12,6 @@ cd E:\LocalVault
 
 ```text
 E:\LocalVault\inbox\google_takeout
-E:\LocalVault\inbox\whatsapp_exports
 ```
 
 4. Rode:

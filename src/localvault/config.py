@@ -23,12 +23,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "batch_size": 100,
     },
     "photos": {"takeout_enabled": True},
-    "whatsapp": {"copy_media_from": "", "adb_enabled": False},
     "source_sync": {
         "enabled": True,
         "google_takeout_sources": [DEFAULT_DOWNLOADS],
-        "whatsapp_export_sources": [DEFAULT_DOWNLOADS],
-        "whatsapp_media_sources": [],
     },
     "safety": {"minimum_free_gb": 20, "hash_algorithm": "sha256", "never_delete_sources": True},
     "automation": {
@@ -37,7 +34,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "tasks": {
             "daily_backup": {"enabled": True, "name": "Daily Backup", "command": "daily-backup", "frequency": "daily", "time": "02:00", "days": []},
             "weekly_takeout": {"enabled": True, "name": "Weekly Takeout Import", "command": "auto-takeout", "frequency": "weekly", "time": "03:00", "days": ["Sunday"]},
-            "weekly_whatsapp": {"enabled": False, "name": "Weekly WhatsApp Import", "command": "auto-whatsapp", "frequency": "weekly", "time": "03:30", "days": ["Sunday"]},
             "verify_weekly": {"enabled": True, "name": "Verify Weekly", "command": "verify", "frequency": "weekly", "time": "04:00", "days": ["Sunday"]},
         },
     },
@@ -49,14 +45,11 @@ class VaultPaths:
     root: Path
     inbox: Path
     google_takeout_inbox: Path
-    whatsapp_exports_inbox: Path
     manual_imports_inbox: Path
     gmail_messages: Path
     gmail_attachments: Path
     photos: Path
     videos: Path
-    whatsapp_chats: Path
-    whatsapp_media: Path
     db: Path
     logs: Path
     config: Path
@@ -69,14 +62,11 @@ def paths(root: Path = DEFAULT_ROOT) -> VaultPaths:
         root=root,
         inbox=root / "inbox",
         google_takeout_inbox=root / "inbox" / "google_takeout",
-        whatsapp_exports_inbox=root / "inbox" / "whatsapp_exports",
         manual_imports_inbox=root / "inbox" / "manual_imports",
         gmail_messages=root / "vault" / "gmail" / "messages",
         gmail_attachments=root / "vault" / "gmail" / "attachments",
         photos=root / "vault" / "fotos" / "imagens",
         videos=root / "vault" / "fotos" / "videos",
-        whatsapp_chats=root / "vault" / "whatsapp" / "chats",
-        whatsapp_media=root / "vault" / "whatsapp" / "media",
         db=root / "db" / "localvault.sqlite",
         logs=root / "logs",
         config=root / "config",

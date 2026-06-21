@@ -30,7 +30,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         data["backup_choices"] = {
             "photos-ingest-takeout": "Importar Takeout/Fotos",
             "backup-gmail-api": "Somente Gmail",
-            "daily-backup": "Tudo: Gmail, fotos e WhatsApp",
+            "daily-backup": "Tudo: Gmail, fotos e Takeout",
         }
         return templates.TemplateResponse(request, "dashboard.html", data)
 
@@ -127,25 +127,6 @@ def create_app(root: Path | None = None) -> FastAPI:
             rows = conn.execute(f"SELECT * FROM photo_items {where} ORDER BY creation_date DESC LIMIT 80 OFFSET ?", (*params, max(0, page - 1) * 80)).fetchall()
         items = [{**dict(row), "exists": bool(row["path"] and Path(row["path"]).exists())} for row in rows]
         return templates.TemplateResponse(request, "fotos.html", {"rows": items, "q": q, "media_type": media_type, "page": page})
-
-    @app.get("/whatsapp", response_class=HTMLResponse)
-    def whatsapp_page(request: Request):
-        with db.connect(p.db) as conn:
-            rows = conn.execute("SELECT c.*,COUNT(m.id) message_count FROM whatsapp_chats c LEFT JOIN whatsapp_messages m ON m.chat_id=c.id GROUP BY c.id ORDER BY c.chat_name").fetchall()
-        return templates.TemplateResponse(request, "whatsapp.html", {"rows": rows})
-
-    @app.get("/whatsapp/{chat_id}", response_class=HTMLResponse)
-    def whatsapp_chat(request: Request, chat_id: int, q: str = "", page: int = 1):
-        where, params = "WHERE chat_id=?", [chat_id]
-        if q:
-            where += " AND (text LIKE ? OR sender LIKE ?)"
-            params += [f"%{q}%", f"%{q}%"]
-        with db.connect(p.db) as conn:
-            chat = conn.execute("SELECT * FROM whatsapp_chats WHERE id=?", (chat_id,)).fetchone()
-            rows = conn.execute(f"SELECT * FROM whatsapp_messages {where} ORDER BY id LIMIT 250 OFFSET ?", (*params, max(0, page - 1) * 250)).fetchall()
-        if not chat:
-            raise HTTPException(404)
-        return templates.TemplateResponse(request, "whatsapp_chat.html", {"chat": chat, "rows": rows, "q": q, "page": page})
 
     @app.get("/reports", response_class=HTMLResponse)
     def reports_page(request: Request):

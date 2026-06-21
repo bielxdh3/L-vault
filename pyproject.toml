@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "localvault-backup-manager"
 version = "0.2.0"
-description = "Local-first backup manager and viewer for Gmail, Google Takeout Photos, and WhatsApp exports."
+description = "Local-first backup manager and viewer for Gmail and Google Takeout Photos."
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115",

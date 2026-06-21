@@ -1,6 +1,6 @@
 # LocalVault Backup Manager
 
-LocalVault e um cofre local para Gmail, Fotos via Google Takeout e exports do WhatsApp.
+LocalVault e um cofre local para Gmail e Google Takeout.
 
 Raiz padrao:
 
@@ -66,11 +66,11 @@ O LocalVault preserva os arquivos ja importados, usa SHA-256 para evitar duplica
 
 ## Automacao
 
-O `sync-sources` copia automaticamente exports detectados em `Downloads` para as pastas de inbox do LocalVault.
+O `sync-sources` copia automaticamente exports de Google Takeout detectados em `Downloads` para o inbox do LocalVault.
 
 O agendador diario padrao:
 
-- 02:00 Backup diario principal: Gmail API, sync de fontes, importacao de Takeout/WhatsApp e relatorio de duplicados
+- 02:00 Backup diario principal: Gmail API, sync de fontes, importacao de Takeout e relatorio de duplicados
 - Domingo 04:00 Verificacao
 
 Se o PC estiver desligado no horario marcado, o Windows roda a tarefa assim que possivel quando o computador ligar novamente.
@@ -83,7 +83,7 @@ python -m localvault schedule-install --root E:\LocalVault
 
 ## Limites Seguros
 
-Gmail pode ser automatico via API oficial. Fotos completas dependem de Google Takeout. WhatsApp chats dependem de export oficial ou midia acessivel. O sistema nao rouba credenciais, nao descriptografa bancos do WhatsApp e nao apaga dados remotos.
+Gmail pode ser automatico via API oficial. Fotos e videos completos dependem de Google Takeout. O sistema nao rouba credenciais e nao apaga dados remotos.
 
 Os arquivos `.eml` do Gmail sao salvos com nomes legiveis no padrao `data_remetente_assunto_id.eml`. Para renomear e-mails antigos ja baixados:
 

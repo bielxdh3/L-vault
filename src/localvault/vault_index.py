@@ -15,8 +15,6 @@ def source_label(row: Any) -> str:
     path = str(row["path"] or "").lower()
     if "gmail" in source or media_type == "email" or "gmail" in path:
         return "E-mail"
-    if "whatsapp" in source or "whatsapp" in media_type or "whatsapp" in path:
-        return "WhatsApp"
     if "photo" in source or "photos" in source or media_type in {"photo", "video"}:
         return "Fotos"
     return "Arquivo"
@@ -62,7 +60,6 @@ def dashboard_data(p: VaultPaths) -> dict[str, Any]:
             "attachments": _existing_count(row["path"] for row in attachment_rows),
             "photos": _existing_count(row["path"] for row in photo_rows if row["media_type"] == "photo"),
             "videos": _existing_count(row["path"] for row in photo_rows if row["media_type"] == "video"),
-            "chats": int(conn.execute("SELECT COUNT(*) FROM whatsapp_chats").fetchone()[0]),
             "storage": sum(int(row["size"] or 0) for row in existing_files if Path(row["path"]).exists()),
             "missing_files": sum(1 for row in existing_files if not Path(row["path"]).exists()),
             "last_run": conn.execute("SELECT * FROM backup_runs ORDER BY id DESC LIMIT 1").fetchone(),

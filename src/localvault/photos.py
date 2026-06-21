@@ -52,7 +52,7 @@ def _dry_run_photos_zip(zip_path: Path, report: RunReport) -> None:
 
 def scan_existing_media(p: VaultPaths, report: RunReport, dry_run: bool = False) -> RunReport:
     with db.connect(p.db) as conn:
-        for root in (p.photos, p.videos, p.whatsapp_media):
+        for root in (p.photos, p.videos):
             for path in root.rglob("*"):
                 if path.is_file():
                     digest = sha256_file(path)

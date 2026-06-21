@@ -35,15 +35,6 @@ CREATE TABLE IF NOT EXISTS photo_items (
   google_metadata_date TEXT, file_size INTEGER, mime_type TEXT, sha256 TEXT,
   width INTEGER, height INTEGER, album TEXT, media_type TEXT, imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE TABLE IF NOT EXISTS whatsapp_chats (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, chat_name TEXT NOT NULL, source_path TEXT,
-  imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(chat_name, source_path)
-);
-CREATE TABLE IF NOT EXISTS whatsapp_messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, message_dt TEXT,
-  sender TEXT, text TEXT, media_ref TEXT, is_system INTEGER NOT NULL DEFAULT 0,
-  source_line INTEGER, imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
 CREATE TABLE IF NOT EXISTS import_errors (
   id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, source TEXT, item_path TEXT,
   error TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -63,8 +54,6 @@ CREATE INDEX IF NOT EXISTS idx_gmail_subject ON gmail_messages(subject);
 CREATE INDEX IF NOT EXISTS idx_gmail_date ON gmail_messages(message_date);
 CREATE INDEX IF NOT EXISTS idx_photos_date ON photo_items(creation_date);
 CREATE INDEX IF NOT EXISTS idx_photos_hash ON photo_items(sha256);
-CREATE INDEX IF NOT EXISTS idx_whatsapp_dt ON whatsapp_messages(message_dt);
-CREATE INDEX IF NOT EXISTS idx_whatsapp_sender ON whatsapp_messages(sender);
 """
 
 
