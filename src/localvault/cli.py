@@ -14,6 +14,7 @@ from rich.console import Console
 from . import __version__, db
 from .config import DEFAULT_ROOT, ensure_config, ensure_directories, load_config, paths
 from .auto_takeout import auto_takeout as run_auto_takeout
+from .auto_whatsapp import auto_whatsapp as run_auto_whatsapp
 from .dedupe import build_duplicate_report
 from .gmail_api import backup_gmail_api as run_gmail_api
 from .gmail_audit import audit_gmail_duplicates, repair_stale_gmail_runs
@@ -198,6 +199,12 @@ def photos_ingest_takeout(root: Path = root_option(), dry_run: bool = dry_option
 def auto_takeout(root: Path = root_option(), dry_run: bool = dry_option()):
     """Move valid Google Takeout ZIPs from configured source folders and import them once."""
     finish_cli_command(run_with_report(root, "google_takeout", "auto_takeout", run_auto_takeout, dry_run=dry_run))
+
+
+@app.command("auto-whatsapp")
+def auto_whatsapp(root: Path = root_option(), dry_run: bool = dry_option()):
+    """Move valid WhatsApp exports from configured source folders and import them once."""
+    finish_cli_command(run_with_report(root, "whatsapp", "auto_whatsapp", run_auto_whatsapp, dry_run=dry_run))
 
 
 @app.command("write-gmail-oauth")
