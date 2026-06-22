@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -125,14 +124,14 @@ def test_auto_takeout_does_not_import_if_any_move_fails(monkeypatch, tmp_path: P
     _zip(first, {"Takeout/Google Photos/photo-1.jpg": b"photo-1"})
     _zip(second, {"Takeout/Google Photos/photo-2.jpg": b"photo-2"})
     calls = []
-    original_move = shutil.move
-
-    def flaky_move(src, dest):
+    def flaky_move(src, dest, expected_sha256=None, dry_run=False):
         if str(src).endswith("takeout-002.zip"):
             raise OSError("disk error")
-        return original_move(src, dest)
+        dest.write_bytes(src.read_bytes())
+        src.unlink()
+        return dest.stat().st_size
 
-    monkeypatch.setattr("localvault.auto_takeout.shutil.move", flaky_move)
+    monkeypatch.setattr("localvault.auto_takeout.atomic_move_or_copy", flaky_move)
     monkeypatch.setattr("localvault.auto_takeout.ingest_photos_takeout", lambda *args, **kwargs: calls.append("photos"))
     monkeypatch.setattr("localvault.auto_takeout.ingest_gmail_takeout", lambda *args, **kwargs: calls.append("gmail"))
 
@@ -142,6 +141,27 @@ def test_auto_takeout_does_not_import_if_any_move_fails(monkeypatch, tmp_path: P
     assert calls == []
     assert (p.google_takeout_inbox / "takeout-001.zip").exists()
     assert second.exists()
+
+
+def test_auto_takeout_does_not_remove_original_if_safe_move_fails(monkeypatch, tmp_path: Path):
+    p, downloads = _prepared(tmp_path)
+    archive = downloads / "takeout.zip"
+    _zip(archive, {"Takeout/Google Photos/photo.jpg": b"photo"})
+    calls = []
+
+    def fail_move(*args, **kwargs):
+        raise ValueError("verification failed")
+
+    monkeypatch.setattr("localvault.auto_takeout.atomic_move_or_copy", fail_move)
+    monkeypatch.setattr("localvault.auto_takeout.ingest_photos_takeout", lambda *args, **kwargs: calls.append("photos"))
+    monkeypatch.setattr("localvault.auto_takeout.ingest_gmail_takeout", lambda *args, **kwargs: calls.append("gmail"))
+
+    report = auto_takeout(p, RunReport(source="google_takeout", mode="auto"))
+
+    assert report.failed_count == 1
+    assert archive.exists()
+    assert not (p.google_takeout_inbox / "takeout.zip").exists()
+    assert calls == []
 
 
 def test_auto_takeout_skips_duplicate_zip_by_hash(tmp_path: Path):

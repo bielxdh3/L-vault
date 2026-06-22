@@ -5,6 +5,7 @@ import json
 from . import db
 from .config import VaultPaths
 from .reports import RunReport
+from .utils import atomic_write_text
 
 
 def build_duplicate_report(p: VaultPaths, report: RunReport, dry_run: bool = False) -> RunReport:
@@ -26,6 +27,5 @@ def build_duplicate_report(p: VaultPaths, report: RunReport, dry_run: bool = Fal
         report.imported_count = len(out)
         if not dry_run:
             path = p.reports / "duplicates_latest.json"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+            atomic_write_text(path, json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     return report

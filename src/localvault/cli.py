@@ -4,6 +4,7 @@ import logging
 import os
 import json
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
@@ -20,12 +21,13 @@ from .gmail_audit import audit_gmail_duplicates, repair_stale_gmail_runs
 from .gmail_maintenance import rename_existing_gmail_files
 from .gmail_takeout import ingest_gmail_takeout
 from .health import health_snapshot
+from .locks import BackupLock
 from .migrations import migrate_to_takeout_photos
 from .photos import ingest_photos_takeout, scan_existing_media
-from .reports import RunReport, finish_run, start_run
+from .reports import RunReport, finish_run, mark_stale_running_runs, start_run
 from .scheduler import generate_schedule_files, list_windows_tasks, run_powershell_script
 from .source_sync import sync_sources as run_source_sync
-from .utils import free_space_bytes, utc_now
+from .utils import atomic_write_text, cleanup_stale_temp_files, free_space_bytes, utc_now
 from .verify import verify_vault
 from .viewer import create_app
 from .vault_index import cleanup_missing_index_entries
@@ -45,6 +47,8 @@ def dry_option() -> bool:
 def prepare(root: Path):
     p = ensure_directories(root)
     db.init_db(p.db)
+    cleanup_stale_temp_files(p.root)
+    mark_stale_running_runs(p.db)
     migrate_to_takeout_photos(p)
     configure_logging(p.logs)
     return p
@@ -55,17 +59,63 @@ def configure_logging(logs_dir: Path) -> None:
     logging.basicConfig(filename=logs_dir / f"localvault_{utc_now().replace(':','').replace('+','Z')}.log", level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", force=True)
 
 
-def run_with_report(root: Path, source: str, mode: str, func, dry_run: bool = False, *args, **kwargs) -> RunReport:
+PROTECTED_COMMANDS = {
+    "api",
+    "auto_takeout",
+    "daily_backup",
+    "ingest_all",
+    "photos_and_gmail",
+    "takeout",
+}
+
+
+def run_with_report(root: Path, source: str, mode: str, func, dry_run: bool = False, protected: bool | None = None, *args, **kwargs) -> RunReport:
     p = prepare(root)
-    report = start_run(p.db, RunReport(source=source, mode=f"{mode}{'_dry_run' if dry_run else ''}"))
+    report_mode = f"{mode}{'_dry_run' if dry_run else ''}"
+    lock_needed = mode in PROTECTED_COMMANDS if protected is None else protected
     try:
-        func(p, report, dry_run=dry_run, *args, **kwargs)
-        status = "ok" if report.failed_count == 0 else "warning"
-    except Exception as exc:
-        report.error(source, str(exc))
-        status = "failed"
-    finish_run(p.db, p.reports, report, status=status)
-    return report
+        lock_context = BackupLock(_backup_lock_path(p)) if lock_needed and not dry_run else nullcontext()
+        with lock_context:
+            report = start_run(p.db, RunReport(source=source, mode=report_mode))
+            try:
+                func(p, report, dry_run=dry_run, *args, **kwargs)
+                status = "ok" if report.failed_count == 0 else "warning"
+            except Exception as exc:
+                report.error(source, str(exc))
+                status = "failed"
+            finish_run(p.db, p.reports, report, status=status)
+            return report
+    except RuntimeError as exc:
+        report = start_run(p.db, RunReport(source=source, mode=report_mode))
+        report.error("lock", str(exc))
+        finish_run(p.db, p.reports, report, status="failed")
+        return report
+
+
+def run_manual_report(root: Path, source: str, mode: str, dry_run: bool, protected: bool, func) -> RunReport:
+    p = prepare(root)
+    report_mode = f"{mode}{'_dry_run' if dry_run else ''}"
+    try:
+        lock_context = BackupLock(_backup_lock_path(p)) if protected and not dry_run else nullcontext()
+        with lock_context:
+            report = start_run(p.db, RunReport(source=source, mode=report_mode))
+            try:
+                func(p, report)
+                status = "ok" if report.failed_count == 0 else "warning"
+            except Exception as exc:
+                report.error(source, str(exc))
+                status = "failed"
+            finish_run(p.db, p.reports, report, status=status)
+            return report
+    except RuntimeError as exc:
+        report = start_run(p.db, RunReport(source=source, mode=report_mode))
+        report.error("lock", str(exc))
+        finish_run(p.db, p.reports, report, status="failed")
+        return report
+
+
+def _backup_lock_path(p) -> Path:
+    return p.logs / "localvault_backup.lock"
 
 
 def finish_cli_command(report: RunReport) -> None:
@@ -97,32 +147,22 @@ def sync_sources(root: Path = root_option(), dry_run: bool = dry_option()):
 
 @app.command("ingest-takeout")
 def ingest_takeout(root: Path = root_option(), dry_run: bool = dry_option()):
-    p = prepare(root)
-    report = start_run(p.db, RunReport(source="google_takeout", mode="photos_and_gmail_dry_run" if dry_run else "photos_and_gmail"))
-    try:
+    def work(p, report):
         ingest_photos_takeout(p, report, dry_run=dry_run)
         ingest_gmail_takeout(p, report, dry_run=dry_run)
-        status = "ok" if report.failed_count == 0 else "warning"
-    except Exception as exc:
-        report.error("google_takeout", str(exc)); status = "failed"
-    finish_run(p.db, p.reports, report, status=status)
+    report = run_manual_report(root, "google_takeout", "photos_and_gmail", dry_run, True, work)
     finish_cli_command(report)
 
 
 @app.command("ingest-all")
 def ingest_all(root: Path = root_option(), dry_run: bool = dry_option(), skip_sync: bool = typer.Option(False, "--skip-sync")):
-    p = prepare(root)
-    report = start_run(p.db, RunReport(source="all_sources", mode="ingest_all_dry_run" if dry_run else "ingest_all"))
-    try:
+    def work(p, report):
         if not skip_sync:
             run_source_sync(p, report, dry_run=dry_run)
         ingest_photos_takeout(p, report, dry_run=dry_run)
         ingest_gmail_takeout(p, report, dry_run=dry_run)
         build_duplicate_report(p, report, dry_run=dry_run)
-        status = "ok" if report.failed_count == 0 else "warning"
-    except Exception as exc:
-        report.error("all_sources", str(exc)); status = "failed"
-    finish_run(p.db, p.reports, report, status=status)
+    report = run_manual_report(root, "all_sources", "ingest_all", dry_run, True, work)
     finish_cli_command(report)
 
 
@@ -133,9 +173,7 @@ def backup_gmail_api(root: Path = root_option(), dry_run: bool = dry_option(), m
 
 @app.command("daily-backup")
 def daily_backup(root: Path = root_option(), dry_run: bool = dry_option()):
-    p = prepare(root)
-    report = start_run(p.db, RunReport(source="localvault", mode="daily_backup_dry_run" if dry_run else "daily_backup"))
-    try:
+    def work(p, report):
         removed = cleanup_missing_index_entries(p)
         if removed:
             report.warn(f"Cleaned {removed} missing index entries before backup.")
@@ -145,10 +183,7 @@ def daily_backup(root: Path = root_option(), dry_run: bool = dry_option()):
         ingest_gmail_takeout(p, report, dry_run=dry_run)
         build_duplicate_report(p, report, dry_run=dry_run)
         verify_vault(p, report, dry_run=False, sample_limit=None)
-        status = "ok" if report.failed_count == 0 else "warning"
-    except Exception as exc:
-        report.error("daily_backup", str(exc)); status = "failed"
-    finish_run(p.db, p.reports, report, status=status)
+    report = run_manual_report(root, "localvault", "daily_backup", dry_run, True, work)
     finish_cli_command(report)
 
 
@@ -215,11 +250,11 @@ def write_gmail_oauth(
         }
     }
     target = p.config / "google_oauth_client_secret.json"
-    target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(target, json.dumps(payload, indent=2), encoding="utf-8")
     cfg_path = p.config / "config.yaml"
     cfg_text = cfg_path.read_text(encoding="utf-8")
     cfg_text = cfg_text.replace("api_enabled: false", "api_enabled: true")
-    cfg_path.write_text(cfg_text, encoding="utf-8")
+    atomic_write_text(cfg_path, cfg_text, encoding="utf-8")
     console.print(f"[green]OAuth file written:[/] {target}")
     console.print("Next: python -m localvault backup-gmail-api --root E:\\LocalVault --max-messages 1")
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +9,7 @@ from .extract import safe_zip_infos, safe_zip_member_name
 from .gmail_takeout import ingest_gmail_takeout
 from .photos import PHOTO_EXTS, VIDEO_EXTS, ingest_photos_takeout
 from .reports import RunReport
-from .utils import sha256_file, unique_path
+from .utils import atomic_move_or_copy, sha256_file, unique_path
 
 INCOMPLETE_SUFFIXES = {".crdownload", ".tmp", ".part"}
 
@@ -35,12 +34,12 @@ def auto_takeout(p: VaultPaths, report: RunReport, dry_run: bool = False) -> Run
     move_failed = False
     for move in moves:
         try:
-            move.dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(move.source), str(move.dest))
+            digest = sha256_file(move.source)
+            atomic_move_or_copy(move.source, move.dest, expected_sha256=digest)
             moved.append(move)
             report.imported_count += 1
             report.storage_added += move.dest.stat().st_size
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             move_failed = True
             report.error(move.source, str(exc))
     if moved and not move_failed:

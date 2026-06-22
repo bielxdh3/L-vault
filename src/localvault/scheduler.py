@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import DEFAULT_CONFIG, VaultPaths, load_config
+from .utils import atomic_write_text
 
 
 @dataclass(frozen=True)
@@ -39,10 +40,10 @@ def generate_schedule_files(p: VaultPaths) -> GeneratedScheduleFiles:
     install = p.root / "schedule_tasks.ps1"
     remove = p.root / "unschedule_tasks.ps1"
     list_tasks = p.root / "list_scheduled_tasks.ps1"
-    runner.write_text(_runner_script(p), encoding="utf-8")
-    install.write_text(_install_script(p, automation), encoding="utf-8")
-    remove.write_text(_remove_script(automation), encoding="utf-8")
-    list_tasks.write_text(_list_script(automation), encoding="utf-8")
+    atomic_write_text(runner, _runner_script(p), encoding="utf-8")
+    atomic_write_text(install, _install_script(p, automation), encoding="utf-8")
+    atomic_write_text(remove, _remove_script(automation), encoding="utf-8")
+    atomic_write_text(list_tasks, _list_script(automation), encoding="utf-8")
     return GeneratedScheduleFiles(runner, install, remove, list_tasks)
 
 

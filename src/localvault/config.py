@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import os
-import shutil
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from .utils import atomic_copy, atomic_write_text
 
 DEFAULT_ROOT = Path(os.environ.get("LOCALVAULT_ROOT", r"E:\LocalVault"))
 DEFAULT_DOWNLOADS = str(Path.home() / "Downloads")
@@ -89,7 +90,7 @@ def write_example_config(root: Path = DEFAULT_ROOT) -> Path:
     p = paths(root)
     p.config.mkdir(parents=True, exist_ok=True)
     example = p.config / "config.example.yaml"
-    example.write_text(yaml.safe_dump(DEFAULT_CONFIG, sort_keys=False), encoding="utf-8")
+    atomic_write_text(example, yaml.safe_dump(DEFAULT_CONFIG, sort_keys=False), encoding="utf-8")
     return example
 
 
@@ -98,7 +99,7 @@ def ensure_config(root: Path = DEFAULT_ROOT) -> dict[str, Any]:
     example = write_example_config(root)
     config_file = p.config / "config.yaml"
     if not config_file.exists():
-        shutil.copy2(example, config_file)
+        atomic_copy(example, config_file)
     return load_config(root)
 
 

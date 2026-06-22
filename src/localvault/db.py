@@ -27,7 +27,12 @@ CREATE TABLE IF NOT EXISTS gmail_messages (
 );
 CREATE TABLE IF NOT EXISTS gmail_attachments (
   id INTEGER PRIMARY KEY AUTOINCREMENT, gmail_message_id INTEGER, filename TEXT, path TEXT,
-  sha256 TEXT, size INTEGER, mime_type TEXT, imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  sha256 TEXT, size INTEGER, mime_type TEXT, content_id TEXT, is_inline INTEGER NOT NULL DEFAULT 0,
+  imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS gmail_bodies (
+  gmail_message_id INTEGER PRIMARY KEY, body_text TEXT, body_html_path TEXT,
+  imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS photo_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, path TEXT NOT NULL UNIQUE,
@@ -69,6 +74,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
 def init_db(db_path: Path) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _ensure_column(conn, "gmail_attachments", "content_id", "TEXT")
+        _ensure_column(conn, "gmail_attachments", "is_inline", "INTEGER NOT NULL DEFAULT 0")
 
 
 def upsert_file(conn: sqlite3.Connection, *, sha256: str, path: Path, original_path: Path | None = None,
@@ -89,3 +96,9 @@ def upsert_file(conn: sqlite3.Connection, *, sha256: str, path: Path, original_p
 def scalar(conn: sqlite3.Connection, sql: str, params: Iterable[Any] = ()) -> Any:
     row = conn.execute(sql, tuple(params)).fetchone()
     return row[0] if row else None
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import base64
+from email.message import EmailMessage
 from pathlib import Path
 
 import yaml
+from fastapi.testclient import TestClient
 
 from localvault import db
 from localvault.config import ensure_directories
 from localvault.gmail_api import LAST_INTERNAL_DATE_MS, backup_gmail_api
 from localvault.reports import RunReport
+from localvault.viewer import create_app
 
 
 def test_gmail_api_second_run_skips_existing_without_duplicate_files(monkeypatch, tmp_path: Path):
@@ -80,6 +83,133 @@ def test_gmail_api_skips_same_raw_message_already_imported_by_takeout(monkeypatc
         assert conn.execute("SELECT gmail_id FROM gmail_messages").fetchone()[0] == "m1"
 
 
+def test_gmail_api_saves_raw_eml_and_renderable_plain_text(monkeypatch, tmp_path: Path):
+    p = _prepared(tmp_path)
+    msg = EmailMessage()
+    msg["Message-ID"] = "<plain@example.com>"
+    msg["Subject"] = "Plain API"
+    msg["From"] = "Sender <sender@example.com>"
+    msg["To"] = "Receiver <receiver@example.com>"
+    msg.set_content("Plain API body")
+    service = _FakeGmailService([_message_from_email("plain", "1700000000000", msg)])
+    monkeypatch.setattr("localvault.gmail_api._service", lambda credentials, token: service)
+
+    report = backup_gmail_api(p, RunReport(source="gmail", mode="api"))
+
+    assert report.imported_count == 1
+    with db.connect(p.db) as conn:
+        row = conn.execute("SELECT eml_path FROM gmail_messages WHERE gmail_id='plain'").fetchone()
+        body = conn.execute("SELECT body_text FROM gmail_bodies").fetchone()
+    assert Path(row["eml_path"]).exists()
+    assert body["body_text"].strip() == "Plain API body"
+    response = TestClient(create_app(p.root)).get("/gmail/1")
+    assert "Plain API body" in response.text
+
+
+def test_gmail_api_saves_html_body_and_blocks_remote_images(monkeypatch, tmp_path: Path):
+    p = _prepared(tmp_path)
+    msg = EmailMessage()
+    msg["Message-ID"] = "<html@example.com>"
+    msg["Subject"] = "HTML API"
+    msg["From"] = "Sender <sender@example.com>"
+    msg.set_content("Plain fallback")
+    msg.add_alternative('<html><body><h1>Hello API</h1><script>alert(1)</script><img src="https://example.com/remote.png"></body></html>', subtype="html")
+    service = _FakeGmailService([_message_from_email("html", "1700000000000", msg)])
+    monkeypatch.setattr("localvault.gmail_api._service", lambda credentials, token: service)
+
+    backup_gmail_api(p, RunReport(source="gmail", mode="api"))
+
+    with db.connect(p.db) as conn:
+        body = conn.execute("SELECT body_html_path FROM gmail_bodies").fetchone()
+    assert body["body_html_path"]
+    response = TestClient(create_app(p.root)).get("/gmail/1")
+    assert "Hello API" in response.text
+    assert "script" not in response.text.lower()
+    assert "https://example.com/remote.png" not in response.text
+    assert "data-remote-image" in response.text
+
+
+def test_gmail_api_extracts_attachment(monkeypatch, tmp_path: Path):
+    p = _prepared(tmp_path)
+    msg = EmailMessage()
+    msg["Message-ID"] = "<attach@example.com>"
+    msg["Subject"] = "Attachment API"
+    msg["From"] = "Sender <sender@example.com>"
+    msg.set_content("See attached")
+    msg.add_attachment(b"document", maintype="text", subtype="plain", filename="doc.txt")
+    service = _FakeGmailService([_message_from_email("attach", "1700000000000", msg)])
+    monkeypatch.setattr("localvault.gmail_api._service", lambda credentials, token: service)
+
+    backup_gmail_api(p, RunReport(source="gmail", mode="api"))
+
+    with db.connect(p.db) as conn:
+        row = conn.execute("SELECT filename,path,is_inline FROM gmail_attachments").fetchone()
+    assert row["filename"] == "doc.txt"
+    assert row["is_inline"] == 0
+    assert Path(row["path"]).read_bytes() == b"document"
+    response = TestClient(create_app(p.root)).get("/gmail/1")
+    assert "doc.txt" in response.text
+
+
+def test_gmail_api_extracts_inline_cid_image_and_rewrites_html(monkeypatch, tmp_path: Path):
+    p = _prepared(tmp_path)
+    msg = EmailMessage()
+    msg["Message-ID"] = "<inline@example.com>"
+    msg["Subject"] = "Inline API"
+    msg["From"] = "Sender <sender@example.com>"
+    msg.set_content("Plain fallback")
+    msg.add_alternative('<html><body><p>Logo</p><img src="cid:logo1"></body></html>', subtype="html")
+    html_part = msg.get_payload()[1]
+    html_part.add_related(b"pngdata", maintype="image", subtype="png", cid="<logo1>", filename="logo.png")
+    service = _FakeGmailService([_message_from_email("inline", "1700000000000", msg)])
+    monkeypatch.setattr("localvault.gmail_api._service", lambda credentials, token: service)
+
+    backup_gmail_api(p, RunReport(source="gmail", mode="api"))
+
+    with db.connect(p.db) as conn:
+        attachment = conn.execute("SELECT content_id,is_inline,path FROM gmail_attachments").fetchone()
+        body = conn.execute("SELECT body_html_path FROM gmail_bodies").fetchone()
+    assert attachment["content_id"] == "logo1"
+    assert attachment["is_inline"] == 1
+    assert Path(attachment["path"]).read_bytes() == b"pngdata"
+    assert "/file?path=" in Path(body["body_html_path"]).read_text(encoding="utf-8")
+
+
+def test_gmail_api_backfills_renderable_parts_for_existing_raw_eml(monkeypatch, tmp_path: Path):
+    p = _prepared(tmp_path)
+    msg = EmailMessage()
+    msg["Message-ID"] = "<old@example.com>"
+    msg["Subject"] = "Old API"
+    msg["From"] = "Sender <sender@example.com>"
+    msg.set_content("Old body")
+    msg.add_attachment(b"old-doc", maintype="text", subtype="plain", filename="old.txt")
+    payload = _message_from_email("old", "1700000000000", msg)
+    raw = base64.urlsafe_b64decode(payload["raw"].encode("ascii"))
+    eml_path = p.gmail_messages / "old.eml"
+    eml_path.parent.mkdir(parents=True, exist_ok=True)
+    eml_path.write_bytes(raw)
+    from localvault.utils import sha256_bytes
+
+    digest = sha256_bytes(raw)
+    with db.connect(p.db) as conn:
+        conn.execute(
+            "INSERT INTO gmail_messages (gmail_id,subject,eml_path,raw_sha256,source) VALUES (?,?,?,?,?)",
+            ("old", "Old API", str(eml_path), digest, "gmail_api"),
+        )
+    service = _FakeGmailService([payload])
+    monkeypatch.setattr("localvault.gmail_api._service", lambda credentials, token: service)
+
+    report = backup_gmail_api(p, RunReport(source="gmail", mode="api"))
+
+    assert report.skipped_duplicates == 1
+    with db.connect(p.db) as conn:
+        body = conn.execute("SELECT body_text FROM gmail_bodies").fetchone()
+        attachment = conn.execute("SELECT filename,path FROM gmail_attachments").fetchone()
+    assert body["body_text"].strip() == "Old body"
+    assert attachment["filename"] == "old.txt"
+    assert Path(attachment["path"]).read_bytes() == b"old-doc"
+
+
 def _prepared(tmp_path: Path):
     root = tmp_path / "vault"
     p = ensure_directories(root)
@@ -104,6 +234,18 @@ def _message(gmail_id: str, internal_date: str, subject: str) -> dict:
         "",
         "body",
     ]).encode("utf-8")
+    return {
+        "id": gmail_id,
+        "threadId": f"t-{gmail_id}",
+        "labelIds": ["INBOX"],
+        "snippet": "body",
+        "internalDate": internal_date,
+        "raw": base64.urlsafe_b64encode(raw).decode("ascii"),
+    }
+
+
+def _message_from_email(gmail_id: str, internal_date: str, msg: EmailMessage) -> dict:
+    raw = msg.as_bytes()
     return {
         "id": gmail_id,
         "threadId": f"t-{gmail_id}",
