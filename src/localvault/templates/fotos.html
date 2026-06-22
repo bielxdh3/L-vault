@@ -1,28 +1,90 @@
 {% extends "base.html" %}{% block title %}Fotos - LocalVault{% endblock %}
 {% block content %}
-<h1>Fotos</h1>
-<form class="toolbar">
-  <input name="q" value="{{ q }}" placeholder="Buscar data, arquivo, album">
-  <select name="media_type"><option value="">Todos</option><option value="photo" {% if media_type=="photo" %}selected{% endif %}>Fotos</option><option value="video" {% if media_type=="video" %}selected{% endif %}>Videos</option></select>
+<section class="page-head">
+  <div>
+    <h1>Fotos e videos</h1>
+    <p class="muted">Galeria local dos arquivos importados do Google Takeout.</p>
+  </div>
+</section>
+<form class="filter-panel media-filters">
+  <input name="q" value="{{ q }}" placeholder="Buscar por nome, data ou album">
+  <select name="media_type"><option value="">Todos os tipos</option><option value="photo" {% if media_type=="photo" %}selected{% endif %}>Fotos</option><option value="video" {% if media_type=="video" %}selected{% endif %}>Videos</option></select>
+  <input name="album" value="{{ album }}" list="album-list" placeholder="Album/pasta">
+  <datalist id="album-list">{% for value in albums %}<option value="{{ value }}">{% endfor %}</datalist>
+  <input name="date_from" value="{{ date_from }}" type="date" aria-label="Data inicial">
+  <input name="date_to" value="{{ date_to }}" type="date" aria-label="Data final">
+  <select name="sort">
+    <option value="date_desc" {% if sort=="date_desc" %}selected{% endif %}>Mais recentes</option>
+    <option value="date_asc" {% if sort=="date_asc" %}selected{% endif %}>Mais antigas</option>
+    <option value="name_asc" {% if sort=="name_asc" %}selected{% endif %}>Nome A-Z</option>
+    <option value="name_desc" {% if sort=="name_desc" %}selected{% endif %}>Nome Z-A</option>
+    <option value="size_desc" {% if sort=="size_desc" %}selected{% endif %}>Maiores</option>
+    <option value="size_asc" {% if sort=="size_asc" %}selected{% endif %}>Menores</option>
+  </select>
+  <select name="layout">
+    <option value="auto" {% if layout=="auto" %}selected{% endif %}>Grade auto</option>
+    <option value="three" {% if layout=="three" %}selected{% endif %}>3 por linha</option>
+    <option value="four" {% if layout=="four" %}selected{% endif %}>4 por linha</option>
+    <option value="five" {% if layout=="five" %}selected{% endif %}>5 por linha</option>
+    <option value="compact" {% if layout=="compact" %}selected{% endif %}>Compacta</option>
+  </select>
   <button>Filtrar</button>
+  <a class="soft-button" href="/fotos">Limpar</a>
 </form>
-<section class="grid">
+<section class="media-grid layout-{{ layout }}">
   {% for item in rows %}
-  <article class="tile">
+  <article class="media-tile" id="item-{{ item.id }}">
     {% if item.exists %}
-      <a href="/file?path={{ item.path }}">{% if item.media_type=="photo" %}<img src="/file?path={{ item.path }}" alt="{{ item.filename }}">{% else %}<div class="video">Video</div>{% endif %}</a>
+      <a class="media-thumb" href="#preview-{{ item.id }}">
+        {% if item.media_type=="photo" %}
+          <img src="/file?path={{ item.path|urlencode }}" alt="{{ item.filename }}">
+        {% else %}
+          <video muted preload="metadata"><source src="/file?path={{ item.path|urlencode }}"></video><span>Video</span>
+        {% endif %}
+      </a>
     {% else %}
-      <div class="video missing-tile">Ausente</div>
+      <div class="media-thumb missing-tile">Ausente</div>
     {% endif %}
-    <span class="badge">Fotos</span>
-    <strong>{{ item.filename }}</strong>
-    <span>{% if item.exists %}<span class="ok">No disco</span>{% else %}<span class="missing">Ausente</span>{% endif %}</span>
-    <div class="actions">
-      <form method="post" action="/actions/open-folder?path={{ item.path|urlencode }}"><button type="submit">Pasta</button></form>
-      <form method="post" action="/actions/delete-file?path={{ item.path|urlencode }}" onsubmit="return confirm('Excluir este arquivo local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>
+    <div class="tile-meta">
+      <strong>{{ item.filename }}</strong>
+      <span>{{ item.creation_date or item.imported_at or "" }}</span>
     </div>
+    <details class="menu">
+      <summary aria-label="Acoes">...</summary>
+      <a href="/fotos/{{ item.id }}">Detalhes</a>
+      {% if item.exists %}<a href="/file?path={{ item.path|urlencode }}">Abrir arquivo</a>{% endif %}
+      {% if item.exists %}<button type="button" onclick="navigator.clipboard.writeText({{ item.path|tojson }})">Copiar caminho</button>{% endif %}
+      <form method="post" action="/actions/open-folder?path={{ item.path|urlencode }}"><button type="submit">Abrir caminho</button></form>
+      <form method="post" action="/actions/delete-file?path={{ item.path|urlencode }}" onsubmit="return confirm('Excluir este arquivo local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>
+    </details>
+    {% if item.exists %}
+    <div class="preview" id="preview-{{ item.id }}">
+      <a class="preview-back" href="#item-{{ item.id }}" aria-label="Voltar">←</a>
+      <a class="preview-close" href="#item-{{ item.id }}" aria-label="Fechar">Fechar</a>
+      <div class="preview-stage">
+        {% if item.media_type=="photo" %}
+          <img src="/file?path={{ item.path|urlencode }}" alt="{{ item.filename }}">
+        {% else %}
+          <video controls autoplay><source src="/file?path={{ item.path|urlencode }}">Este video pode nao ser compativel com o navegador.</video>
+        {% endif %}
+      </div>
+      <aside class="preview-info">
+        <span class="badge">{{ "Video" if item.media_type=="video" else "Foto" }}</span>
+        <h2>{{ item.filename }}</h2>
+        <p class="muted">{{ item.creation_date or item.imported_at or "" }}</p>
+        <details class="menu open-menu">
+          <summary>Acoes</summary>
+          <a href="/fotos/{{ item.id }}">Detalhes</a>
+          <a href="/file?path={{ item.path|urlencode }}">Abrir arquivo</a>
+          <button type="button" onclick="navigator.clipboard.writeText({{ item.path|tojson }})">Copiar caminho</button>
+          <form method="post" action="/actions/open-folder?path={{ item.path|urlencode }}"><button type="submit">Abrir caminho</button></form>
+          <form method="post" action="/actions/delete-file?path={{ item.path|urlencode }}" onsubmit="return confirm('Excluir este arquivo local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>
+        </details>
+      </aside>
+    </div>
+    {% endif %}
   </article>
   {% endfor %}
 </section>
-<p><a href="?q={{ q }}&media_type={{ media_type }}&page={{ page + 1 }}">Proxima pagina</a></p>
+<p><a href="?q={{ q|urlencode }}&media_type={{ media_type }}&album={{ album|urlencode }}&date_from={{ date_from }}&date_to={{ date_to }}&sort={{ sort }}&layout={{ layout }}&page={{ page + 1 }}">Proxima pagina</a></p>
 {% endblock %}

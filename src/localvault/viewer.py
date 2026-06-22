@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import email
+import html
+import re
 from email import policy
+from email.message import EmailMessage
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -48,6 +51,18 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(400)
         return RedirectResponse("/control", status_code=303)
 
+    @app.get("/backups", response_class=HTMLResponse)
+    def backups_page(request: Request):
+        with db.connect(p.db) as conn:
+            runs = conn.execute("SELECT * FROM backup_runs ORDER BY id DESC LIMIT 20").fetchall()
+        backup_choices = {
+            "photos-ingest-takeout": "Importar Takeout/Fotos",
+            "backup-gmail-api": "Somente Gmail",
+            "daily-backup": "Tudo: Gmail, fotos e Takeout",
+            "verify": "Verificar cofre",
+        }
+        return templates.TemplateResponse(request, "backups.html", {"runs": runs, "backup_choices": backup_choices})
+
     @app.post("/dashboard/backup-now")
     def dashboard_backup_now():
         start_background_command(p, "photos-ingest-takeout")
@@ -88,14 +103,62 @@ def create_app(root: Path | None = None) -> FastAPI:
         return RedirectResponse("/", status_code=303)
 
     @app.get("/gmail", response_class=HTMLResponse)
-    def gmail_page(request: Request, q: str = "", page: int = 1):
-        where, params = "", []
+    def gmail_page(
+        request: Request,
+        q: str = "",
+        sender: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        has_attachments: bool = False,
+        page: int = 1,
+    ):
+        clauses, params = [], []
         if q:
-            where, params = "WHERE sender LIKE ? OR subject LIKE ? OR snippet LIKE ?", [f"%{q}%", f"%{q}%", f"%{q}%"]
+            clauses.append("(m.sender LIKE ? OR m.subject LIKE ? OR m.snippet LIKE ?)")
+            params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+        if sender:
+            clauses.append("m.sender LIKE ?")
+            params.append(f"%{sender}%")
+        if date_from:
+            clauses.append("m.message_date >= ?")
+            params.append(date_from)
+        if date_to:
+            clauses.append("m.message_date <= ?")
+            params.append(date_to + " 23:59:59")
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        having = "HAVING COUNT(a.id) > 0" if has_attachments else ""
         with db.connect(p.db) as conn:
-            rows = conn.execute(f"SELECT * FROM gmail_messages {where} ORDER BY id DESC LIMIT 80 OFFSET ?", (*params, max(0, page - 1) * 80)).fetchall()
-        items = [{**dict(row), "exists": bool(row["eml_path"] and Path(row["eml_path"]).exists())} for row in rows]
-        return templates.TemplateResponse(request, "gmail.html", {"rows": items, "q": q, "page": page})
+            rows = conn.execute(
+                f"""
+                SELECT m.*, COUNT(a.id) AS attachment_count
+                FROM gmail_messages m
+                LEFT JOIN gmail_attachments a ON a.gmail_message_id=m.id
+                {where}
+                GROUP BY m.id
+                {having}
+                ORDER BY m.message_date DESC, m.id DESC
+                LIMIT 80 OFFSET ?
+                """,
+                (*params, max(0, page - 1) * 80),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = _clean_email_row(dict(row))
+            item["exists"] = bool(item["eml_path"] and Path(item["eml_path"]).exists())
+            items.append(item)
+        return templates.TemplateResponse(
+            request,
+            "gmail.html",
+            {
+                "rows": items,
+                "q": q,
+                "sender": sender,
+                "date_from": date_from,
+                "date_to": date_to,
+                "has_attachments": has_attachments,
+                "page": page,
+            },
+        )
 
     @app.get("/gmail/{message_id}", response_class=HTMLResponse)
     def gmail_message(request: Request, message_id: int):
@@ -104,9 +167,15 @@ def create_app(root: Path | None = None) -> FastAPI:
             attachments = conn.execute("SELECT * FROM gmail_attachments WHERE gmail_message_id=?", (message_id,)).fetchall()
         if not msg:
             raise HTTPException(404)
-        body = _email_body(Path(msg["eml_path"])) if msg["eml_path"] else ""
-        message = {**dict(msg), "exists": bool(msg["eml_path"] and Path(msg["eml_path"]).exists())}
-        attachment_items = [{**dict(item), "exists": bool(item["path"] and Path(item["path"]).exists())} for item in attachments]
+        body = _email_body(Path(msg["eml_path"])) if msg["eml_path"] else {"mode": "text", "content": ""}
+        message = _clean_email_row(dict(msg))
+        message["exists"] = bool(message["eml_path"] and Path(message["eml_path"]).exists())
+        attachment_items = []
+        for item in attachments:
+            attachment = dict(item)
+            attachment["filename"] = html.unescape(str(attachment.get("filename") or ""))
+            attachment["exists"] = bool(attachment["path"] and Path(attachment["path"]).exists())
+            attachment_items.append(attachment)
         return templates.TemplateResponse(request, "gmail_message.html", {"message": message, "attachments": attachment_items, "body": body})
 
     @app.get("/photos")
@@ -114,19 +183,74 @@ def create_app(root: Path | None = None) -> FastAPI:
         return RedirectResponse("/fotos", status_code=307)
 
     @app.get("/fotos", response_class=HTMLResponse)
-    def photos_page(request: Request, q: str = "", media_type: str = "", page: int = 1):
+    def photos_page(
+        request: Request,
+        q: str = "",
+        media_type: str = "",
+        album: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        sort: str = "date_desc",
+        layout: str = "auto",
+        page: int = 1,
+    ):
         clauses, params = [], []
         if q:
-            clauses.append("(filename LIKE ? OR album LIKE ? OR creation_date LIKE ?)")
-            params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+            clauses.append("(filename LIKE ? OR album LIKE ? OR creation_date LIKE ? OR google_metadata_date LIKE ?)")
+            params += [f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"]
         if media_type:
             clauses.append("media_type=?")
             params.append(media_type)
+        if album:
+            clauses.append("album LIKE ?")
+            params.append(f"%{album}%")
+        if date_from:
+            clauses.append("COALESCE(creation_date, google_metadata_date, exif_date, imported_at) >= ?")
+            params.append(date_from)
+        if date_to:
+            clauses.append("COALESCE(creation_date, google_metadata_date, exif_date, imported_at) <= ?")
+            params.append(date_to + " 23:59:59")
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        order_by = {
+            "date_asc": "COALESCE(creation_date, google_metadata_date, exif_date, imported_at) ASC",
+            "name_asc": "filename ASC",
+            "name_desc": "filename DESC",
+            "size_desc": "file_size DESC",
+            "size_asc": "file_size ASC",
+        }.get(sort, "COALESCE(creation_date, google_metadata_date, exif_date, imported_at) DESC")
+        layout = layout if layout in {"auto", "three", "four", "five", "compact"} else "auto"
         with db.connect(p.db) as conn:
-            rows = conn.execute(f"SELECT * FROM photo_items {where} ORDER BY creation_date DESC LIMIT 80 OFFSET ?", (*params, max(0, page - 1) * 80)).fetchall()
+            rows = conn.execute(f"SELECT * FROM photo_items {where} ORDER BY {order_by} LIMIT 80 OFFSET ?", (*params, max(0, page - 1) * 80)).fetchall()
+            albums = [
+                row["album"]
+                for row in conn.execute("SELECT DISTINCT album FROM photo_items WHERE album IS NOT NULL AND album != '' ORDER BY album LIMIT 80").fetchall()
+            ]
         items = [{**dict(row), "exists": bool(row["path"] and Path(row["path"]).exists())} for row in rows]
-        return templates.TemplateResponse(request, "fotos.html", {"rows": items, "q": q, "media_type": media_type, "page": page})
+        return templates.TemplateResponse(
+            request,
+            "fotos.html",
+            {
+                "rows": items,
+                "q": q,
+                "media_type": media_type,
+                "album": album,
+                "albums": albums,
+                "date_from": date_from,
+                "date_to": date_to,
+                "sort": sort,
+                "layout": layout,
+                "page": page,
+            },
+        )
+
+    @app.get("/fotos/{item_id}", response_class=HTMLResponse)
+    def photo_detail(request: Request, item_id: int):
+        with db.connect(p.db) as conn:
+            row = conn.execute("SELECT * FROM photo_items WHERE id=?", (item_id,)).fetchone()
+        if not row:
+            raise HTTPException(404)
+        item = {**dict(row), "exists": bool(row["path"] and Path(row["path"]).exists())}
+        return templates.TemplateResponse(request, "foto_detail.html", {"item": item})
 
     @app.get("/reports", response_class=HTMLResponse)
     def reports_page(request: Request):
@@ -152,13 +276,52 @@ def _count(conn, table: str) -> int:
     return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
 
 
-def _email_body(path: Path) -> str:
+def _email_body(path: Path) -> dict[str, str]:
     try:
         msg = email.message_from_bytes(path.read_bytes(), policy=policy.default)
-        if msg.is_multipart():
-            for part in msg.walk():
-                if part.get_content_type() == "text/plain":
-                    return part.get_content()
-        return msg.get_content()
+        html_body = _message_part(msg, "text/html")
+        if html_body:
+            sanitized = _sanitize_email_html(html_body)
+            preview = _html_to_text(html_body)
+            return {"mode": "html", "content": sanitized, "preview": preview}
+        text_body = _message_part(msg, "text/plain")
+        if text_body:
+            return {"mode": "text", "content": text_body}
+        return {"mode": "text", "content": msg.get_content() if not msg.is_multipart() else ""}
     except Exception as exc:
-        return f"Could not read message body: {exc}"
+        return {"mode": "text", "content": f"Could not read message body: {exc}"}
+
+
+def _message_part(msg: EmailMessage, content_type: str) -> str:
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == content_type and not part.get_content_disposition():
+                return str(part.get_content())
+        return ""
+    if msg.get_content_type() == content_type:
+        return str(msg.get_content())
+    return ""
+
+
+def _clean_email_row(item: dict) -> dict:
+    for key in ("subject", "sender", "recipients", "cc", "bcc", "snippet"):
+        if item.get(key):
+            item[key] = html.unescape(str(item[key]))
+    return item
+
+
+def _html_to_text(value: str) -> str:
+    without_blocks = re.sub(r"(?is)<(script|style|iframe|object|embed|head)\b.*?</\1>", " ", value)
+    text = re.sub(r"(?s)<[^>]+>", " ", without_blocks)
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _sanitize_email_html(value: str) -> str:
+    cleaned = re.sub(r"(?is)<(script|style|iframe|object|embed|link|meta|base)\b.*?</\1>", "", value)
+    cleaned = re.sub(r"(?is)<(script|style|iframe|object|embed|link|meta|base)\b[^>]*>", "", cleaned)
+    cleaned = re.sub(r"(?i)\s+on[a-z]+\s*=\s*(['\"]).*?\1", "", cleaned)
+    cleaned = re.sub(r"(?i)\s+on[a-z]+\s*=\s*[^\s>]+", "", cleaned)
+    cleaned = re.sub(r"(?i)\s+(src|href)\s*=\s*(['\"])\s*javascript:.*?\2", "", cleaned)
+    cleaned = re.sub(r"(?i)(<img\b[^>]*?)\s+src\s*=\s*(['\"])\s*https?://.*?\2", r'\1 data-remote-image="blocked"', cleaned)
+    return f"<!doctype html><html><head><meta charset=\"utf-8\"><base target=\"_blank\"><style>body{{font:14px Arial,sans-serif;line-height:1.5;color:#202124;margin:18px}}img{{max-width:100%;height:auto}}</style></head><body>{cleaned}</body></html>"

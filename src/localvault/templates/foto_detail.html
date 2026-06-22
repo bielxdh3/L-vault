@@ -1,0 +1,37 @@
+{% extends "base.html" %}{% block title %}Midia - LocalVault{% endblock %}
+{% block content %}
+<a class="back-link" href="/fotos">← Voltar para fotos</a>
+<section class="detail-layout">
+  <div class="detail-media">
+    {% if item.exists %}
+      {% if item.media_type=="photo" %}
+        <img src="/file?path={{ item.path|urlencode }}" alt="{{ item.filename }}">
+      {% else %}
+        <video controls><source src="/file?path={{ item.path|urlencode }}">Este video pode nao ser compativel com o navegador.</video>
+      {% endif %}
+    {% else %}
+      <div class="missing-tile">Arquivo ausente no disco.</div>
+    {% endif %}
+  </div>
+  <aside class="detail-panel">
+    <span class="badge">{{ "Video" if item.media_type=="video" else "Foto" }}</span>
+    <h1>{{ item.filename }}</h1>
+    <dl>
+      <dt>Status</dt><dd>{% if item.exists %}<span class="ok">No disco</span>{% else %}<span class="missing">Ausente</span>{% endif %}</dd>
+      <dt>Data</dt><dd>{{ item.creation_date or item.google_metadata_date or item.exif_date or "" }}</dd>
+      <dt>Tamanho</dt><dd>{{ "%.2f"|format((item.file_size or 0) / 1024 / 1024) }} MB</dd>
+      <dt>Tipo</dt><dd>{{ item.mime_type or item.media_type or "" }}</dd>
+      <dt>Dimensao</dt><dd>{% if item.width and item.height %}{{ item.width }} x {{ item.height }}{% else %}-{% endif %}</dd>
+      <dt>Album</dt><dd>{{ item.album or "-" }}</dd>
+      <dt>Caminho</dt><dd class="path-text">{{ item.path }}</dd>
+    </dl>
+    <details class="menu open-menu">
+      <summary>Acoes</summary>
+      {% if item.exists %}<a href="/file?path={{ item.path|urlencode }}">Abrir arquivo</a>{% endif %}
+      {% if item.exists %}<button type="button" onclick="navigator.clipboard.writeText({{ item.path|tojson }})">Copiar caminho</button>{% endif %}
+      <form method="post" action="/actions/open-folder?path={{ item.path|urlencode }}"><button type="submit">Abrir caminho</button></form>
+      <form method="post" action="/actions/delete-file?path={{ item.path|urlencode }}" onsubmit="return confirm('Excluir este arquivo local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>
+    </details>
+  </aside>
+</section>
+{% endblock %}

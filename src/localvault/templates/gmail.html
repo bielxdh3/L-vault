@@ -1,22 +1,44 @@
 {% extends "base.html" %}{% block title %}Gmail - LocalVault{% endblock %}
 {% block content %}
-<h1>Gmail</h1>
-<form class="toolbar"><input name="q" value="{{ q }}" placeholder="Buscar remetente, assunto, texto"><button>Buscar</button></form>
-<table>
-  <tr><th>Tipo</th><th>Data</th><th>Remetente</th><th>Assunto</th><th>Status</th><th>Acoes</th></tr>
+<section class="page-head">
+  <div>
+    <h1>Gmail</h1>
+    <p class="muted">Leitor local dos e-mails salvos no cofre.</p>
+  </div>
+</section>
+<form class="filter-panel">
+  <input name="q" value="{{ q }}" placeholder="Buscar assunto, trecho ou texto">
+  <input name="sender" value="{{ sender }}" placeholder="Remetente">
+  <input name="date_from" value="{{ date_from }}" type="date" aria-label="Data inicial">
+  <input name="date_to" value="{{ date_to }}" type="date" aria-label="Data final">
+  <label class="check-filter"><input name="has_attachments" type="checkbox" value="true" {% if has_attachments %}checked{% endif %}> Com anexos</label>
+  <button>Filtrar</button>
+  <a class="soft-button" href="/gmail">Limpar</a>
+</form>
+<section class="mail-list gmail-inbox">
   {% for row in rows %}
-  <tr>
-    <td><span class="badge">E-mail</span></td>
-    <td>{{ row.message_date or "" }}</td>
-    <td>{{ row.sender or "" }}</td>
-    <td><a href="/gmail/{{ row.id }}">{{ row.subject or "(sem assunto)" }}</a><div class="muted">{{ row.snippet or "" }}</div></td>
-    <td>{% if row.exists %}<span class="ok">No disco</span>{% else %}<span class="missing">Ausente</span>{% endif %}</td>
-    <td class="actions">
-      {% if row.eml_path %}<form method="post" action="/actions/open-folder?path={{ row.eml_path|urlencode }}"><button type="submit">Pasta</button></form>{% endif %}
-      {% if row.eml_path %}<form method="post" action="/actions/delete-file?path={{ row.eml_path|urlencode }}" onsubmit="return confirm('Excluir este e-mail local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>{% endif %}
-    </td>
-  </tr>
+  <article class="mail-row">
+    <a class="mail-main" href="/gmail/{{ row.id }}">
+      <strong class="mail-sender">{{ row.sender or "(remetente desconhecido)" }}</strong>
+      <span class="mail-subject">{{ row.subject or "(sem assunto)" }}</span>
+      <small>{{ row.snippet or "" }}</small>
+      <span class="mail-date">{{ row.message_date or "" }}</span>
+    </a>
+    <div class="mail-side">
+      {% if row.attachment_count %}<span class="badge">{{ row.attachment_count }} anexo(s)</span>{% endif %}
+      {% if not row.exists %}<span class="missing">Ausente</span>{% endif %}
+      <details class="menu mail-menu">
+        <summary aria-label="Acoes">...</summary>
+        <div class="menu-popover">
+          {% if row.eml_path %}<form method="post" action="/actions/open-folder?path={{ row.eml_path|urlencode }}"><button type="submit">Abrir caminho</button></form>{% endif %}
+          {% if row.eml_path %}<form method="post" action="/actions/delete-file?path={{ row.eml_path|urlencode }}" onsubmit="return confirm('Excluir este e-mail local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>{% endif %}
+        </div>
+      </details>
+    </div>
+  </article>
+  {% else %}
+  <p class="muted">Nenhum e-mail encontrado com esses filtros.</p>
   {% endfor %}
-</table>
-<p><a href="?q={{ q }}&page={{ page + 1 }}">Proxima pagina</a></p>
+</section>
+<p><a href="?q={{ q|urlencode }}&sender={{ sender|urlencode }}&date_from={{ date_from }}&date_to={{ date_to }}&has_attachments={{ 'true' if has_attachments else '' }}&page={{ page + 1 }}">Proxima pagina</a></p>
 {% endblock %}
