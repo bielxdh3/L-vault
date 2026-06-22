@@ -3,7 +3,7 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-from .utils import sha256_file
+from .utils import atomic_write_from_fileobj, sha256_file
 
 
 def is_within_directory(base: Path, candidate: Path) -> bool:
@@ -27,8 +27,8 @@ def safe_extract_zip(zip_path: Path, dest_root: Path, dry_run: bool = False) -> 
                 target.mkdir(parents=True, exist_ok=True)
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(info) as src, target.open("wb") as out:
-                    out.write(src.read())
+                with archive.open(info) as src:
+                    atomic_write_from_fileobj(target, src, expected_size=info.file_size, dry_run=False)
     return dest
 
 

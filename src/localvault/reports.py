@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from . import db
 from .utils import utc_now, write_json
@@ -62,3 +64,31 @@ def finish_run(database: Path, reports_dir: Path, report: RunReport, status: str
             conn.execute("INSERT INTO import_errors (run_id,source,item_path,error) VALUES (?,?,?,?)",
                          (report.run_id, report.source, err["item_path"], err["error"]))
     return report
+
+
+def mark_stale_running_runs(database: Path, older_than_hours: int = 12, status: str = "interrupted") -> int:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
+    updated = 0
+    with db.connect(database) as conn:
+        rows = conn.execute("SELECT id,started_at FROM backup_runs WHERE status='running'").fetchall()
+        for row in rows:
+            started = _parse_datetime(row["started_at"])
+            if started is None or started <= cutoff:
+                conn.execute(
+                    "UPDATE backup_runs SET status=?,finished_at=?,warnings=? WHERE id=?",
+                    (status, datetime.now(timezone.utc).isoformat(timespec="seconds"), json.dumps(["Run interrupted or stale."], ensure_ascii=False), row["id"]),
+                )
+                updated += 1
+    return updated
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)

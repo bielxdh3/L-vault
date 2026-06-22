@@ -165,9 +165,10 @@ def create_app(root: Path | None = None) -> FastAPI:
         with db.connect(p.db) as conn:
             msg = conn.execute("SELECT * FROM gmail_messages WHERE id=?", (message_id,)).fetchone()
             attachments = conn.execute("SELECT * FROM gmail_attachments WHERE gmail_message_id=?", (message_id,)).fetchall()
+            stored_body = conn.execute("SELECT * FROM gmail_bodies WHERE gmail_message_id=?", (message_id,)).fetchone()
         if not msg:
             raise HTTPException(404)
-        body = _email_body(Path(msg["eml_path"])) if msg["eml_path"] else {"mode": "text", "content": ""}
+        body = _stored_email_body(stored_body) if stored_body else (_email_body(Path(msg["eml_path"])) if msg["eml_path"] else {"mode": "text", "content": ""})
         message = _clean_email_row(dict(msg))
         message["exists"] = bool(message["eml_path"] and Path(message["eml_path"]).exists())
         attachment_items = []
@@ -290,6 +291,14 @@ def _email_body(path: Path) -> dict[str, str]:
         return {"mode": "text", "content": msg.get_content() if not msg.is_multipart() else ""}
     except Exception as exc:
         return {"mode": "text", "content": f"Could not read message body: {exc}"}
+
+
+def _stored_email_body(row) -> dict[str, str]:
+    html_path = row["body_html_path"]
+    if html_path and Path(html_path).exists():
+        raw_html = Path(html_path).read_text(encoding="utf-8", errors="replace")
+        return {"mode": "html", "content": _sanitize_email_html(raw_html), "preview": _html_to_text(raw_html)}
+    return {"mode": "text", "content": row["body_text"] or ""}
 
 
 def _message_part(msg: EmailMessage, content_type: str) -> str:

@@ -11,7 +11,7 @@ from .config import VaultPaths
 from .email_names import sanitize_filename_component, unique_friendly_email_path
 from .extract import safe_extract_zip, safe_zip_infos, safe_zip_member_name
 from .reports import RunReport
-from .utils import guess_mime, sha256_bytes, unique_path
+from .utils import atomic_write_bytes, guess_mime, sha256_bytes, unique_path
 
 
 def ingest_gmail_takeout(p: VaultPaths, report: RunReport, dry_run: bool = False) -> RunReport:
@@ -64,7 +64,7 @@ def _import_messages(conn, p: VaultPaths, messages, mbox_path: Path | None, repo
             unique_id=_h(msg.get("Message-ID")) or digest[:16],
         )
         if not dry_run:
-            dest.write_bytes(raw)
+            atomic_write_bytes(dest, raw)
             cur = conn.execute("""INSERT OR IGNORE INTO gmail_messages
             (message_id_header,subject,sender,recipients,cc,bcc,message_date,labels,snippet,eml_path,raw_sha256,source)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -78,7 +78,7 @@ def _import_messages(conn, p: VaultPaths, messages, mbox_path: Path | None, repo
                     adigest = sha256_bytes(payload)
                     adest = unique_path(p.gmail_attachments / digest[:2] / digest / name)
                     adest.parent.mkdir(parents=True, exist_ok=True)
-                    adest.write_bytes(payload)
+                    atomic_write_bytes(adest, payload)
                     conn.execute("INSERT INTO gmail_attachments (gmail_message_id,filename,path,sha256,size,mime_type) VALUES (?,?,?,?,?,?)", (db_id, name, str(adest), adigest, len(payload), part.get_content_type()))
                     db.upsert_file(conn, sha256=adigest, path=adest, media_type="gmail_attachment", mime_type=part.get_content_type() or guess_mime(adest), size=len(payload), source="gmail_takeout_attachment")
             db.upsert_file(conn, sha256=digest, path=dest, original_path=mbox_path, media_type="email", mime_type="message/rfc822", size=len(raw), source="gmail_takeout")

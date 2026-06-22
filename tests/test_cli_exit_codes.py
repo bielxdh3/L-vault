@@ -1,6 +1,8 @@
 from typer.testing import CliRunner
 
 from localvault.cli import app
+from localvault.config import ensure_directories
+from localvault.locks import BackupLock
 
 
 runner = CliRunner()
@@ -63,6 +65,21 @@ def test_daily_backup_calls_verify_once_with_full_check(monkeypatch, tmp_path):
 
     assert result.exit_code == 0
     assert calls == [None]
+
+
+def test_daily_backup_exits_one_when_global_lock_is_active(monkeypatch, tmp_path):
+    p = ensure_directories(tmp_path)
+    lock = BackupLock(p.logs / "localvault_backup.lock")
+    lock.acquire()
+    monkeypatch.setattr("localvault.cli.run_gmail_api", lambda *args, **kwargs: None)
+
+    try:
+        result = runner.invoke(app, ["daily-backup", "--root", str(tmp_path)])
+    finally:
+        lock.release()
+
+    assert result.exit_code == 1
+    assert "Status: failed" in result.output
 
 
 def test_removed_legacy_import_commands_are_absent():

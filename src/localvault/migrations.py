@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import yaml
 
 from . import db
 from .config import VaultPaths, load_config
-from .utils import sha256_file
+from .utils import atomic_move_or_copy, atomic_write_text, sha256_file
 
 
 OLD_MEDIA_ROOT = "vault\\google_photos"
@@ -57,7 +56,7 @@ def _merge_tree(source: Path, target: Path) -> None:
                 dest = _unique_path(dest)
             else:
                 dest = _unique_path(dest)
-        shutil.move(str(item), str(dest))
+        atomic_move_or_copy(item, dest, expected_sha256=sha256_file(item))
 
 
 def _remove_empty_parents(root: Path) -> None:
@@ -134,4 +133,4 @@ def _rewrite_config(p: VaultPaths) -> None:
     cfg = load_config(p.root)
     cfg.pop("google_photos", None)
     cfg["photos"] = {"takeout_enabled": True}
-    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    atomic_write_text(cfg_path, yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")

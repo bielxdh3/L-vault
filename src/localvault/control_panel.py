@@ -11,6 +11,7 @@ from typing import Any
 from . import db
 from .config import VaultPaths, load_config
 from .health import health_snapshot
+from .utils import atomic_write_text
 from .vault_index import dashboard_data
 
 
@@ -57,7 +58,7 @@ def start_background_command(p: VaultPaths, command: str) -> Path:
     if command in BACKUP_COMMANDS and _backup_running(p):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         status_path = p.logs / f"manual_{stamp}_{command}_skipped.json"
-        status_path.write_text(json.dumps({
+        atomic_write_text(status_path, json.dumps({
             "command": command,
             "status": "skipped",
             "reason": "Outro backup ja esta rodando.",
@@ -79,7 +80,7 @@ def start_background_command(p: VaultPaths, command: str) -> Path:
         f"'{{\"command\":\"{command}\",\"status\":\"finished\",\"exit_code\":' + $code + ',\"finished_at\":\"' + (Get-Date -Format o) + '\",\"log\":\"{str(log_path).replace(chr(92), chr(92) + chr(92))}\"}}' | Out-File -Encoding utf8 $StatusPath\n"
     )
     runner = p.logs / f"manual_{stamp}_{command}.ps1"
-    runner.write_text(script, encoding="utf-8")
+    atomic_write_text(runner, script, encoding="utf-8")
     subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(runner)], cwd=str(p.root), creationflags=_hidden_process_flag())
     return log_path
 
