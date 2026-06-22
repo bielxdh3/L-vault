@@ -1,23 +1,34 @@
 {% extends "base.html" %}{% block title %}Email - LocalVault{% endblock %}
 {% block content %}
-<h1>{{ message.subject or "(sem assunto)" }}</h1>
-<p>{{ message.sender }} - {{ message.message_date }} - <span class="badge">E-mail</span></p>
+<section class="email-head">
+  <a class="muted" href="/gmail">Voltar para Gmail</a>
+  <h1>{{ message.subject or "(sem assunto)" }}</h1>
+  <p><strong>{{ message.sender }}</strong> <span class="muted">{{ message.message_date }}</span> <span class="badge">E-mail</span></p>
+</section>
 {% if message.eml_path %}
-<div class="actions">
-  <form method="post" action="/actions/open-folder?path={{ message.eml_path|urlencode }}"><button type="submit">Visualizar na pasta</button></form>
+<details class="menu message-menu">
+  <summary>Acoes</summary>
+  <form method="post" action="/actions/open-folder?path={{ message.eml_path|urlencode }}"><button type="submit">Abrir caminho</button></form>
   <form method="post" action="/actions/delete-file?path={{ message.eml_path|urlencode }}" onsubmit="return confirm('Excluir este e-mail local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>
-</div>
+</details>
 {% endif %}
 {% if not message.exists %}<p class="missing">Arquivo .eml ausente no disco.</p>{% endif %}
 {% if attachments %}
 <h2>Anexos</h2>
-<ul>
+<section class="attachment-grid">
   {% for item in attachments %}
-  <li>
-    {% if item.exists %}<a href="/file?path={{ item.path }}">{{ item.filename }}</a>{% else %}{{ item.filename }} <span class="missing">ausente</span>{% endif %}
-  </li>
+  <article>
+    <strong>{% if item.exists %}<a href="/file?path={{ item.path|urlencode }}">{{ item.filename }}</a>{% else %}{{ item.filename }}{% endif %}</strong>
+    <span class="muted">{{ item.mime_type or "" }}</span>
+    {% if not item.exists %}<span class="missing">ausente</span>{% endif %}
+  </article>
   {% endfor %}
-</ul>
+</section>
 {% endif %}
-<pre class="body">{{ body }}</pre>
+{% if body.mode == "html" %}
+  <iframe class="email-frame" sandbox srcdoc='{{ body.content|forceescape }}'></iframe>
+  {% if body.preview %}<details class="email-fallback"><summary>Ver texto extraido</summary><pre class="body">{{ body.preview }}</pre></details>{% endif %}
+{% else %}
+  <pre class="body">{{ body.content }}</pre>
+{% endif %}
 {% endblock %}
