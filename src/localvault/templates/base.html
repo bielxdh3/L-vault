@@ -9,8 +9,15 @@
 <body>
   <header>
     <a class="brand" href="/">LocalVault</a>
-    <nav><a href="/">Dashboard</a><a href="/backups">Backups</a><a href="/gmail">Gmail</a><a href="/fotos">Fotos</a><a href="/reports">Relatorios</a></nav>
+    <nav>
+      <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">Dashboard</a>
+      <a href="/control" class="{{ 'active' if request.url.path == '/control' else '' }}">Controle</a>
+      <a href="/backups" class="{{ 'active' if request.url.path == '/backups' else '' }}">Backups</a>
+      <a href="/gmail" class="{{ 'active' if request.url.path.startswith('/gmail') else '' }}">Gmail</a>
+      <a href="/fotos" class="{{ 'active' if request.url.path.startswith('/fotos') else '' }}">Fotos</a>
+      <a href="/reports" class="{{ 'active' if request.url.path == '/reports' else '' }}">Relatorios</a>
+    </nav>
   </header>
-  <main>{% block content %}{% endblock %}</main>
+  <main class="page-enter">{% block content %}{% endblock %}</main>
 </body>
 </html>
