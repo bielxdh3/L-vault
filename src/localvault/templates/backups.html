@@ -9,6 +9,7 @@
 <section class="quick-actions">
   {% for value, label in backup_choices.items() %}
   <form method="post" action="/dashboard/run-backup?command={{ value }}" onsubmit="return confirm('Iniciar {{ label }}?')">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button type="submit">{{ label }}</button>
   </form>
   {% endfor %}

@@ -22,6 +22,17 @@ Painel local:
 http://127.0.0.1:8787
 ```
 
+Antes de iniciar o painel, defina a senha local (repita para trocar a senha e invalidar sessoes existentes):
+
+```powershell
+python -m localvault auth-set-password --root E:\LocalVault
+python -m localvault serve --root E:\LocalVault
+```
+
+Todas as rotas do painel, incluindo arquivos, Gmail, fotos, relatorios e acoes de backup, exigem login. A sessao assinada expira apos oito horas. Formularios que iniciam, reparam, abrem ou apagam algo tambem exigem um token CSRF ligado a sessao.
+
+O painel usa `127.0.0.1` por padrao. Para LAN, configure `viewer.allow_lan: true` e uma senha; isso ainda usa HTTP sem criptografia, portanto use somente uma rede confiavel ate adicionar TLS. O leitor de e-mails sanitiza HTML com allowlist, bloqueando scripts, manipuladores de evento e imagens remotas; o iframe continua sandboxed.
+
 Use o atalho `Abrir LocalVault` na area de trabalho. Ele inicia o painel em segundo plano e abre o navegador.
 
 ## Comandos
@@ -66,11 +77,12 @@ O LocalVault preserva os arquivos ja importados, usa SHA-256 para evitar duplica
 
 ## Automacao
 
-O `sync-sources` copia automaticamente exports de Google Takeout detectados em `Downloads` para o inbox do LocalVault.
+O `sync-sources` copia automaticamente exports de Google Takeout detectados em `C:\Users\bielx\Downloads` para o inbox do LocalVault. O filtro valida o conteudo do ZIP para ignorar arquivos comuns.
 
 O agendador diario padrao:
 
 - 02:00 Backup diario principal: Gmail API, sync de fontes, importacao de Takeout e relatorio de duplicados
+- 01:30 Importacao automatica de Takeout: move ZIPs reconhecidos do Downloads para o Vault
 - Domingo 04:00 Verificacao
 
 Se o PC estiver desligado no horario marcado, o Windows roda a tarefa assim que possivel quando o computador ligar novamente.

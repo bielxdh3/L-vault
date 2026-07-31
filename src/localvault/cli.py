@@ -14,6 +14,7 @@ from rich.console import Console
 
 from . import __version__, db
 from .config import DEFAULT_ROOT, ensure_config, ensure_directories, load_config, paths
+from .auth import load_auth, set_password
 from .auto_takeout import auto_takeout as run_auto_takeout
 from .dedupe import build_duplicate_report
 from .gmail_api import backup_gmail_api as run_gmail_api
@@ -318,9 +319,26 @@ def health_check(root: Path = root_option()):
 def serve(root: Path = root_option(), host: Optional[str] = typer.Option(None, "--host"), port: Optional[int] = typer.Option(None, "--port")):
     p = prepare(root); cfg = load_config(root)["viewer"]
     selected_host, selected_port = host or cfg.get("host", "127.0.0.1"), int(port or cfg.get("port", 8787))
-    if selected_host not in ("127.0.0.1", "localhost") and not cfg.get("allow_lan", False):
-        raise typer.BadParameter("LAN exposure is disabled.")
+    validate_viewer_exposure(selected_host, bool(cfg.get("allow_lan", False)), bool(load_auth(p.root)))
     uvicorn.run(create_app(p.root), host=selected_host, port=selected_port)
+
+
+def validate_viewer_exposure(host: str, allow_lan: bool, authentication_configured: bool) -> None:
+    if host not in ("127.0.0.1", "localhost") and not allow_lan:
+        raise typer.BadParameter("LAN exposure is disabled.")
+    if not authentication_configured:
+        raise typer.BadParameter("Viewer authentication is not configured. Run: python -m localvault auth-set-password --root <vault-root>")
+
+
+@app.command("auth-set-password")
+def auth_set_password(root: Path = root_option()):
+    """Set or rotate the single-user viewer password."""
+    p = ensure_directories(root)
+    password = typer.prompt("Viewer password", hide_input=True, confirmation_prompt=True)
+    if not password:
+        raise typer.BadParameter("Password cannot be empty.")
+    set_password(p.root, password)
+    console.print("[green]Viewer password set. Existing viewer sessions were invalidated.[/]")
 
 
 @app.command("viewer-shortcut")

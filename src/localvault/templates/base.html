@@ -16,6 +16,7 @@
       <a href="/gmail" class="{{ 'active' if request.url.path.startswith('/gmail') else '' }}">Gmail</a>
       <a href="/fotos" class="{{ 'active' if request.url.path.startswith('/fotos') else '' }}">Fotos</a>
       <a href="/reports" class="{{ 'active' if request.url.path == '/reports' else '' }}">Relatorios</a>
+      <form method="post" action="/logout" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Sair</button></form>
     </nav>
   </header>
   <main class="page-enter">{% block content %}{% endblock %}</main>

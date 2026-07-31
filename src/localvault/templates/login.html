@@ -1,0 +1,3 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Entrar - LocalVault</title><link rel="stylesheet" href="/static/styles.css"></head>
+<body><main class="page-enter"><section class="filter-panel"><h1>LocalVault</h1><p>Entre para acessar o cofre local.</p>{% if error %}<p class="missing">{{ error }}</p>{% endif %}<form method="post" action="/login"><label>Senha <input name="password" type="password" autocomplete="current-password" required autofocus></label><button type="submit">Entrar</button></form></section></main></body></html>

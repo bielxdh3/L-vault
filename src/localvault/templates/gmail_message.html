@@ -8,8 +8,8 @@
 {% if message.eml_path %}
 <details class="menu message-menu">
   <summary>Acoes</summary>
-  <form method="post" action="/actions/open-folder?path={{ message.eml_path|urlencode }}"><button type="submit">Abrir caminho</button></form>
-  <form method="post" action="/actions/delete-file?path={{ message.eml_path|urlencode }}" onsubmit="return confirm('Excluir este e-mail local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>
+  <form method="post" action="/actions/open-folder?path={{ message.eml_path|urlencode }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Abrir caminho</button></form>
+  <form method="post" action="/actions/delete-file?path={{ message.eml_path|urlencode }}" onsubmit="return confirm('Excluir este e-mail local e remover do indice?')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="danger" type="submit">Excluir</button></form>
 </details>
 {% endif %}
 {% if not message.exists %}<p class="missing">Arquivo .eml ausente no disco.</p>{% endif %}
