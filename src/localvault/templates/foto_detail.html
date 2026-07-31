@@ -29,8 +29,8 @@
       <summary>Acoes</summary>
       {% if item.exists %}<a href="/file?path={{ item.path|urlencode }}">Abrir arquivo</a>{% endif %}
       {% if item.exists %}<button type="button" onclick="navigator.clipboard.writeText({{ item.path|tojson }})">Copiar caminho</button>{% endif %}
-      <form method="post" action="/actions/open-folder?path={{ item.path|urlencode }}"><button type="submit">Abrir caminho</button></form>
-      <form method="post" action="/actions/delete-file?path={{ item.path|urlencode }}" onsubmit="return confirm('Excluir este arquivo local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>
+      <form method="post" action="/actions/open-folder?path={{ item.path|urlencode }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Abrir caminho</button></form>
+      <form method="post" action="/actions/delete-file?path={{ item.path|urlencode }}" onsubmit="return confirm('Excluir este arquivo local e remover do indice?')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="danger" type="submit">Excluir</button></form>
     </details>
   </aside>
 </section>

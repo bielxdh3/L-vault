@@ -56,10 +56,12 @@
 <section class="quick-actions">
   {% for command, label in commands.items() %}
   <form method="post" action="/control/run?command={{ command }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button type="submit">{{ label }}</button>
   </form>
   {% endfor %}
   <form method="post" action="/maintenance/cleanup-missing">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button type="submit">Atualizar indice</button>
   </form>
 </section>

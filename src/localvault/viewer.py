@@ -3,17 +3,22 @@ from __future__ import annotations
 import email
 import html
 import re
+import secrets
+import time
 from email import policy
 from email.message import EmailMessage
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from jinja2 import pass_context
+from starlette.middleware.sessions import SessionMiddleware
 
 from . import db
 from .config import load_config, paths
+from .auth import SESSION_MAX_AGE, load_auth, verify_password
 from .control_panel import control_panel_data, start_background_command
 from .vault_index import cleanup_missing_index_entries, dashboard_data, delete_local_file_and_index, open_in_explorer, safe_vault_path
 
@@ -24,7 +29,60 @@ def create_app(root: Path | None = None) -> FastAPI:
     p = paths(root or Path(load_config()["vault_root"]))
     app = FastAPI(title="LocalVault Backup Manager")
     templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
+
+    @pass_context
+    def csrf_token(context):
+        return getattr(context.get("request").state, "csrf_token", "")
+
+    templates.env.globals["csrf_token"] = csrf_token
     app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
+
+    @app.middleware("http")
+    async def require_authentication(request: Request, call_next):
+        path = request.url.path
+        if path.startswith("/static") or path == "/login":
+            return await call_next(request)
+        record = load_auth(p.root)
+        session = request.session
+        valid = bool(record and session.get("session_version") == record["session_version"] and session.get("authenticated_at"))
+        if not valid:
+            accepts = request.headers.get("accept", "")
+            if path == "/file" or request.method != "GET" or ("text/html" not in accepts and accepts != "*/*"):
+                return PlainTextResponse("Authentication required.", status_code=401)
+            return RedirectResponse("/login", status_code=303)
+        request.state.csrf_token = session.get("csrf_token", "")
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            token = request.headers.get("x-csrf-token", "")
+            if not token:
+                body = (await request.body()).decode("utf-8", "replace")
+                from urllib.parse import parse_qs
+                token = parse_qs(body).get("csrf_token", [""])[0]
+            if not isinstance(token, str) or not request.state.csrf_token or not secrets.compare_digest(token, request.state.csrf_token):
+                return PlainTextResponse("Invalid CSRF token.", status_code=403)
+        return await call_next(request)
+
+    initial_auth = load_auth(p.root)
+    app.add_middleware(SessionMiddleware, secret_key=(initial_auth or {}).get("session_secret", secrets.token_urlsafe(48)), max_age=SESSION_MAX_AGE, same_site="strict", https_only=False)
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_page(request: Request):
+        return templates.TemplateResponse(request, "login.html", {"error": "Authentication is not configured." if not load_auth(p.root) else ""})
+
+    @app.post("/login")
+    async def login(request: Request):
+        from urllib.parse import parse_qs
+        password = parse_qs((await request.body()).decode("utf-8", "replace")).get("password", [""])[0]
+        record = load_auth(p.root)
+        if not verify_password(record, password):
+            return templates.TemplateResponse(request, "login.html", {"error": "Senha invalida."}, status_code=401)
+        request.session.clear()
+        request.session.update({"session_version": record["session_version"], "authenticated_at": int(time.time()), "csrf_token": secrets.token_urlsafe(32)})
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/logout")
+    def logout(request: Request):
+        request.session.clear()
+        return RedirectResponse("/login", status_code=303)
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request):
@@ -327,10 +385,7 @@ def _html_to_text(value: str) -> str:
 
 
 def _sanitize_email_html(value: str) -> str:
-    cleaned = re.sub(r"(?is)<(script|style|iframe|object|embed|link|meta|base)\b.*?</\1>", "", value)
-    cleaned = re.sub(r"(?is)<(script|style|iframe|object|embed|link|meta|base)\b[^>]*>", "", cleaned)
-    cleaned = re.sub(r"(?i)\s+on[a-z]+\s*=\s*(['\"]).*?\1", "", cleaned)
-    cleaned = re.sub(r"(?i)\s+on[a-z]+\s*=\s*[^\s>]+", "", cleaned)
-    cleaned = re.sub(r"(?i)\s+(src|href)\s*=\s*(['\"])\s*javascript:.*?\2", "", cleaned)
-    cleaned = re.sub(r"(?i)(<img\b[^>]*?)\s+src\s*=\s*(['\"])\s*https?://.*?\2", r'\1 data-remote-image="blocked"', cleaned)
-    return f"<!doctype html><html><head><meta charset=\"utf-8\"><base target=\"_blank\"><style>body{{font:14px Arial,sans-serif;line-height:1.5;color:#202124;margin:18px}}img{{max-width:100%;height:auto}}</style></head><body>{cleaned}</body></html>"
+    import nh3
+
+    cleaned = nh3.clean(value, tags={"a", "b", "blockquote", "br", "code", "div", "em", "i", "li", "ol", "p", "pre", "span", "strong", "table", "tbody", "td", "th", "thead", "tr", "u", "ul"}, attributes={"a": {"href", "title"}, "td": {"colspan", "rowspan"}, "th": {"colspan", "rowspan"}}, url_schemes={"http", "https", "mailto"})
+    return f"<!doctype html><html><head><meta charset=\"utf-8\"><base target=\"_blank\"><style>body{{font:14px Arial,sans-serif;line-height:1.5;color:#202124;margin:18px}}</style></head><body>{cleaned}</body></html>"

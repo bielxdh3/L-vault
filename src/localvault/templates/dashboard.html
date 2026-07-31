@@ -8,6 +8,7 @@
   <div class="backup-form">
     {% for value, label in backup_choices.items() %}
       <form method="post" action="/dashboard/run-backup?command={{ value }}" onsubmit="return confirm('Iniciar {{ label }}?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button class="{{ 'primary-action' if loop.first else '' }}" type="submit">{{ label }}</button>
       </form>
     {% endfor %}
@@ -28,6 +29,7 @@
     <span>Itens foram excluidos fisicamente e ainda estavam no indice.</span>
   </div>
   <form method="post" action="/maintenance/cleanup-missing">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button>Atualizar indice</button>
   </form>
 </section>
@@ -53,8 +55,8 @@
     <td>{{ "%.2f"|format(item.size / 1024 / 1024) }} MB</td>
     <td>{% if item.exists %}<span class="ok">No disco</span>{% else %}<span class="missing">Ausente</span>{% endif %}</td>
     <td class="actions">
-      <form method="post" action="/actions/open-folder?path={{ item.path|urlencode }}"><button type="submit">Vault</button></form>
-      <form method="post" action="/actions/delete-file?path={{ item.path|urlencode }}" onsubmit="return confirm('Excluir este arquivo local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>
+      <form method="post" action="/actions/open-folder?path={{ item.path|urlencode }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Vault</button></form>
+      <form method="post" action="/actions/delete-file?path={{ item.path|urlencode }}" onsubmit="return confirm('Excluir este arquivo local e remover do indice?')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="danger" type="submit">Excluir</button></form>
     </td>
   </tr>
   {% endfor %}

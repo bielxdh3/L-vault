@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from localvault import db
 from localvault.config import ensure_directories
+from localvault.auth import set_password
 from localvault.viewer import create_app
 
 
@@ -16,7 +17,9 @@ def test_file_route_only_serves_files_inside_vault(tmp_path: Path):
     config_file = p.config / "token.json"
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text("secret", encoding="utf-8")
+    set_password(p.root, "test-password")
     client = TestClient(create_app(p.root))
+    client.post("/login", data={"password": "test-password"})
 
     allowed = client.get("/file", params={"path": str(vault_file)})
     blocked = client.get("/file", params={"path": str(config_file)})

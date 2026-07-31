@@ -12,6 +12,7 @@ from localvault.config import ensure_directories
 from localvault.gmail_api import LAST_INTERNAL_DATE_MS, backup_gmail_api
 from localvault.reports import RunReport
 from localvault.viewer import create_app
+from localvault.auth import set_password
 
 
 def test_gmail_api_second_run_skips_existing_without_duplicate_files(monkeypatch, tmp_path: Path):
@@ -102,7 +103,9 @@ def test_gmail_api_saves_raw_eml_and_renderable_plain_text(monkeypatch, tmp_path
         body = conn.execute("SELECT body_text FROM gmail_bodies").fetchone()
     assert Path(row["eml_path"]).exists()
     assert body["body_text"].strip() == "Plain API body"
-    response = TestClient(create_app(p.root)).get("/gmail/1")
+    set_password(p.root, "test-password")
+    client = TestClient(create_app(p.root)); client.post("/login", data={"password": "test-password"})
+    response = client.get("/gmail/1")
     assert "Plain API body" in response.text
 
 
@@ -122,11 +125,13 @@ def test_gmail_api_saves_html_body_and_blocks_remote_images(monkeypatch, tmp_pat
     with db.connect(p.db) as conn:
         body = conn.execute("SELECT body_html_path FROM gmail_bodies").fetchone()
     assert body["body_html_path"]
-    response = TestClient(create_app(p.root)).get("/gmail/1")
+    set_password(p.root, "test-password")
+    client = TestClient(create_app(p.root)); client.post("/login", data={"password": "test-password"})
+    response = client.get("/gmail/1")
     assert "Hello API" in response.text
     assert "script" not in response.text.lower()
     assert "https://example.com/remote.png" not in response.text
-    assert "data-remote-image" in response.text
+    assert "data-remote-image" not in response.text
 
 
 def test_gmail_api_extracts_attachment(monkeypatch, tmp_path: Path):
@@ -147,7 +152,9 @@ def test_gmail_api_extracts_attachment(monkeypatch, tmp_path: Path):
     assert row["filename"] == "doc.txt"
     assert row["is_inline"] == 0
     assert Path(row["path"]).read_bytes() == b"document"
-    response = TestClient(create_app(p.root)).get("/gmail/1")
+    set_password(p.root, "test-password")
+    client = TestClient(create_app(p.root)); client.post("/login", data={"password": "test-password"})
+    response = client.get("/gmail/1")
     assert "doc.txt" in response.text
 
 

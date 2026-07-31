@@ -30,8 +30,8 @@
       <details class="menu mail-menu">
         <summary aria-label="Acoes">...</summary>
         <div class="menu-popover">
-          {% if row.eml_path %}<form method="post" action="/actions/open-folder?path={{ row.eml_path|urlencode }}"><button type="submit">Abrir caminho</button></form>{% endif %}
-          {% if row.eml_path %}<form method="post" action="/actions/delete-file?path={{ row.eml_path|urlencode }}" onsubmit="return confirm('Excluir este e-mail local e remover do indice?')"><button class="danger" type="submit">Excluir</button></form>{% endif %}
+          {% if row.eml_path %}<form method="post" action="/actions/open-folder?path={{ row.eml_path|urlencode }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Abrir caminho</button></form>{% endif %}
+          {% if row.eml_path %}<form method="post" action="/actions/delete-file?path={{ row.eml_path|urlencode }}" onsubmit="return confirm('Excluir este e-mail local e remover do indice?')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="danger" type="submit">Excluir</button></form>{% endif %}
         </div>
       </details>
     </div>

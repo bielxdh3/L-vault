@@ -2,6 +2,7 @@
 config/config.yaml
 config/google_oauth_client_secret.json
 config/gmail_token.json
+config/auth.json
 db/
 inbox/
 logs/

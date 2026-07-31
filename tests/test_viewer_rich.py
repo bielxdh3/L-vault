@@ -5,13 +5,17 @@ from fastapi.testclient import TestClient
 
 from localvault import db
 from localvault.config import ensure_directories
+from localvault.auth import set_password
 from localvault.viewer import create_app
 
 
 def _client(tmp_path: Path) -> tuple[TestClient, object]:
     p = ensure_directories(tmp_path / "vault")
     db.init_db(p.db)
-    return TestClient(create_app(p.root)), p
+    set_password(p.root, "test-password")
+    client = TestClient(create_app(p.root))
+    client.post("/login", data={"password": "test-password"})
+    return client, p
 
 
 def test_top_navigation_includes_main_sections(tmp_path: Path):
@@ -155,7 +159,7 @@ def test_gmail_message_renders_sanitized_html(tmp_path: Path):
     assert "script" not in response.text.lower()
     assert "onerror" not in response.text.lower()
     assert "https://example.com/a.png" not in response.text
-    assert "data-remote-image" in response.text
+    assert "data-remote-image" not in response.text
 
 
 def test_gmail_list_decodes_entities_and_filters_attachments(tmp_path: Path):
