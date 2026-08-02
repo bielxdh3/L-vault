@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import paths
-from .disk_clone import active_clone_run_id, claim_control_request, create_control_request
+from .disk_clone import (
+    active_clone_run_id,
+    claim_control_request,
+    claim_monitor_owner,
+    create_control_request,
+    latest_clone_run_id,
+    release_monitor_owner,
+)
 
 
 WARNING_TEXT = (
@@ -28,6 +35,7 @@ RUN_STATES = {
     "verifying",
     "returning_target_offline",
     "success",
+    "deferred",
     "error",
     "hidden",
 }
@@ -143,9 +151,11 @@ class CountdownController:
             self.progress(progress)
         if run_state in {"countdown", "preflight", "sampling_activity", "verifying", "returning_target_offline", "success"}:
             return self.transition(run_state)
+        if run_state in {"skipped_outside_window", "skipped_window_expired_before_start", "skipped_not_due", "skipped_no_interactive_session", "skipped_target_missing", "skipped_high_source_activity"}:
+            return self.transition("deferred", phase="window expired", details={"reason": reason})
         if run_state == "cloning":
             return self.state.state
-        if run_state in {"error", "failed_provider", "failed_verification", "failed_offline_cleanup", "blocked_provider", "blocked_identity", "cancelled_before_start", "interrupted"}:
+        if run_state in {"error", "failed_provider", "failed_verification", "failed_offline_cleanup", "blocked_provider", "blocked_identity", "blocked_configuration", "re_enrollment_required", "cancelled_before_start", "interrupted"}:
             return self.error(reason or run_state)
         return self.state.state
 
@@ -153,14 +163,40 @@ class CountdownController:
 CloneUIController = CountdownController
 
 
-def _spawn_monitor(root: Path) -> None:
+def _spawn_monitor(root: Path, run_id: str | None = None) -> None:
+    if not run_id:
+        return
     command = [sys.executable, "-m", "localvault", "disk-clone-ui", "--root", str(root), "--monitor"]
+    command.extend(["--run-id", run_id])
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     try:
         subprocess.Popen(command, close_fds=True, creationflags=flags)
     except OSError:
         # The orchestration remains authoritative; a missing monitor cannot enable or cancel a provider.
         return
+
+
+def spawn_retry_worker(root: Path, request_id: str) -> None:
+    command = [sys.executable, "-m", "localvault", "disk-clone-retry-worker", "--root", str(root), "--request-id", request_id]
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    try:
+        subprocess.Popen(command, close_fds=True, creationflags=flags)
+    except OSError:
+        return
+
+
+def _hide_window(window: Any, controller: CountdownController) -> None:
+    controller.hide()
+    window.withdraw()
+
+
+def _restore_window(window: Any, controller: CountdownController) -> None:
+    controller.restore()
+    window.deiconify()
+    if hasattr(window, "lift"):
+        window.lift()
+    if hasattr(window, "focus_force"):
+        window.focus_force()
 
 
 def _run_window(root: Path, seconds: int = 300) -> str:
@@ -174,8 +210,8 @@ def _run_window(root: Path, seconds: int = 300) -> str:
     window.title("L-vault - Clone do disco")
     window.configure(bg="#e3efeb")
     window.attributes("-topmost", True)
-    controller = CountdownController(seconds, on_confirm=lambda: create_control_request(p.db, "preflight", actor="native-ui"), on_cancel=lambda: create_control_request(p.db, "cancel", actor="native-ui"))
-    window.protocol("WM_DELETE_WINDOW", controller.hide)
+    controller = CountdownController(seconds, on_confirm=lambda: create_control_request(p.db, "preflight", run_id=active_clone_run_id(p.db), actor="native-ui"), on_cancel=lambda: create_control_request(p.db, "cancel", run_id=active_clone_run_id(p.db), actor="native-ui"))
+    window.protocol("WM_DELETE_WINDOW", lambda: _hide_window(window, controller))
     style = ttk.Style(window)
     style.configure("Clone.TFrame", background="#e3efeb")
     frame = ttk.Frame(window, padding=24, style="Clone.TFrame")
@@ -194,11 +230,11 @@ def _run_window(root: Path, seconds: int = 300) -> str:
 
     def confirm() -> None:
         controller.confirm()
-        _spawn_monitor(root)
+        _spawn_monitor(root, active_clone_run_id(p.db))
         window.destroy()
 
     ttk.Button(actions, text="Clonar agora", command=confirm).pack(side="left", padx=(0, 8))
-    ttk.Button(actions, text="Ocultar", command=controller.hide).pack(side="left", padx=(0, 8))
+    ttk.Button(actions, text="Ocultar", command=lambda: _hide_window(window, controller)).pack(side="left", padx=(0, 8))
     ttk.Button(actions, text="Cancelar", command=cancel).pack(side="left")
 
     def tick() -> None:
@@ -216,8 +252,7 @@ def _run_window(root: Path, seconds: int = 300) -> str:
         run_id = active_clone_run_id(p.db)
         current = claim_control_request(p.db, "show", run_id) if run_id else None
         if current:
-            controller.restore()
-            window.deiconify()
+            _restore_window(window, controller)
             window.attributes("-topmost", True)
         window.after(500, poll_restore)
 
@@ -227,7 +262,7 @@ def _run_window(root: Path, seconds: int = 300) -> str:
     return "confirm" if controller._confirmed else "cancel"
 
 
-def _monitor_window(root: Path) -> None:
+def _monitor_window(root: Path, run_id: str | None = None) -> None:
     if os.name != "nt":
         return
     import tkinter as tk
@@ -235,6 +270,9 @@ def _monitor_window(root: Path) -> None:
     from . import db
 
     p = paths(root)
+    run_id = run_id or latest_clone_run_id(p.db)
+    if not run_id or not claim_monitor_owner(p.db, run_id):
+        return
     window = tk.Tk()
     window.title("L-vault - Estado do clone")
     window.configure(bg="#e3efeb")
@@ -255,28 +293,35 @@ def _monitor_window(root: Path) -> None:
         controller.hide()
         window.withdraw()
 
+    def close() -> None:
+        if controller.state.state == "success":
+            window.destroy()
+        else:
+            hide()
+
     def show_details() -> None:
         messagebox.showinfo("Detalhes do clone", controller.state.error or detail.cget("text") or "Nenhum detalhe adicional.", parent=window)
 
     def retry() -> None:
-        with db.connect(p.db) as conn:
-            row = conn.execute("SELECT run_id FROM disk_clone_runs ORDER BY started_at DESC LIMIT 1").fetchone()
-        if row:
-            create_control_request(p.db, "retry", run_id=row["run_id"], actor="native-ui")
-            controller.retry()
+        request_id = create_control_request(p.db, "retry", run_id=run_id, actor="native-ui")
+        spawn_retry_worker(root, request_id)
+        controller.retry()
 
     ttk.Button(actions, text="Ocultar", command=hide).pack(side="left", padx=(0, 8))
     details_button = ttk.Button(actions, text="Ver detalhes", command=show_details)
     details_button.pack(side="left", padx=(0, 8))
     retry_button = ttk.Button(actions, text="Retry", command=retry)
     retry_button.pack(side="left", padx=(0, 8))
-    ttk.Button(actions, text="Fechar", command=window.destroy).pack(side="left")
+    ttk.Button(actions, text="Fechar", command=close).pack(side="left")
 
     def poll() -> None:
         if not window.winfo_exists():
             return
+        current = claim_control_request(p.db, "show", run_id)
+        if current:
+            _restore_window(window, controller)
         with db.connect(p.db) as conn:
-            run = conn.execute("SELECT * FROM disk_clone_runs ORDER BY started_at DESC LIMIT 1").fetchone()
+            run = conn.execute("SELECT * FROM disk_clone_runs WHERE run_id=?", (run_id,)).fetchone()
             progress = None
             if run:
                 progress_row = conn.execute("SELECT progress_type,percent,copied_bytes,speed_bytes,eta_seconds,phase FROM disk_clone_progress WHERE run_id=? ORDER BY id DESC LIMIT 1", (run["run_id"],)).fetchone()
@@ -285,7 +330,7 @@ def _monitor_window(root: Path) -> None:
             state = controller.apply_durable_state(run["state"], reason=run["reason"] or "", progress=progress)
             status.configure(text=f"Estado: {state}")
             detail.configure(text=run["reason"] or (progress or {}).get("phase", ""))
-            retry_button.configure(state="normal" if state == "error" else "disabled")
+            retry_button.configure(state="normal" if state == "error" and not run["retry_run_id"] else "disabled")
             details_button.configure(state="normal" if state == "error" else "disabled")
             if state == "success":
                 detail.configure(text="Verificacao estrutural aprovada; boot nao testado manualmente.")
@@ -293,7 +338,10 @@ def _monitor_window(root: Path) -> None:
 
     window.protocol("WM_DELETE_WINDOW", hide)
     window.after(0, poll)
-    window.mainloop()
+    try:
+        window.mainloop()
+    finally:
+        release_monitor_owner(p.db, run_id)
 
 
 def native_countdown(root: Path, seconds: int = 300) -> str:
@@ -301,9 +349,9 @@ def native_countdown(root: Path, seconds: int = 300) -> str:
     return _run_window(root, seconds)
 
 
-def run_native_ui(root: Path, seconds: int = 300, *, monitor: bool = False) -> None:
+def run_native_ui(root: Path, seconds: int = 300, *, monitor: bool = False, run_id: str | None = None) -> None:
     if monitor:
-        _monitor_window(root)
+        _monitor_window(root, run_id)
     else:
         native_countdown(root, seconds)
 

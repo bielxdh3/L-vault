@@ -11,7 +11,7 @@
   <article><h2>Provedor</h2><p><strong>{{ provider }}</strong> - {{ provider_version or "versao desconhecida" }} - {{ provider_edition or "edicao desconhecida" }}</p><p class="muted">{{ provider_blocker or ("capacidade validada" if provider_supported else "bloqueado") }}</p></article>
   <article><h2>Inscricao</h2><p>{{ enrollment }}</p><p class="muted">Origem: {{ source }}<br>Destino: {{ target }}</p></article>
   <article><h2>Agendamento local</h2><p>Intervalo: <strong>{{ interval_days }} dia(s)</strong></p><p class="muted">Proximo vencimento UTC: {{ next_due_at }}<br>Janela local: {{ window_start }}-{{ window_end }}, sem catch-up diurno.</p></article>
-  <article><h2>Estado atual</h2><p><span class="badge">{{ current_state }}</span></p><p class="muted">Destino offline: {{ "sim" if target_offline_expected else "nao" }}<br>Boot test: {{ boot_test }}</p></article>
+  <article><h2>Estado atual</h2><p><span class="badge">{{ current_state_label }}</span></p><p class="muted">Destino offline: {{ "sim" if target_offline_expected else "nao" }}<br>Boot test: {{ boot_test }}</p></article>
 </section>
 
 <h2>Acoes seguras</h2>
@@ -25,7 +25,7 @@
   <article><h2>Progresso</h2>{% if progress %}<p><span class="badge">{{ progress.progress_type }}</span> {{ progress.percent if progress.percent is not none else "indisponivel" }}{% if progress.percent is not none %}%{% endif %}</p><p class="muted">Fase: {{ progress.phase or "desconhecida" }}<br>Bytes: {{ progress.copied_bytes or "indisponivel" }}<br>Velocidade: {{ progress.speed_bytes or "indisponivel" }}<br>ETA: {{ progress.eta_seconds or "indisponivel" }}</p>{% else %}<p class="muted">Nenhum sinal de progresso persistido.</p>{% endif %}</article>
   <article><h2>Atividade</h2><p class="muted">Amostras e media sao registradas por tentativa; atividade alta deixa o clone devido sem retry automatico.</p></article>
   <article><h2>Verificacao</h2><p class="muted">Somente inventario pos-provedor fresco pode confirmar a estrutura. O boot permanece nao testado manualmente.</p></article>
-  <article><h2>Retentativa</h2><p class="muted">Retry e sempre explicito e cria uma nova tentativa auditavel; cancelamento so aparece com contrato seguro do provedor.</p></article>
+  <article><h2>Retentativa</h2><p class="muted">Retry e sempre explicito e cria uma nova tentativa auditavel; cancelamento so aparece com contrato seguro do provedor.</p>{% if retryable_run_id %}<form method="post" action="/disk-clone/action?action=retry&run_id={{ retryable_run_id }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Solicitar retry seguro</button></form>{% endif %}</article>
 </section>
 
 <form class="filter-panel" method="post" action="/disk-clone/settings"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label>Intervalo (1-3650 dias) <input type="number" min="1" max="3650" name="interval_days" value="{{ interval_days }}"></label><button type="submit">Salvar intervalo</button></form>

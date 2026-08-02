@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS disk_clone_runs (
   parent_run_id TEXT,
   local_time_decision TEXT,
   timezone_name TEXT,
+  start_window_local_time TEXT,
+  start_window_timezone TEXT,
+  start_window_decision TEXT,
   preflight_evidence_hash TEXT,
   activity_sample_json TEXT,
   final_revalidation_result TEXT,
@@ -147,6 +150,11 @@ CREATE TABLE IF NOT EXISTS disk_clone_controls (
   created_at TEXT NOT NULL,
   handled_at TEXT
 );
+CREATE TABLE IF NOT EXISTS disk_clone_monitor_owners (
+  run_id TEXT PRIMARY KEY,
+  owner_pid INTEGER NOT NULL,
+  claimed_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_files_sha256 ON files(sha256);
 CREATE INDEX IF NOT EXISTS idx_gmail_sender ON gmail_messages(sender);
 CREATE INDEX IF NOT EXISTS idx_gmail_subject ON gmail_messages(subject);
@@ -155,6 +163,8 @@ CREATE INDEX IF NOT EXISTS idx_photos_date ON photo_items(creation_date);
 CREATE INDEX IF NOT EXISTS idx_photos_hash ON photo_items(sha256);
 CREATE INDEX IF NOT EXISTS idx_disk_clone_events_run ON disk_clone_events(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_disk_clone_progress_run ON disk_clone_progress(run_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_disk_clone_retry_parent ON disk_clone_runs(parent_run_id) WHERE trigger_type='retry' AND parent_run_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_disk_clone_pending_retry ON disk_clone_controls(action, run_id) WHERE action='retry' AND run_id IS NOT NULL AND handled_at IS NULL;
 """
 
 
@@ -200,6 +210,9 @@ def init_db(db_path: Path) -> None:
             "primary_failure_reason": "TEXT",
             "cleanup_failure_reason": "TEXT",
             "retry_run_id": "TEXT",
+            "start_window_local_time": "TEXT",
+            "start_window_timezone": "TEXT",
+            "start_window_decision": "TEXT",
         }.items():
             _ensure_column(conn, "disk_clone_runs", column, definition)
 
