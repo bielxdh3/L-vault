@@ -78,6 +78,11 @@ CLONE_STATE_LABELS = {
     "offline_boot_not_configured": "boot offline nao configurado",
     "offline_simulation_completed": "simulacao fake concluida; nenhum clone executado",
     "offline_clone_structurally_verified": "estrutura verificada; boot nao testado",
+    "offline_runtime_unavailable": "runtime offline indisponivel",
+    "offline_runtime_static_validation_passed": "validacao estatica offline concluida; boot nao provado",
+    "offline_runtime_virtual_validation_passed": "validacao virtual offline concluida; hardware nao provado",
+    "offline_return_channel_ready": "canal virtual de retorno pronto; clone nao executado",
+    "offline_runtime_blocked": "runtime offline bloqueado; nenhuma execucao",
 }
 
 
@@ -326,6 +331,9 @@ def validate_disk_clone_config(config: dict[str, Any] | None) -> dict[str, Any]:
         "keep_target_offline": True,
         "allow_automatic_retry_same_night": False,
         "allow_real_provider_execution": False,
+        "real_execution_authorized": False,
+        "offline_runtime_validation": "static_or_virtual_only",
+        "offline_return_channel": "temporary_directory_fixture_only",
     }
     result = defaults | raw
     try:
@@ -346,8 +354,12 @@ def validate_disk_clone_config(config: dict[str, Any] | None) -> dict[str, Any]:
             _parse_clock(result[key])
     except (TypeError, ValueError, KeyError) as exc:
         raise DiskCloneConfigError("Configuracao de clone invalida; a execucao foi bloqueada.") from exc
-    for key in ("enabled", "require_unlocked_interactive_session", "keep_target_offline", "allow_automatic_retry_same_night", "allow_real_provider_execution"):
+    for key in ("enabled", "require_unlocked_interactive_session", "keep_target_offline", "allow_automatic_retry_same_night", "allow_real_provider_execution", "real_execution_authorized"):
         result[key] = _safe_bool(result[key])
+    if result["allow_real_provider_execution"] or result["real_execution_authorized"]:
+        raise DiskCloneConfigError("A execucao real permanece desativada nesta fase.")
+    if result["offline_runtime_validation"] != "static_or_virtual_only" or result["offline_return_channel"] != "temporary_directory_fixture_only":
+        raise DiskCloneConfigError("A politica de runtime offline nao e allowlisted.")
     if _parse_clock(result["window_start"]) >= _parse_clock(result["window_end"]):
         raise DiskCloneConfigError("A janela de clone deve ter inicio antes do fim.")
     if not _clean(result["provider"]):
@@ -1307,6 +1319,10 @@ class CloneService:
             "offline_engine": OFFLINE_ENGINE,
             "offline_engine_version": OFFLINE_ENGINE_VERSION,
             "offline_handoff": asdict(build_offline_boot_handoff_plan()),
+            "offline_runtime_state": "offline_runtime_blocked",
+            "offline_runtime_reason": "official ISO and extracted runtime tree were not supplied for validation",
+            "offline_physical_boot_tested": False,
+            "offline_real_execution_enabled": False,
             "real_execution_authorized": False,
         }
 

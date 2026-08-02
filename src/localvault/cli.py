@@ -34,6 +34,7 @@ from .disk_clone import (
 )
 from .disk_clone_ui import native_countdown, run_native_ui
 from .offline_clone import simulate_offline_round_trip
+from .offline_runtime import OfflineRuntimeValidator, simulate_virtual_offline_round_trip
 from .gmail_api import backup_gmail_api as run_gmail_api
 from .gmail_audit import audit_gmail_duplicates, repair_stale_gmail_runs
 from .gmail_maintenance import rename_existing_gmail_files
@@ -344,7 +345,9 @@ def health_check(root: Path = root_option()):
 def disk_clone_status(root: Path = root_option()):
     """Show safe provider, enrollment, due-date, and run state information."""
     p = prepare(root)
-    console.print_json(json.dumps(disk_clone_dashboard_data(p), ensure_ascii=False, default=str))
+    status = disk_clone_dashboard_data(p)
+    status["offline_runtime"] = OfflineRuntimeValidator().validate().payload()
+    console.print_json(json.dumps(status, ensure_ascii=False, default=str))
 
 
 @app.command("disk-clone-check")
@@ -370,6 +373,31 @@ def disk_clone_simulate(root: Path = root_option()):
         result = simulate_offline_round_trip(Path(temp_root))
     console.print_json(json.dumps(result, ensure_ascii=False, default=str))
     if result.get("state") != "offline_simulation_completed":
+        raise typer.Exit(1)
+
+
+@app.command("disk-clone-virtual-roundtrip")
+def disk_clone_virtual_roundtrip(root: Path = root_option()):
+    """Exercise the durable virtual return channel with synthetic devices only."""
+    prepare(root)
+    with tempfile.TemporaryDirectory(prefix="localvault-clone-virtual-") as temp_root:
+        result = simulate_virtual_offline_round_trip(Path(temp_root))
+    console.print_json(json.dumps(result, ensure_ascii=False, default=str))
+    if result.get("state") != "consumed":
+        raise typer.Exit(1)
+
+
+@app.command("disk-clone-runtime-validate")
+def disk_clone_runtime_validate(
+    root: Path = root_option(),
+    iso: Optional[Path] = typer.Option(None, "--iso", help="Existing official Clonezilla ISO; never downloaded."),
+    extracted_tree: Optional[Path] = typer.Option(None, "--extracted-tree", help="Existing extracted ISO tree; never modified."),
+):
+    """Inspect supplied Clonezilla artifacts without booting or touching storage."""
+    prepare(root)
+    report = OfflineRuntimeValidator().validate(iso_path=iso, extracted_tree=extracted_tree)
+    console.print_json(json.dumps(report.payload(), ensure_ascii=False, default=str))
+    if report.state == "offline_runtime_blocked":
         raise typer.Exit(1)
 
 

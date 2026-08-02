@@ -35,6 +35,9 @@ disk_clone:
   keep_target_offline: true
   allow_automatic_retry_same_night: false
   allow_real_provider_execution: false
+  real_execution_authorized: false
+  offline_runtime_validation: static_or_virtual_only
+  offline_return_channel: temporary_directory_fixture_only
   protected_paths: []
 automation:
   task_prefix: LocalVault

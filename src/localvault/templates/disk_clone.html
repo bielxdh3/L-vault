@@ -11,7 +11,7 @@
   <article><h2>Arquitetura</h2><p><strong>{{ windows_preparation_provider }}</strong></p><p class="muted">Motor offline: {{ offline_engine }} {{ offline_engine_version }}<br>{{ provider_blocker or "preparacao Windows separada do motor offline" }}</p></article>
   <article><h2>Inscricao</h2><p>{{ enrollment }}</p><p class="muted">Origem: {{ source }}<br>Destino: {{ target }}</p></article>
   <article><h2>Agendamento local</h2><p>Intervalo: <strong>{{ interval_days }} dia(s)</strong></p><p class="muted">Proximo vencimento UTC: {{ next_due_at }}<br>Janela local: {{ window_start }}-{{ window_end }}, sem catch-up diurno.</p></article>
-  <article><h2>Estado atual</h2><p><span class="badge">{{ current_state_label }}</span></p><p class="muted">Boot offline: {{ "configurado" if offline_handoff.configured else "nao configurado" }}<br>Boot test: {{ boot_test }}</p></article>
+  <article><h2>Estado atual</h2><p><span class="badge">{{ current_state_label }}</span></p><p class="muted">Runtime offline: {{ offline_runtime_state }}<br>{{ offline_runtime_reason }}<br>Boot offline: {{ "configurado" if offline_handoff.configured else "nao configurado" }}<br>Boot test: {{ boot_test }}<br>Execucao real: desativada</p></article>
 </section>
 
 <h2>Acoes seguras</h2>
