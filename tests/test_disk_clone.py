@@ -7,12 +7,14 @@ import os
 from pathlib import Path
 
 import pytest
+import typer
 import yaml
 from fastapi.testclient import TestClient
 
 from localvault import db
 from localvault.auth import set_password
-from localvault.config import ensure_directories
+from localvault.cli import _enroll_disk_clone
+from localvault.config import ensure_directories, load_config
 from localvault.disk_clone import (
     ActivitySample,
     AOMEIProvider,
@@ -32,6 +34,7 @@ from localvault.disk_clone import (
     VerificationResult,
     WindowsStructuralVerifier,
     clone_is_due,
+    _source_paths,
     protected_path_conflicts,
     validate_disk_clone_config,
     within_clone_window,
@@ -276,6 +279,268 @@ class _SequenceInventory:
         index = min(self.calls, len(self.snapshots) - 1)
         self.calls += 1
         return list(self.snapshots[index])
+
+
+class _SequenceResolver:
+    def __init__(self, mappings):
+        self.mappings = list(mappings)
+        self.calls = 0
+
+    def resolve(self, protected_paths):
+        index = min(self.calls, len(self.mappings) - 1)
+        self.calls += 1
+        return FakeProtectedPathResolver(self.mappings[index]).resolve(protected_paths)
+
+
+class _Prompt:
+    def __init__(self, values):
+        self.values = list(values)
+        self.calls = []
+
+    def __call__(self, message, **kwargs):
+        self.calls.append((message, kwargs))
+        return self.values.pop(0)
+
+
+class _RecordingLifecycle(FakeDiskLifecycle):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+        self.last_offline = None
+
+    def set_offline(self, disk):
+        self.events.append("offline")
+        self.last_offline = disk
+        super().set_offline(disk)
+
+
+class _RecordingEnrollmentStore:
+    def __init__(self, root, events):
+        self.delegate = EnrollmentStore(root)
+        self.events = events
+        self.calls = []
+
+    def save(self, source, target, provider, mode):
+        self.events.append("save")
+        self.calls.append((source, target, provider, mode))
+        return self.delegate.save(source, target, provider, mode)
+
+
+def _enrollment_context(tmp_path):
+    root = tmp_path / "vault"
+    p = ensure_directories(root)
+    db.init_db(p.db)
+    protected = p.root / "protected-data"
+    (p.config / "config.yaml").write_text(
+        yaml.safe_dump({"disk_clone": {"enabled": True, "provider": "fake", "protected_paths": [str(protected)]}}),
+        encoding="utf-8",
+    )
+    source = _disk(0, "SRC-ENROLL", system=True)
+    target = _disk(1, "DST-ENROLL")
+    return p, source, target, protected
+
+
+def _protected_mapping(p, protected, default_disk, protected_disk=None, *, omit=False):
+    mapping = {str(path): default_disk for path in _source_paths(p, load_config(p.root))}
+    if omit:
+        mapping.pop(str(protected), None)
+    else:
+        mapping[str(protected)] = protected_disk or default_disk
+    return mapping
+
+
+def _enrollment_components(p, snapshots, resolver_mappings, prompt_values):
+    events = []
+    inventory = _SequenceInventory(snapshots)
+    resolver = _SequenceResolver([resolver_mappings[0]] * len(snapshots[0]) + resolver_mappings[1:])
+    lifecycle = _RecordingLifecycle(events)
+    store = _RecordingEnrollmentStore(p.root, events)
+    prompt = _Prompt(prompt_values)
+    return inventory, resolver, lifecycle, store, prompt, events
+
+
+def test_enrollment_protected_target_after_refresh_blocks_before_confirmation(tmp_path):
+    p, source, target, protected = _enrollment_context(tmp_path)
+    mapping = _protected_mapping(p, protected, source, target)
+    prompt = _Prompt([1, target.confirmation_phrase()])
+    inventory = _SequenceInventory([[source, target], [source, target]])
+    lifecycle = _RecordingLifecycle([])
+    store = _RecordingEnrollmentStore(p.root, [])
+
+    with pytest.raises(typer.BadParameter, match="dados protegidos"):
+        _enroll_disk_clone(p, FakeProvider(), inventory=inventory, resolver=_SequenceResolver([mapping, mapping, mapping, mapping]), lifecycle=lifecycle, store=store, prompt=prompt)
+
+    assert len(prompt.calls) == 1
+    assert inventory.calls == 2
+    assert lifecycle.offline_calls == []
+    assert store.calls == []
+
+
+def test_enrollment_conflict_appearing_after_confirmation_blocks_without_mutation(tmp_path):
+    p, source, target, protected = _enrollment_context(tmp_path)
+    safe = _protected_mapping(p, protected, source)
+    conflict = _protected_mapping(p, protected, source, target)
+    events = []
+    inventory = _SequenceInventory([[source, target], [source, target], [source, target]])
+    lifecycle = _RecordingLifecycle(events)
+    store = _RecordingEnrollmentStore(p.root, events)
+    prompt = _Prompt([1, target.confirmation_phrase()])
+
+    with pytest.raises(typer.BadParameter, match="dados protegidos"):
+        _enroll_disk_clone(
+            p,
+            FakeProvider(),
+            inventory=inventory,
+            resolver=_SequenceResolver([safe, safe, safe, conflict]),
+            lifecycle=lifecycle,
+            store=store,
+            prompt=prompt,
+        )
+
+    assert len(prompt.calls) == 2
+    assert inventory.calls == 3
+    assert lifecycle.offline_calls == []
+    assert store.calls == []
+    assert events == []
+
+
+@pytest.mark.parametrize("resolver_mode", ["unresolved", "ambiguous"])
+def test_enrollment_unresolved_or_ambiguous_protected_path_blocks(tmp_path, resolver_mode):
+    p, source, target, protected = _enrollment_context(tmp_path)
+    protected_disk = _disk(2, "PROTECTED-ENROLL")
+    duplicate = _disk(3, "PROTECTED-ENROLL")
+    disks = [source, target] if resolver_mode == "unresolved" else [source, target, protected_disk, duplicate]
+    mapping = _protected_mapping(p, protected, source, protected_disk if resolver_mode == "ambiguous" else None, omit=resolver_mode == "unresolved")
+    inventory, resolver, lifecycle, store, prompt, events = _enrollment_components(
+        p,
+        [disks, disks],
+        [mapping, mapping],
+        [1, target.confirmation_phrase()],
+    )
+
+    with pytest.raises(typer.BadParameter, match="dados protegidos"):
+        _enroll_disk_clone(p, FakeProvider(), inventory=inventory, resolver=resolver, lifecycle=lifecycle, store=store, prompt=prompt)
+
+    assert len(prompt.calls) == 1
+    assert lifecycle.offline_calls == []
+    assert store.calls == []
+    assert events == []
+
+
+def test_enrollment_disk_number_change_during_confirmation_is_safe(tmp_path):
+    p, source, target, protected = _enrollment_context(tmp_path)
+    refreshed_source = _disk(4, source.serial, system=True)
+    refreshed_target = _disk(7, target.serial)
+    final_source = _disk(5, source.serial, system=True)
+    final_target = _disk(8, target.serial)
+    mapping = _protected_mapping(p, protected, source)
+    inventory, resolver, lifecycle, store, prompt, events = _enrollment_components(
+        p,
+        [[source, target], [refreshed_source, refreshed_target], [final_source, final_target]],
+        [mapping, mapping],
+        [1, refreshed_target.confirmation_phrase()],
+    )
+
+    _enroll_disk_clone(p, FakeProvider(), inventory=inventory, resolver=resolver, lifecycle=lifecycle, store=store, prompt=prompt)
+
+    assert lifecycle.offline_calls == [8]
+    assert store.calls and store.calls[0][1].number == 8
+    assert events == ["offline", "save"]
+
+
+@pytest.mark.parametrize("change", ["serial", "capacity", "model", "duplicate", "missing", "critical"])
+def test_enrollment_identity_or_critical_change_during_confirmation_blocks(tmp_path, change):
+    p, source, target, protected = _enrollment_context(tmp_path)
+    refreshed_target = _disk(7, target.serial)
+    if change == "serial":
+        final_disks = [source, _disk(8, "CHANGED-ENROLL")]
+    elif change == "capacity":
+        final_disks = [source, _disk(8, target.serial, size=1001)]
+    elif change == "model":
+        final_disks = [source, DiskIdentity.from_dict(_disk(8, target.serial).to_dict() | {"model": "Different Disk"})]
+    elif change == "duplicate":
+        final_disks = [source, _disk(8, target.serial), _disk(9, target.serial)]
+    elif change == "missing":
+        final_disks = [source]
+    else:
+        final_disks = [source, _disk(8, target.serial, system=True)]
+    mapping = _protected_mapping(p, protected, source)
+    inventory, resolver, lifecycle, store, prompt, events = _enrollment_components(
+        p,
+        [[source, target], [source, refreshed_target], final_disks],
+        [mapping, mapping],
+        [1, refreshed_target.confirmation_phrase()],
+    )
+
+    with pytest.raises(typer.BadParameter):
+        _enroll_disk_clone(p, FakeProvider(), inventory=inventory, resolver=resolver, lifecycle=lifecycle, store=store, prompt=prompt)
+
+    assert len(prompt.calls) == 2
+    assert inventory.calls == 3
+    assert lifecycle.offline_calls == []
+    assert store.calls == []
+    assert events == []
+
+
+def test_enrollment_incorrect_confirmation_phrase_never_rechecks_or_mutates(tmp_path):
+    p, source, target, protected = _enrollment_context(tmp_path)
+    mapping = _protected_mapping(p, protected, source)
+    inventory, resolver, lifecycle, store, prompt, events = _enrollment_components(
+        p,
+        [[source, target], [source, target], [source, target]],
+        [mapping, mapping],
+        [1, "APAGAR errado"],
+    )
+
+    with pytest.raises(typer.BadParameter, match="Confirmacao destrutiva incorreta"):
+        _enroll_disk_clone(p, FakeProvider(), inventory=inventory, resolver=resolver, lifecycle=lifecycle, store=store, prompt=prompt)
+
+    assert inventory.calls == 2
+    assert lifecycle.offline_calls == []
+    assert store.calls == []
+    assert events == []
+
+
+def test_enrollment_safe_fake_success_offlines_final_target_before_saving(tmp_path):
+    p, source, target, protected = _enrollment_context(tmp_path)
+    refreshed_source = _disk(4, source.serial, system=True)
+    refreshed_target = _disk(7, target.serial)
+    mapping = _protected_mapping(p, protected, source)
+    provider = FakeProvider()
+    inventory, resolver, lifecycle, store, prompt, events = _enrollment_components(
+        p,
+        [[source, target], [refreshed_source, refreshed_target], [refreshed_source, refreshed_target]],
+        [mapping, mapping],
+        [1, refreshed_target.confirmation_phrase()],
+    )
+
+    _enroll_disk_clone(p, provider, inventory=inventory, resolver=resolver, lifecycle=lifecycle, store=store, prompt=prompt)
+
+    assert provider.started == 0
+    assert lifecycle.offline_calls == [7]
+    assert store.calls and store.calls[0][1].number == 7
+    assert events == ["offline", "save"]
+    assert store.delegate.manifest_path.exists()
+
+
+def test_enrollment_unsupported_provider_blocks_before_target_authorization(tmp_path):
+    p, source, target, protected = _enrollment_context(tmp_path)
+    mapping = _protected_mapping(p, protected, source)
+    inventory, resolver, lifecycle, store, prompt, events = _enrollment_components(
+        p,
+        [[source, target]],
+        [mapping],
+        [1, target.confirmation_phrase()],
+    )
+
+    with pytest.raises(typer.BadParameter, match="Inscricao bloqueada"):
+        _enroll_disk_clone(p, DiskGeniusProvider(), inventory=inventory, resolver=resolver, lifecycle=lifecycle, store=store, prompt=prompt)
+
+    assert inventory.calls == 0
+    assert prompt.calls == []
+    assert lifecycle.offline_calls == []
+    assert store.calls == []
+    assert events == []
 
 
 def test_disk_number_change_after_countdown_rebuilds_plan_from_identity(tmp_path: Path):

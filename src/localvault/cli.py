@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import typer
 import uvicorn
@@ -30,6 +30,7 @@ from .disk_clone import (
     disk_clone_dashboard_data,
     protected_path_conflicts,
     provider_for_config,
+    resolved_protected_path_conflicts,
     simulate_state_machine,
 )
 from .disk_clone_ui import native_countdown, run_native_ui
@@ -415,19 +416,42 @@ def disk_clone_enroll(root: Path = root_option()):
     if os.name != "nt":
         raise typer.BadParameter("A inscricao de clone exige Windows e privilegios administrativos.")
     p = prepare(root)
-    disks = WindowsDiskInventory().list_disks()
-    sources = [disk for disk in disks if disk.is_system or disk.is_boot]
-    if len(sources) != 1:
-        raise typer.BadParameter("Nao foi possivel identificar o disco de sistema atual.")
-    source = sources[0]
     cfg = load_config(root)
     provider = provider_for_config(cfg.get("disk_clone", {}))
+    _enroll_disk_clone(
+        p,
+        provider,
+        inventory=WindowsDiskInventory(),
+        resolver=WindowsProtectedPathResolver(),
+        lifecycle=WindowsDiskLifecycle(),
+        store=EnrollmentStore(root),
+        prompt=typer.prompt,
+    )
+
+
+def _enroll_disk_clone(
+    p,
+    provider,
+    *,
+    inventory,
+    resolver,
+    lifecycle,
+    store,
+    prompt: Callable[..., object],
+) -> None:
+    """Run enrollment with injectable read-only fakes for regression tests."""
     discovery = provider.discover()
     capabilities = provider.validate_capabilities()
     if not capabilities.supported:
         raise typer.BadParameter(f"Inscricao bloqueada para {discovery.name}: {capabilities.blocker or discovery.detail}")
+
+    disks = inventory.list_disks()
+    sources = [disk for disk in disks if disk.is_system or disk.is_boot]
+    if len(sources) != 1:
+        raise typer.BadParameter("Nao foi possivel identificar o disco de sistema atual.")
+    source = sources[0]
+    cfg = load_config(p.root)
     protected_paths = _source_paths(p, cfg)
-    resolver = WindowsProtectedPathResolver()
     table = Table(title="Candidatos; numero efemero, nunca identidade")
     for column in ("Nº efemero", "Modelo", "Capacidade", "Barramento", "Particao", "Estado", "Somente leitura", "Volumes montados", "Caminhos protegidos", "Serial", "Forca", "Sistema/boot/pagefile/crash", "Aviso"):
         table.add_column(column)
@@ -465,24 +489,51 @@ def disk_clone_enroll(root: Path = root_option()):
         )
     console.print(table)
     console.print("Nao pre-selecione por capacidade, modelo, letra ou numero; confirme a identidade persistente abaixo.")
-    target_number = typer.prompt("Numero momentaneo do HD de destino", type=int)
+    target_number = prompt("Numero momentaneo do HD de destino", type=int)
     target = next((disk for disk in disks if disk.number == target_number), None)
     if not target or target.number == source.number or any((target.is_system, target.is_boot, target.is_pagefile, target.is_crash_dump)):
         raise typer.BadParameter("O destino deve ser outro disco fisico.")
-    refreshed = WindowsDiskInventory().list_disks()
-    target_matches = [disk for disk in refreshed if disk.matches(target, require_strong=True)]
-    source_matches = [disk for disk in refreshed if disk.matches(source, require_strong=True) and (disk.is_system or disk.is_boot)]
+
+    def refresh_matches():
+        refreshed = inventory.list_disks()
+        target_matches = [disk for disk in refreshed if disk.matches(target, require_strong=True)]
+        source_matches = [disk for disk in refreshed if disk.matches(source, require_strong=True) and (disk.is_system or disk.is_boot)]
+        return refreshed, source_matches, target_matches
+
+    refreshed, source_matches, target_matches = refresh_matches()
     if len(target_matches) != 1 or len(source_matches) != 1:
         raise typer.BadParameter("A identidade fisica mudou ou ficou ambigua; inscricao bloqueada.")
     target, source = target_matches[0], source_matches[0]
     if target.matches(source, require_strong=False) or any((target.is_system, target.is_boot, target.is_pagefile, target.is_crash_dump)):
         raise typer.BadParameter("O destino atualizado e invalido ou e um disco critico.")
+    try:
+        conflicts, _ = resolved_protected_path_conflicts(target, _source_paths(p, load_config(p.root)), resolver, inventory=refreshed)
+    except Exception as exc:
+        raise typer.BadParameter("Inscricao bloqueada: dados protegidos do L-vault nao puderam ser resolvidos com seguranca.") from exc
+    if conflicts:
+        raise typer.BadParameter("Inscricao bloqueada: o disco selecionado contem ou mapeia de forma ambigua dados protegidos do L-vault.")
     phrase = target.confirmation_phrase()
-    ack = typer.prompt(f"Digite exatamente {phrase}")
+    ack = prompt(f"Digite exatamente {phrase}")
     if ack != phrase:
         raise typer.BadParameter("Confirmacao destrutiva incorreta.")
-    WindowsDiskLifecycle().set_offline(target)
-    EnrollmentStore(root).save(source, target, discovery.name, "disk_intelligent")
+
+    # Rebuild every authorization input after the user confirmation pause.
+    final_inventory, final_source_matches, final_target_matches = refresh_matches()
+    if len(final_target_matches) != 1 or len(final_source_matches) != 1:
+        raise typer.BadParameter("A identidade fisica mudou, desapareceu ou ficou ambigua antes da operacao; inscricao bloqueada.")
+    final_target, final_source = final_target_matches[0], final_source_matches[0]
+    if final_target.matches(final_source, require_strong=False) or any((final_target.is_system, final_target.is_boot, final_target.is_pagefile, final_target.is_crash_dump)):
+        raise typer.BadParameter("O destino final e invalido ou se tornou um disco critico; inscricao bloqueada.")
+    if final_target.confirmation_phrase() != phrase:
+        raise typer.BadParameter("A identidade confirmada mudou antes da operacao; inscricao bloqueada.")
+    try:
+        conflicts, _ = resolved_protected_path_conflicts(final_target, _source_paths(p, load_config(p.root)), resolver, inventory=final_inventory)
+    except Exception as exc:
+        raise typer.BadParameter("Inscricao bloqueada: dados protegidos do L-vault nao puderam ser resolvidos com seguranca.") from exc
+    if conflicts:
+        raise typer.BadParameter("Inscricao bloqueada: o disco selecionado contem ou mapeia de forma ambigua dados protegidos do L-vault.")
+    lifecycle.set_offline(final_target)
+    store.save(final_source, final_target, discovery.name, "disk_intelligent")
     console.print("Inscricao criada. O provedor nunca e executado durante a inscricao.")
 
 
