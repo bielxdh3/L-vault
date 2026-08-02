@@ -53,4 +53,6 @@ Somente depois de validar o provedor local e confirmar que o destino dedicado po
 python -m localvault disk-clone-enroll --root E:\LocalVault
 ```
 
-O intervalo padrao e 30 dias (configuravel entre 1 e 3650), a amostragem de atividade usa limite de 70%, e cada tentativa mostra cinco minutos de aviso. O destino deve permanecer offline entre execucoes. O painel `Clone do disco` mostra o historico, a verificacao estrutural e o aviso permanente de que nenhum boot test foi realizado.
+O intervalo padrao e 30 dias (configuravel entre 1 e 3650), a janela 03:00-04:00 usa o horario local do Windows, e timestamps persistentes usam UTC. A amostragem de atividade usa limite de 70%, e cada tentativa mostra cinco minutos de aviso. Revalidacao de identidade, resolucao de caminhos protegidos por disco fisico e inventario pos-provedor sao obrigatorios; qualquer ambiguidade bloqueia. O destino deve permanecer offline entre execucoes. O painel `Clone do disco` mostra estado, progresso honesto, atividade, historico, verificacao estrutural, limpeza offline e o aviso permanente de que nenhum boot test foi realizado.
+
+O cadastro de hardware e a ativacao do provedor sao fail-closed. O provedor selecionado vem de `disk_clone.provider`; nao ha fallback silencioso de um provedor configurado. DiskGenius permanece sem contrato CLI seguro validado. AOMEI ausente ou com edicao/capacidades nao validadas permanece bloqueado. A execucao real tambem continua desativada enquanto `allow_real_provider_execution` for falso.

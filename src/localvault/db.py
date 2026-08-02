@@ -95,7 +95,20 @@ CREATE TABLE IF NOT EXISTS disk_clone_runs (
   activity_average REAL,
   activity_max REAL,
   activity_samples INTEGER,
-  activity_duration INTEGER
+  activity_duration INTEGER,
+  parent_run_id TEXT,
+  local_time_decision TEXT,
+  timezone_name TEXT,
+  preflight_evidence_hash TEXT,
+  activity_sample_json TEXT,
+  final_revalidation_result TEXT,
+  post_provider_inventory_at TEXT,
+  verification_evidence TEXT,
+  boot_test_status TEXT NOT NULL DEFAULT 'unverified',
+  primary_failure_state TEXT,
+  primary_failure_reason TEXT,
+  cleanup_failure_reason TEXT,
+  retry_run_id TEXT
 );
 CREATE TABLE IF NOT EXISTS disk_clone_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -174,6 +187,19 @@ def init_db(db_path: Path) -> None:
             "progress_type": "TEXT",
             "verification_status": "TEXT",
             "target_offline_result": "TEXT",
+            "parent_run_id": "TEXT",
+            "local_time_decision": "TEXT",
+            "timezone_name": "TEXT",
+            "preflight_evidence_hash": "TEXT",
+            "activity_sample_json": "TEXT",
+            "final_revalidation_result": "TEXT",
+            "post_provider_inventory_at": "TEXT",
+            "verification_evidence": "TEXT",
+            "boot_test_status": "TEXT NOT NULL DEFAULT 'unverified'",
+            "primary_failure_state": "TEXT",
+            "primary_failure_reason": "TEXT",
+            "cleanup_failure_reason": "TEXT",
+            "retry_run_id": "TEXT",
         }.items():
             _ensure_column(conn, "disk_clone_runs", column, definition)
 
