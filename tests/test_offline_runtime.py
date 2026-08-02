@@ -142,6 +142,16 @@ def test_production_gpgv_adapter_is_argv_only_pinned_and_bounded(tmp_path: Path)
     verifier, _ = _fake_verifier(tmp_path)
     assert verifier.verify(b"payload", b"detached") is True
 
+    missing = ProductionOfflineSignatureVerifier(tmp_path / "missing-gpgv", verifier.public_keyring, verifier.expected_fingerprint)
+    with pytest.raises(OfflineCloneBlocked, match="path is unsafe"):
+        missing.verify(b"payload", b"detached")
+    private_keyring = tmp_path / "private-key-material.gpg"
+    private_keyring.write_bytes(b"-----BEGIN PRIVATE KEY-----")
+    private_keyring.chmod(0o444)
+    private_material = ProductionOfflineSignatureVerifier(sys.executable, private_keyring, verifier.expected_fingerprint, command_suffix=verifier.command_suffix)
+    with pytest.raises(OfflineCloneBlocked, match="private key"):
+        private_material.verify(b"payload", b"detached")
+
     wrong_dir = tmp_path / "wrong-key"
     wrong_dir.mkdir()
     wrong, _ = _fake_verifier(wrong_dir, "wrong-key")
@@ -206,3 +216,26 @@ def test_virtual_runner_rejects_boot_medium_and_production_consumer_rejects_fake
     consumed = channel.consume(job, FakeDetachedVerifier(), expected_command_hash=plan.argv_hash, command_plan=plan, now=now, profile="production")
     assert consumed.state == "failed"
     assert not hasattr(runner, "execute_real")
+
+
+def test_return_channel_rejects_duplicate_and_stale_packages(tmp_path: Path):
+    job, source, target, now = _job()
+    channel = VirtualReturnChannel(tmp_path / "duplicate")
+    runner = VirtualOfflineRunner(channel, FakeDetachedSigner(), FakeDetachedVerifier(), policy=VirtualSimulationPolicy())
+    runner.run(job, (source, target), now=now)
+    (channel.root / "result-conflict").mkdir()
+    plan = ClonezillaCommandRenderer().render(job, resolve_offline_devices(job, (source, target)))
+    duplicate = channel.consume(job, FakeDetachedVerifier(), expected_command_hash=plan.argv_hash, command_plan=plan, now=now, profile="simulation")
+    assert duplicate.state == "failed"
+
+    job, source, target, now = _job()
+    channel = VirtualReturnChannel(tmp_path / "stale")
+    runner = VirtualOfflineRunner(channel, FakeDetachedSigner(), FakeDetachedVerifier(), policy=VirtualSimulationPolicy())
+    runner.run(job, (source, target), now=now)
+    metadata = json.loads(channel.meta_path.read_text(encoding="utf-8"))
+    metadata["expires_at"] = (now - timedelta(minutes=1)).isoformat()
+    channel.meta_path.write_text(json.dumps(metadata), encoding="utf-8")
+    plan = ClonezillaCommandRenderer().render(job, resolve_offline_devices(job, (source, target)))
+    stale = channel.consume(job, FakeDetachedVerifier(), expected_command_hash=plan.argv_hash, command_plan=plan, now=now, profile="simulation")
+    assert stale.state == "failed"
+    assert channel.status().state == "failed"
