@@ -261,6 +261,10 @@ class DiskIdentity:
     def masked_label(self) -> str:
         return f"{self.model or 'disco'} {self.masked_serial} ({self.size_bytes:,} bytes)"
 
+    def confirmation_phrase(self) -> str:
+        """Bind destructive enrollment confirmation to the refreshed disk identity."""
+        return f"APAGAR {self.model} {self.size_bytes} {self.masked_serial}"
+
     def matches(self, enrolled: "DiskIdentity", *, require_strong: bool = True) -> bool:
         if require_strong and (self.identity_strength() != "strong" or enrolled.identity_strength() != "strong"):
             return False
