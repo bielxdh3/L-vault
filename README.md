@@ -50,6 +50,9 @@ python -m localvault rename-gmail-files --root E:\LocalVault
 python -m localvault dedupe --root E:\LocalVault
 python -m localvault verify --root E:\LocalVault
 python -m localvault schedule --root E:\LocalVault
+python -m localvault disk-clone-status --root E:\LocalVault
+python -m localvault disk-clone-check --root E:\LocalVault
+python -m localvault disk-clone-simulate --root E:\LocalVault
 ```
 
 ## Fotos Por Takeout
@@ -85,13 +88,33 @@ O agendador diario padrao:
 - 01:30 Importacao automatica de Takeout: move ZIPs reconhecidos do Downloads para o Vault
 - Domingo 04:00 Verificacao
 
-Se o PC estiver desligado no horario marcado, o Windows roda a tarefa assim que possivel quando o computador ligar novamente.
+Se o PC estiver desligado no horario marcado, as tarefas comuns podem seguir o comportamento de catch-up existente. A tarefa de clone e diferente: ela nao usa `StartWhenAvailable` e nunca inicia durante o dia.
 
 Instalar tarefas:
 
 ```powershell
 python -m localvault schedule-install --root E:\LocalVault
 ```
+
+## Clone fisico inicializavel do disco
+
+O recurso `Clone do disco` e exclusivo do Windows, vem desativado e apaga completamente o HD de destino. Ele nao cria apenas um arquivo de imagem: o objetivo e copiar o disco fisico com EFI, Windows e particoes necessarias para uma substituicao inicializavel.
+
+Antes do primeiro uso, confirme que o provedor e a edicao estao validados localmente e rode a inscricao administrativa:
+
+```powershell
+python -m localvault disk-clone-enroll --root E:\LocalVault
+```
+
+A inscricao grava um manifesto HMAC em `config`, usando serial, modelo, capacidade exata e identificadores fisicos. Numero de disco, letra e ponto de montagem sao apenas observacoes momentaneas. O destino nao pode conter `E:\LocalVault`, o banco, logs, configuracao, fontes ou qualquer caminho protegido do L-vault.
+
+O agendamento verifica diariamente as 03:00, mas so pode iniciar entre 03:00 (inclusive) e 04:00 (exclusive). Uma execucao perdida fica para a noite seguinte. O intervalo padrao e 30 dias e aceita de 1 a 3650 dias. Antes de qualquer provedor destrutivo ha uma contagem regressiva visivel de cinco minutos, com confirmacao antecipada, ocultar/restaurar e cancelamento explicito. Fechar a janela apenas oculta.
+
+Durante os cinco minutos anteriores, o L-vault mede a atividade media do disco de origem. Media de 70% ou mais posterga para a proxima noite. O destino fica offline entre execucoes e e devolvido ao estado offline apos sucesso, falha, cancelamento ou interrupcao sempre que for seguro.
+
+O progresso e rotulado como exato, estimado ou indisponivel. A saida bem-sucedida do provedor nao e suficiente: o L-vault verifica a estrutura de particoes separadamente e nunca afirma que o clone foi inicializado. A interface sempre mostra `boot test nao testado manualmente` ate uma confirmacao humana posterior.
+
+No ambiente de desenvolvimento desta funcionalidade, o AOMEI Backupper nao esta instalado e o DiskGenius instalado nao oferece um contrato CLI nao interativo validado para selecao segura. Portanto a execucao real permanece bloqueada; `disk-clone-simulate` usa somente inventario, provedor, relogio e progresso falsos. Nenhum comando de clone, formatacao, reparticionamento ou mutacao de disco deve ser usado em testes.
 
 ## Limites Seguros
 

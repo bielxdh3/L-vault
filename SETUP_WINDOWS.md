@@ -35,4 +35,22 @@ python -m localvault schedule --root E:\LocalVault
 python -m localvault schedule-install --root E:\LocalVault
 ```
 
-Digite `YES` quando o instalador do agendamento pedir confirmacao. Se o PC estiver desligado no horario marcado, a tarefa roda quando o Windows ligar novamente.
+Digite `YES` quando o instalador do agendamento pedir confirmacao. Se o PC estiver desligado no horario marcado, as tarefas comuns podem rodar quando o Windows ligar novamente; a tarefa de clone nao usa catch-up e espera a proxima janela 03:00–04:00.
+
+## Clone inicializavel
+
+O clone fisico vem desativado e nunca deve ser testado contra discos reais. Primeiro descubra o provedor sem mutar armazenamento:
+
+```powershell
+python -m localvault disk-clone-status --root E:\LocalVault
+python -m localvault disk-clone-check --root E:\LocalVault
+python -m localvault disk-clone-simulate --root E:\LocalVault
+```
+
+Somente depois de validar o provedor local e confirmar que o destino dedicado pode ser apagado, execute a inscricao administrativa. Ela grava um manifesto HMAC com identidade estavel, deixa o destino offline e nao inicia um clone:
+
+```powershell
+python -m localvault disk-clone-enroll --root E:\LocalVault
+```
+
+O intervalo padrao e 30 dias (configuravel entre 1 e 3650), a amostragem de atividade usa limite de 70%, e cada tentativa mostra cinco minutos de aviso. O destino deve permanecer offline entre execucoes. O painel `Clone do disco` mostra o historico, a verificacao estrutural e o aviso permanente de que nenhum boot test foi realizado.

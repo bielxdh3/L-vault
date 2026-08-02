@@ -12,6 +12,7 @@
     <nav>
       <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">Dashboard</a>
       <a href="/control" class="{{ 'active' if request.url.path == '/control' else '' }}">Controle</a>
+      <a href="/disk-clone" class="{{ 'active' if request.url.path.startswith('/disk-clone') else '' }}">Clone do disco</a>
       <a href="/backups" class="{{ 'active' if request.url.path == '/backups' else '' }}">Backups</a>
       <a href="/gmail" class="{{ 'active' if request.url.path.startswith('/gmail') else '' }}">Gmail</a>
       <a href="/fotos" class="{{ 'active' if request.url.path.startswith('/fotos') else '' }}">Fotos</a>
