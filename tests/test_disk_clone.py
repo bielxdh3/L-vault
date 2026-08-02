@@ -41,6 +41,7 @@ from localvault.disk_clone import (
     claim_monitor_owner,
     create_control_request,
     release_monitor_owner,
+    active_clone_run_id,
 )
 from localvault.disk_clone_ui import CloneUIController, CountdownController, _hide_window, _restore_window
 from localvault.scheduler import generate_schedule_files
@@ -147,6 +148,30 @@ def test_old_enrollment_schema_requires_reenrollment(tmp_path: Path):
     with pytest.raises(DiskCloneBlocked) as exc:
         store.load()
     assert exc.value.state == "re_enrollment_required"
+
+
+def test_reenrollment_required_run_is_terminal_and_fail_closed(tmp_path: Path):
+    current = [datetime(2026, 8, 1, 3, 10, tzinfo=timezone.utc)]
+    service, _, _ = _service(tmp_path, clock=lambda: current[0])
+    signed = json.loads(service.enrollment.manifest_path.read_text(encoding="utf-8"))
+    signed["payload"]["schema"] = 1
+    signed["hmac"] = hmac.new(service.enrollment.secret_path.read_bytes(), canonical_json(signed["payload"]), hashlib.sha256).hexdigest()
+    service.enrollment.manifest_path.write_text(json.dumps(signed), encoding="utf-8")
+
+    result = service.execute(trigger="simulation", countdown=lambda _: "confirm", simulation=True)
+
+    assert result["state"] == "re_enrollment_required"
+    assert active_clone_run_id(service.p.db) is None
+    assert service.retry(result["run_id"])["state"] == "retry_rejected"
+    assert service.provider.started == 0
+    assert service.lifecycle.online_calls == []
+    assert service.lifecycle.offline_calls == []
+
+    current[0] = datetime(2026, 8, 2, 3, 10, tzinfo=timezone.utc)
+    assert service.reconcile_interrupted() == 0
+    with db.connect(service.p.db) as conn:
+        row = conn.execute("SELECT state FROM disk_clone_runs WHERE run_id=?", (result["run_id"],)).fetchone()
+    assert row["state"] == "re_enrollment_required"
 
 
 def test_protected_path_conflict_uses_mount_not_disk_number(tmp_path: Path):
