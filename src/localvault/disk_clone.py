@@ -1105,14 +1105,35 @@ $physical = Get-CimInstance Win32_DiskDrive | Where-Object Index -eq $disk.Numbe
         return result
 
 
-def resolved_protected_path_conflicts(target: DiskIdentity, protected_paths: Iterable[Path | str], resolver: ProtectedPathResolver) -> tuple[list[str], list[ProtectedPathResolution]]:
+def resolved_protected_path_conflicts(
+    target: DiskIdentity,
+    protected_paths: Iterable[Path | str],
+    resolver: ProtectedPathResolver,
+    *,
+    inventory: Sequence[DiskIdentity] | None = None,
+) -> tuple[list[str], list[ProtectedPathResolution]]:
     resolutions = resolver.resolve(protected_paths)
     target_ids = {_normal(value) for value in target.stable_identifiers()}
     conflicts = []
     for resolution in resolutions:
         if not resolution.resolved:
             conflicts.append(f"{resolution.path} ({resolution.reason or 'nao resolvido'})")
-        elif target_ids.intersection({_normal(value) for value in resolution.identifiers}):
+            continue
+        resolved_ids = {_normal(value) for value in resolution.identifiers if _clean(value)}
+        if inventory is None:
+            if target_ids.intersection(resolved_ids):
+                conflicts.append(resolution.path)
+            continue
+        matches = [
+            disk
+            for disk in inventory
+            if disk.identity_strength() == "strong"
+            and len(resolved_ids) >= 2
+            and resolved_ids.issubset({_normal(value) for value in disk.stable_identifiers()})
+        ]
+        if len(matches) != 1:
+            conflicts.append(f"{resolution.path} ({'nao resolvido' if not matches else 'mapeamento ambiguo'})")
+        elif matches[0].matches(target, require_strong=True):
             conflicts.append(resolution.path)
     return conflicts, resolutions
 
@@ -1283,7 +1304,7 @@ class CloneService:
         protected_paths = _source_paths(self.p, load_config(self.p.root))
         resolutions: list[ProtectedPathResolution] = []
         if self.protected_path_resolver is not None:
-            conflicts, resolutions = resolved_protected_path_conflicts(target, protected_paths, self.protected_path_resolver)
+            conflicts, resolutions = resolved_protected_path_conflicts(target, protected_paths, self.protected_path_resolver, inventory=disks)
         else:
             conflicts = protected_path_conflicts(target, protected_paths)
         details = {
