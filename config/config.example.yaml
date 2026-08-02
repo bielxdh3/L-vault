@@ -22,7 +22,7 @@ safety:
   never_delete_sources: true
 disk_clone:
   enabled: false
-  provider: auto
+  provider: clonezilla_offline
   interval_days: 30
   schedule_time: '03:00'
   window_start: '03:00'

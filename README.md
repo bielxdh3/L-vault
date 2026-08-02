@@ -96,29 +96,25 @@ Instalar tarefas:
 python -m localvault schedule-install --root E:\LocalVault
 ```
 
-## Clone fisico inicializavel do disco
+## Clone offline open-source do disco
 
-O recurso `Clone do disco` e exclusivo do Windows, vem desativado e apaga completamente o HD de destino. Ele nao cria apenas um arquivo de imagem: o objetivo e copiar o disco fisico com EFI, Windows e particoes necessarias para uma substituicao inicializavel.
+O L-vault nao exige software pago. O Windows prepara um pacote de job assinado; uma futura sessao Clonezilla Live executara a clonagem somente com a origem desmontada e fora do Windows. O recurso continua desativado e nenhum boot, reboot ou escrita em disco e autorizado nesta fase.
 
-Antes do primeiro uso, confirme que o provedor e a edicao estao validados localmente e rode a inscricao administrativa:
+O motor escolhido para integracao e Clonezilla Live `3.3.3-15`, usando `ocs-onthefly` para clone local de disco inteiro e Partclone como dependencia interna. O resolver nunca passa `SERIALNO=` para `ocs-onthefly`: ele compara fingerprints persistentes novamente no Linux e passa somente os nodes `/dev/...` atuais. Nomes de device, numero de disco, ponto de montagem e GUID copiado nao sao identidade persistente.
+
+O prototipo fake-only implementa schema versionado, assinatura destacada por interface, nonce de uso unico, expiracao, inventario Linux normalizado, resolver fail-closed, renderer argv sem shell, pacote de resultado e consumo com `boot_tested=false`. A simulacao pode ser executada com:
 
 ```powershell
-python -m localvault disk-clone-enroll --root E:\LocalVault
+python -m localvault disk-clone-simulate --root <vault-root>
 ```
 
-A inscricao grava um manifesto HMAC de schema 2 em `config`, usando somente identidade persistente validada (serial, PNP/UniqueId quando aplicavel, modelo, capacidade e setores). Numero de disco, `\\.\PHYSICALDRIVE<n>`, GPT/MBR signature, letra e ponto de montagem sao seletores ou observacoes momentaneas e nunca autorizam a inscricao. Manifestos do schema anterior exigem reinscricao; nao sao reinterpretados silenciosamente. O destino nao pode conter `E:\LocalVault`, o banco, logs, configuracao, fontes ou qualquer caminho protegido do L-vault.
+O comando acima usa somente inventario e pacotes temporarios falsos. `disk-clone-run` fica em `offline_boot_not_configured` e nao inicia provedor Windows. A tela mostra que o boot offline nao esta configurado, oferece apenas prontidao e simulacao, e nao apresenta uma acao de clone imediato.
 
-A tela de inscricao apresenta uma tabela de candidatos com numero de disco explicitamente efemero, modelo, capacidade exata em bytes e tamanho legivel, barramento, estilo de particao, estado online/offline, somente leitura, volumes montados, caminhos protegidos, serial mascarado, forca da identidade e marcadores de sistema/boot/pagefile/crash-dump. Modelos ou capacidades aproximados geram aviso e nenhuma linha e pre-selecionada. Depois da escolha momentanea, o inventario e refeito imediatamente; a inscricao so prossegue para uma identidade persistente unica e exige `APAGAR <modelo> <capacidade_exata_em_bytes> <serial_mascarado>`. `YES`, numero, letra ou capacidade isolados nunca bastam.
+O handoff escolhido e um USB Clonezilla Live dedicado com selecao manual de boot. Ele evita alterar permanentemente a ordem de boot e exige uma acao humana; nenhum BCD, UEFI NVRAM, BootNext, USB, particao ou PXE foi alterado. Secure Boot, disponibilidade do verificador GPG no ambiente Live, canal de retorno e recuperacao de crash continuam bloqueadores para uma fase futura autorizada.
 
-O agendamento verifica diariamente as 03:00 no fuso horario local do Windows, mas so pode iniciar entre 03:00 (inclusive) e 04:00 (exclusive). A janela e verificada novamente imediatamente antes do provedor; se expirar, a tentativa termina como `skipped_window_expired_before_start`, preserva o vencimento e so volta na noite seguinte. Timestamps, historico e vencimentos sao armazenados em UTC, e a decisao local persistida inclui horario com fuso, nome/offset e resultado. Uma execucao perdida fica para a noite seguinte. O intervalo padrao e 30 dias e aceita de 1 a 3650 dias. Antes de qualquer provedor destrutivo ha uma contagem regressiva visivel de cinco minutos, com confirmacao antecipada, ocultar/restaurar e cancelamento explicito. Fechar a janela apenas oculta.
+AOMEI e DiskGenius permanecem alternativas historicas rejeitadas, nao recomendacoes. Nao houve inscricao real, selecao de disco, clone, formatacao, reparticionamento, `Set-Disk`, montagem, desmontagem, provider launch, tarefa destrutiva, reboot ou boot test.
 
-Durante os cinco minutos anteriores, o L-vault mede a atividade media do disco de origem. Media de 70% ou mais posterga para a proxima noite. O destino fica offline entre execucoes e e devolvido ao estado offline apos sucesso, falha, cancelamento ou interrupcao sempre que for seguro.
-
-O progresso e rotulado como exato, estimado ou indisponivel. A saida bem-sucedida do provedor nao e suficiente: o L-vault re-inventaria o destino por identidade persistente, reconstrui os seletores de disco atuais, classifica GPT por GUID e MBR por seus proprios flags, compara a equivalencia estrutural (incluindo `windows` da origem com `basic_data` copiado), verifica a estrutura de particoes separadamente e nunca afirma que o clone foi inicializado. Caminhos protegidos sao resolvidos do volume ativo ao disco fisico; uma resolucao ambigua bloqueia a execucao mesmo quando o destino esta offline. A interface sempre mostra `boot test nao testado manualmente` ate uma confirmacao humana posterior.
-
-A contagem regressiva e o monitor persistem seus estados. `Ocultar` e fechar com X usam `withdraw()` e nao cancelam nem destroem uma janela ativa; `show` e vinculado ao run correto. Ha no maximo um monitor por run. Retry e somente explicito: o pedido e reivindicado atomicamente, estados nao retryaveis sao rejeitados, a nova tentativa recebe `parent_run_id`/`retry_run_id` e repete todas as validacoes, sem retry automatico no mesmo dia.
-
-No ambiente de desenvolvimento desta funcionalidade, o AOMEI Backupper nao esta instalado e o DiskGenius instalado nao oferece um contrato CLI nao interativo validado para selecao segura. AOMEI presente sem edicao/capacidades/cancelamento/progresso validados tambem permanece bloqueado. Portanto a execucao real permanece bloqueada; `disk-clone-simulate` usa somente inventario, provedor, relogio, resolucao de caminhos e progresso falsos, com revalidacao e verificacao pos-provedor frescas. Nenhum comando de clone, formatacao, reparticionamento, `Set-Disk`, overwrite ou mutacao de disco deve ser usado em testes. Nenhum boot test ocorreu.
+Fontes oficiais e aplicabilidade estao em [`docs/disk-clone-offline.md`](docs/disk-clone-offline.md).
 
 ## Limites Seguros
 

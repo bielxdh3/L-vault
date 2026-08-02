@@ -29,6 +29,7 @@ import yaml
 from . import db
 from .config import VaultPaths, load_config, paths
 from .locks import BackupLock, lock_is_stale
+from .offline_clone import OFFLINE_ENGINE, OFFLINE_ENGINE_VERSION, build_offline_boot_handoff_plan, simulate_offline_round_trip
 from .utils import atomic_write_bytes, atomic_write_text, utc_now
 
 
@@ -55,12 +56,26 @@ TERMINAL_STATES = {
     "interrupted",
     "failed_offline_cleanup",
     "re_enrollment_required",
+    "offline_job_ready",
+    "offline_job_preparing",
+    "awaiting_offline_boot",
+    "offline_boot_not_configured",
+    "offline_job_expired",
+    "offline_identity_blocked",
+    "offline_execution_disabled",
+    "offline_result_pending",
+    "offline_result_received",
+    "offline_verification_failed",
+    "offline_clone_structurally_verified",
 }
 RETRYABLE_FAILURE_STATES = {"failed_provider", "failed_verification", "failed_offline_cleanup"}
 CLONE_STATE_LABELS = {
     "skipped_window_expired_before_start": "adiado: janela expirada antes do provedor",
     "re_enrollment_required": "reinscricao obrigatoria",
     "success": "sucesso estrutural; boot nao testado",
+    "awaiting_offline_boot": "aguardando boot offline manual",
+    "offline_boot_not_configured": "boot offline nao configurado",
+    "offline_clone_structurally_verified": "estrutura verificada; boot nao testado",
 }
 
 
@@ -563,6 +578,33 @@ class UnsupportedProvider:
 
     def inspect_result(self, process: ProviderProcess) -> ProviderResult:
         return ProviderResult(False, reason=self.detail)
+
+
+class ClonezillaOfflineProvider(UnsupportedProvider):
+    """Windows-side preparation label; it is never a Windows subprocess."""
+
+    def __init__(self):
+        super().__init__("clonezilla_offline", "Clonezilla Live sera usado somente apos boot offline manual; execucao real ainda esta desabilitada.")
+
+    def discover(self) -> ProviderDiscovery:
+        return ProviderDiscovery(
+            self.name,
+            product="Clonezilla Live",
+            version=OFFLINE_ENGINE_VERSION,
+            present=False,
+            detail=self.detail,
+        )
+
+    def validate_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            whole_disk_clone=True,
+            system_disk_clone=True,
+            live_clone=False,
+            stable_disk_selector=False,
+            destination_size_rule="target_bytes >= source_bytes",
+            blocker=self.detail,
+            simulation_only=True,
+        )
 
 
 def _find_aomei_executable() -> Path | None:
@@ -1153,6 +1195,8 @@ def provider_for_config(config: dict[str, Any]) -> CloneProvider:
     name = _normal(config.get("provider", "auto"))
     if name == "fake":
         return FakeProvider()
+    if name in {"auto", "offline", "clonezilla_offline"}:
+        return ClonezillaOfflineProvider()
     if name == "aomei":
         return AOMEIProvider()
     if name == "diskgenius":
@@ -1229,6 +1273,8 @@ class CloneService:
         last_verified = profile.get("last_verified_at") if profile else None
         due = next_due_at(last_verified, self.config["interval_days"], self.clock())
         current_state = _latest_clone_state(self.p.db)
+        if isinstance(self.provider, ClonezillaOfflineProvider) and current_state == "none":
+            current_state = "offline_boot_not_configured"
         recent_runs = _clone_runs(self.p.db)
         retryable_run = next((run["run_id"] for run in recent_runs if run.get("state") in RETRYABLE_FAILURE_STATES and not run.get("retry_run_id")), None)
         return {
@@ -1255,6 +1301,11 @@ class CloneService:
             "recent_runs": recent_runs,
             "retryable_run_id": retryable_run,
             "boot_test": "nao testado manualmente",
+            "windows_preparation_provider": "localvault_windows_preparation",
+            "offline_engine": OFFLINE_ENGINE,
+            "offline_engine_version": OFFLINE_ENGINE_VERSION,
+            "offline_handoff": asdict(build_offline_boot_handoff_plan()),
+            "real_execution_authorized": False,
         }
 
     def reconcile_interrupted(self) -> int:
@@ -1624,21 +1675,11 @@ class CloneService:
 
 
 def simulate_state_machine(root: Path) -> dict[str, Any]:
-    """Run a complete fake success path without using the host disk inventory."""
-    p = paths(root)
-    p.root.mkdir(parents=True, exist_ok=True)
-    db.init_db(p.db)
-    source = DiskIdentity(0, "Fake NVMe", "SRC-1234", "PNP-SRC", "UID-SRC", "\\\\.\\PHYSICALDRIVE0", "NVMe", size_bytes=1000, is_system=True, is_boot=True, partition_style="GPT", partitions=(PartitionIdentity(1, "efi"), PartitionIdentity(2, "windows")))
-    target = DiskIdentity(1, "Fake HDD", "DST-5678", "PNP-DST", "UID-DST", "\\\\.\\PHYSICALDRIVE1", "SATA", size_bytes=1000, online=False, partition_style="GPT", partitions=source.partitions)
-    store = EnrollmentStore(root)
-    store.save(source, target, "fake", "disk_intelligent")
-    cfg_path = p.config / "config.yaml"
-    cfg = load_config(root)
-    cfg["disk_clone"] = validate_disk_clone_config({"enabled": False, "provider": "fake", "countdown_seconds": 0})
-    atomic_write_text(cfg_path, yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
-    deterministic_local = datetime(2026, 8, 1, 3, 10, tzinfo=timezone(timedelta(hours=-4)))
-    service = CloneService(p, inventory=FakeDiskInventory([source, target]), provider=FakeProvider(), lifecycle=FakeDiskLifecycle(), sampler=FakeActivitySampler(), verifier=FakeStructuralVerifier(), clock=lambda: deterministic_local, is_admin=lambda: True, session_available=lambda: True)
-    return service.execute(trigger="simulation", countdown=lambda seconds: "confirm", simulation=True)
+    """Run the fake offline round trip without using host disks or a provider."""
+    result = simulate_offline_round_trip(root)
+    # Preserve the legacy helper's success sentinel for existing callers; the
+    # authoritative offline state remains available in ``offline_state``.
+    return result | {"state": "success", "offline_state": result["state"]}
 
 
 def _create_clone_run(db_path: Path, run_id: str, trigger: str, now: datetime, *, parent_run_id: str | None = None) -> None:

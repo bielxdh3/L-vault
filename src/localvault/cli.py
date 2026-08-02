@@ -31,9 +31,9 @@ from .disk_clone import (
     protected_path_conflicts,
     provider_for_config,
     resolved_protected_path_conflicts,
-    simulate_state_machine,
 )
 from .disk_clone_ui import native_countdown, run_native_ui
+from .offline_clone import simulate_offline_round_trip
 from .gmail_api import backup_gmail_api as run_gmail_api
 from .gmail_audit import audit_gmail_duplicates, repair_stale_gmail_runs
 from .gmail_maintenance import rename_existing_gmail_files
@@ -365,19 +365,23 @@ def disk_clone_check(root: Path = root_option()):
 
 @app.command("disk-clone-simulate")
 def disk_clone_simulate(root: Path = root_option()):
-    """Exercise the complete fake state machine without touching host disks."""
+    """Exercise the fake offline Clonezilla round trip without touching host disks."""
     with tempfile.TemporaryDirectory(prefix="localvault-clone-sim-") as temp_root:
-        result = simulate_state_machine(Path(temp_root))
+        result = simulate_offline_round_trip(Path(temp_root))
     console.print_json(json.dumps(result, ensure_ascii=False, default=str))
-    if result.get("state") != "success":
+    if result.get("state") != "offline_clone_structurally_verified":
         raise typer.Exit(1)
 
 
 @app.command("disk-clone-run")
 def disk_clone_run(root: Path = root_option()):
-    """Run the guarded scheduled workflow; unsupported providers remain blocked."""
-    p = prepare(root)
-    result = CloneService(p).execute(trigger="scheduled", countdown=lambda seconds: native_countdown(p.root, seconds))
+    """Report the deferred offline handoff; never starts a Windows clone."""
+    prepare(root)
+    result = {
+        "state": "offline_boot_not_configured",
+        "reason": "Clonezilla Live boot handoff is not configured; no reboot or storage mutation is permitted in this phase.",
+        "boot_tested": False,
+    }
     console.print_json(json.dumps(result, ensure_ascii=False, default=str))
     if result.get("state") not in {"success", "skipped_not_due", "skipped_outside_window", "skipped_window_expired_before_start", "skipped_no_interactive_session", "skipped_target_missing", "skipped_high_source_activity"}:
         raise typer.Exit(1)
