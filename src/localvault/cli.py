@@ -366,25 +366,35 @@ def disk_clone_run(root: Path = root_option()):
     p = prepare(root)
     result = CloneService(p).execute(trigger="scheduled", countdown=lambda seconds: native_countdown(p.root, seconds))
     console.print_json(json.dumps(result, ensure_ascii=False, default=str))
-    if result.get("state") not in {"success", "skipped_not_due", "skipped_outside_window", "skipped_no_interactive_session", "skipped_target_missing", "skipped_high_source_activity"}:
+    if result.get("state") not in {"success", "skipped_not_due", "skipped_outside_window", "skipped_window_expired_before_start", "skipped_no_interactive_session", "skipped_target_missing", "skipped_high_source_activity"}:
         raise typer.Exit(1)
 
 
 @app.command("disk-clone-show")
 def disk_clone_show(root: Path = root_option()):
     """Signal the existing native clone window to restore; never starts a clone."""
-    from .disk_clone import active_clone_run_id, create_control_request
+    from .disk_clone import active_clone_run_id, create_control_request, latest_clone_run_id
 
     p = prepare(root)
-    request_id = create_control_request(p.db, "show", run_id=active_clone_run_id(p.db), actor="local-command")
+    request_id = create_control_request(p.db, "show", run_id=active_clone_run_id(p.db) or latest_clone_run_id(p.db), actor="local-command")
     console.print(f"Restore request: {request_id}")
 
 
 @app.command("disk-clone-ui")
-def disk_clone_ui(root: Path = root_option(), countdown_seconds: int = typer.Option(300, "--countdown-seconds"), monitor: bool = typer.Option(False, "--monitor")):
+def disk_clone_ui(root: Path = root_option(), countdown_seconds: int = typer.Option(300, "--countdown-seconds"), monitor: bool = typer.Option(False, "--monitor"), run_id: str | None = typer.Option(None, "--run-id")):
     """Run the native warning or durable progress/error window."""
     p = prepare(root)
-    run_native_ui(p.root, countdown_seconds, monitor=monitor)
+    run_native_ui(p.root, countdown_seconds, monitor=monitor, run_id=run_id)
+
+
+@app.command("disk-clone-retry-worker")
+def disk_clone_retry_worker(root: Path = root_option(), request_id: str = typer.Option(..., "--request-id")):
+    """Consume one durable retry request through the guarded workflow."""
+    p = prepare(root)
+    result = CloneService(p).consume_retry_request(request_id=request_id, countdown=lambda seconds: native_countdown(p.root, seconds))
+    console.print_json(json.dumps(result, ensure_ascii=False, default=str))
+    if result.get("state") not in {"retry_accepted", "retry_rejected", "retry_not_claimed"}:
+        raise typer.Exit(1)
 
 
 @app.command("disk-clone-enroll")

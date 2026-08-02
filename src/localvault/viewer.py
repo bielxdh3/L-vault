@@ -20,7 +20,8 @@ from . import db
 from .config import load_config, paths
 from .auth import SESSION_MAX_AGE, load_auth, verify_password
 from .control_panel import control_panel_data, start_background_command
-from .disk_clone import CloneService, DiskCloneBlocked, create_control_request, disk_clone_dashboard_data, update_disk_clone_settings
+from .disk_clone import CloneService, DiskCloneBlocked, active_clone_run_id, create_control_request, disk_clone_dashboard_data, latest_clone_run_id, update_disk_clone_settings
+from .disk_clone_ui import spawn_retry_worker
 from .vault_index import cleanup_missing_index_entries, dashboard_data, delete_local_file_and_index, open_in_explorer, safe_vault_path
 
 PACKAGE_DIR = Path(__file__).parent
@@ -115,7 +116,11 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.post("/disk-clone/action")
     def disk_clone_action(action: str = Query(...), run_id: str | None = Query(None)):
         try:
-            create_control_request(p.db, action, run_id=run_id, actor="dashboard")
+            if action == "show" and run_id is None:
+                run_id = active_clone_run_id(p.db) or latest_clone_run_id(p.db)
+            request_id = create_control_request(p.db, action, run_id=run_id, actor="dashboard")
+            if action == "retry":
+                spawn_retry_worker(p.root, request_id)
         except ValueError:
             raise HTTPException(400)
         return RedirectResponse("/disk-clone", status_code=303)
