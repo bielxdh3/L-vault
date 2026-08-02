@@ -97,6 +97,14 @@ def test_identity_matches_after_disk_number_and_mount_change():
     assert current.matches(enrolled)
 
 
+def test_enrollment_confirmation_binds_exact_capacity_and_masked_serial():
+    disk = _disk(1, "DST-123456")
+    phrase = disk.confirmation_phrase()
+    assert phrase == "APAGAR Test Disk 1000 ****3456"
+    assert disk.serial not in phrase
+    assert "1000" in phrase
+
+
 @pytest.mark.parametrize("field", ["serial", "pnp_device_id", "storage_unique_id"])
 def test_persistent_identity_change_blocks_matching(field):
     enrolled = _disk(0, "SERIAL-1")

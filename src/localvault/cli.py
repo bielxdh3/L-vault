@@ -12,6 +12,7 @@ from typing import Optional
 import typer
 import uvicorn
 from rich.console import Console
+from rich.table import Table
 
 from . import __version__, db
 from .config import DEFAULT_ROOT, ensure_config, ensure_directories, load_config, paths
@@ -22,9 +23,12 @@ from .disk_clone import (
     CloneService,
     DiskCloneBlocked,
     EnrollmentStore,
+    WindowsProtectedPathResolver,
     WindowsDiskInventory,
     WindowsDiskLifecycle,
+    _source_paths,
     disk_clone_dashboard_data,
+    protected_path_conflicts,
     provider_for_config,
     simulate_state_machine,
 )
@@ -70,6 +74,14 @@ def prepare(root: Path):
 def configure_logging(logs_dir: Path) -> None:
     logs_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(filename=logs_dir / f"localvault_{utc_now().replace(':','').replace('+','Z')}.log", level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", force=True)
+
+
+def _human_size(size_bytes: int) -> str:
+    size = float(max(size_bytes, 0))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if size < 1024 or unit == "PiB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
 
 
 PROTECTED_COMMANDS = {
@@ -404,32 +416,73 @@ def disk_clone_enroll(root: Path = root_option()):
         raise typer.BadParameter("A inscricao de clone exige Windows e privilegios administrativos.")
     p = prepare(root)
     disks = WindowsDiskInventory().list_disks()
-    source = next((disk for disk in disks if disk.is_system or disk.is_boot), None)
-    if not source:
+    sources = [disk for disk in disks if disk.is_system or disk.is_boot]
+    if len(sources) != 1:
         raise typer.BadParameter("Nao foi possivel identificar o disco de sistema atual.")
-    console.print("Discos fisicos detectados (o numero abaixo e apenas uma selecao momentanea):")
-    for disk in disks:
-        marker = " [SISTEMA]" if disk.number == source.number else ""
-        console.print(f"  {disk.number}: {disk.model} {disk.masked_serial} {disk.size_bytes:,} bytes{marker}")
-    target_number = typer.prompt("Numero momentaneo do HD de destino", type=int)
-    target = next((disk for disk in disks if disk.number == target_number), None)
-    if not target or target.number == source.number:
-        raise typer.BadParameter("O destino deve ser outro disco fisico.")
-    provider = provider_for_config(load_config(root).get("disk_clone", {}))
+    source = sources[0]
+    cfg = load_config(root)
+    provider = provider_for_config(cfg.get("disk_clone", {}))
     discovery = provider.discover()
     capabilities = provider.validate_capabilities()
     if not capabilities.supported:
         raise typer.BadParameter(f"Inscricao bloqueada para {discovery.name}: {capabilities.blocker or discovery.detail}")
+    protected_paths = _source_paths(p, cfg)
+    resolver = WindowsProtectedPathResolver()
+    table = Table(title="Candidatos; numero efemero, nunca identidade")
+    for column in ("Nº efemero", "Modelo", "Capacidade", "Barramento", "Particao", "Estado", "Somente leitura", "Volumes montados", "Caminhos protegidos", "Serial", "Forca", "Sistema/boot/pagefile/crash", "Aviso"):
+        table.add_column(column)
+    for disk in disks:
+        conflicts = protected_path_conflicts(disk, protected_paths, resolver=resolver)
+        mounted = any(part.mount_point for part in disk.partitions)
+        critical = any((disk.is_system, disk.is_boot, disk.is_pagefile, disk.is_crash_dump))
+        similar = any(
+            other.number != disk.number
+            and (
+                other.model.casefold() == disk.model.casefold()
+                or (disk.size_bytes and abs(other.size_bytes - disk.size_bytes) <= max(disk.size_bytes // 100, 1))
+            )
+            for other in disks
+        )
+        warnings = []
+        if critical:
+            warnings.append("NAO USAR: sistema/boot/pagefile/crash")
+        if similar:
+            warnings.append("outro disco tem modelo/capacidade aproximados")
+        table.add_row(
+            str(disk.number),
+            disk.model or "(sem modelo)",
+            f"{disk.size_bytes:,} bytes ({_human_size(disk.size_bytes)})",
+            disk.bus_type or "desconhecido",
+            disk.partition_style or "desconhecido",
+            "online" if disk.online else "offline",
+            "sim" if disk.read_only else "nao",
+            "sim" if mounted else "nao",
+            "sim" if conflicts else "nao",
+            disk.masked_serial,
+            disk.identity_strength(),
+            "/".join("sim" if flag else "nao" for flag in (disk.is_system, disk.is_boot, disk.is_pagefile, disk.is_crash_dump)),
+            "; ".join(warnings) or "-",
+        )
+    console.print(table)
+    console.print("Nao pre-selecione por capacidade, modelo, letra ou numero; confirme a identidade persistente abaixo.")
+    target_number = typer.prompt("Numero momentaneo do HD de destino", type=int)
+    target = next((disk for disk in disks if disk.number == target_number), None)
+    if not target or target.number == source.number or any((target.is_system, target.is_boot, target.is_pagefile, target.is_crash_dump)):
+        raise typer.BadParameter("O destino deve ser outro disco fisico.")
     refreshed = WindowsDiskInventory().list_disks()
-    target = next((disk for disk in refreshed if disk.matches(target, require_strong=True)), None)
-    source = next((disk for disk in refreshed if disk.matches(source, require_strong=True) and (disk.is_system or disk.is_boot)), None)
-    if not target or not source or target.matches(source, require_strong=False):
+    target_matches = [disk for disk in refreshed if disk.matches(target, require_strong=True)]
+    source_matches = [disk for disk in refreshed if disk.matches(source, require_strong=True) and (disk.is_system or disk.is_boot)]
+    if len(target_matches) != 1 or len(source_matches) != 1:
         raise typer.BadParameter("A identidade fisica mudou ou ficou ambigua; inscricao bloqueada.")
-    ack = typer.prompt(f"Digite exatamente APAGAR {target.model} {target.masked_serial}")
-    if ack != f"APAGAR {target.model} {target.masked_serial}":
+    target, source = target_matches[0], source_matches[0]
+    if target.matches(source, require_strong=False) or any((target.is_system, target.is_boot, target.is_pagefile, target.is_crash_dump)):
+        raise typer.BadParameter("O destino atualizado e invalido ou e um disco critico.")
+    phrase = target.confirmation_phrase()
+    ack = typer.prompt(f"Digite exatamente {phrase}")
+    if ack != phrase:
         raise typer.BadParameter("Confirmacao destrutiva incorreta.")
-    EnrollmentStore(root).save(source, target, discovery.name, "disk_intelligent")
     WindowsDiskLifecycle().set_offline(target)
+    EnrollmentStore(root).save(source, target, discovery.name, "disk_intelligent")
     console.print("Inscricao criada. O provedor nunca e executado durante a inscricao.")
 
 
