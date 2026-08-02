@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,6 +18,11 @@ from localvault.offline_clone import (
     OfflineJobStore,
     OfflineResult,
     OfflineResultStore,
+    OFFLINE_RESULT_FAKE_PHASE,
+    OFFLINE_RESULT_PROFILE_PRODUCTION,
+    OFFLINE_RESULT_PROFILE_SIMULATION,
+    OFFLINE_RESULT_PRODUCTION_SUCCESS_PHASE,
+    canonical_json,
     build_fake_result,
     build_offline_job,
     consume_offline_result,
@@ -62,6 +68,15 @@ def _resolved(job, source, target):
     return resolve_offline_devices(job, FakeOfflineInventory((source, target)))
 
 
+def _signed_package(tmp_path: Path, result: OfflineResult, signer: FakeDetachedSigner, **changes) -> Path:
+    path = tmp_path / "results" / f"result-{result.job_id}"
+    path.mkdir(parents=True)
+    raw = canonical_json(result.payload() | changes)
+    (path / "result.json").write_bytes(raw)
+    (path / "result.sig").write_bytes(signer.sign(raw))
+    return path
+
+
 def test_valid_signature_is_canonical_and_private_material_is_not_serialized(tmp_path):
     job, store, _, verifier, *_ = _job(tmp_path)
     manifest = (store.root / job.job_id / "manifest.json").read_text(encoding="utf-8")
@@ -76,7 +91,7 @@ def test_tampered_manifest_wrong_schema_expired_and_engine_are_rejected(tmp_path
     job, store, signer, verifier, *_ = _job(tmp_path)
     path = store.root / job.job_id / "manifest.json"
     value = json.loads(path.read_text(encoding="utf-8"))
-    value["source_label"] = "tampered"
+    value["source_label"] = job.target_label
     path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")), encoding="utf-8")
     with pytest.raises(OfflineCloneBlocked, match="signature"):
         store.load(job.job_id, verifier, now=NOW)
@@ -212,20 +227,111 @@ def test_result_round_trip_mismatch_tamper_failure_and_boot_test_guard(tmp_path)
     result = build_fake_result(job, plan, source, target, now=NOW)
     results = OfflineResultStore(tmp_path / "results")
     path = results.create(result, signer)
-    outcome = consume_offline_result(path, job.job_id, verifier)
-    assert outcome.state == "offline_clone_structurally_verified"
+    outcome = consume_offline_result(path, job, verifier, command_plan=plan, now=NOW, profile=OFFLINE_RESULT_PROFILE_SIMULATION)
+    assert outcome.state == "offline_simulation_completed"
+    assert outcome.result.phase == OFFLINE_RESULT_FAKE_PHASE
     assert outcome.result.boot_tested is False
-    with pytest.raises(OfflineCloneBlocked, match="does not match"):
-        results.consume(path, "0" * 32, verifier)
-    (path / "result.json").write_text((path / "result.json").read_text(encoding="utf-8").replace("fake_engine_rendered_only", "tampered"), encoding="utf-8")
+    with pytest.raises(OfflineCloneBlocked, match="command hash"):
+        results.consume(path, job, verifier, expected_command_hash="0" * 64, now=NOW, profile=OFFLINE_RESULT_PROFILE_SIMULATION)
+    (path / "result.json").write_text((path / "result.json").read_text(encoding="utf-8").replace("fake_engine_rendered_only", "clone_failed"), encoding="utf-8")
     with pytest.raises(OfflineCloneBlocked, match="signature"):
-        results.consume(path, job.job_id, verifier)
+        results.consume(path, job, verifier, command_plan=plan, now=NOW, profile=OFFLINE_RESULT_PROFILE_SIMULATION)
     with pytest.raises(OfflineCloneBlocked, match="boot-test"):
         OfflineResult.from_dict(result.payload() | {"boot_tested": True})
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("engine", "other-engine"),
+        ("engine_version", "3.3.3-14"),
+        ("command_hash", "0" * 64),
+        ("source_label", "Fake Disk ****rget (1200 bytes)"),
+        ("target_label", "Fake Disk ****urce (1000 bytes)"),
+        ("phase", "not-an-allowlisted-phase"),
+        ("target_offline", "unknown"),
+        ("command_hash", "not-a-hash"),
+        ("log_hash", "not-a-hash"),
+        ("started_at", "not-a-timestamp"),
+        ("started_at", "2026-08-02T12:00:00"),
+        ("ended_at", "2026-08-02T12:00:00+99:00"),
+        ("boot_tested", True),
+        ("sanitized_error", "/dev/sda serial=SECRET wwn=wwn-secret"),
+    ],
+)
+def test_validly_signed_result_is_rejected_for_each_semantic_boundary_field(tmp_path, field, value):
+    job, _, signer, verifier, source, target = _job(tmp_path)
+    plan = ClonezillaCommandRenderer().render(job, _resolved(job, _disk("/dev/nvme1n1", "source"), _disk("/dev/sdc", "target", size=1200)))
+    result = build_fake_result(job, plan, source, target, now=NOW)
+    path = _signed_package(tmp_path, result, signer, **{field: value})
+    with pytest.raises(OfflineCloneBlocked):
+        OfflineResultStore(tmp_path / "results").consume(path, job, verifier, command_plan=plan, now=NOW, profile=OFFLINE_RESULT_PROFILE_SIMULATION)
+
+
+def test_end_time_before_start_and_unreasonable_future_time_are_rejected(tmp_path):
+    job, _, signer, verifier, source, target = _job(tmp_path)
+    plan = ClonezillaCommandRenderer().render(job, _resolved(job, _disk("/dev/nvme1n1", "source"), _disk("/dev/sdc", "target", size=1200)))
+    result = build_fake_result(job, plan, source, target, now=NOW)
+    reversed_path = _signed_package(tmp_path / "reversed", result, signer, ended_at=(NOW - timedelta(minutes=1)).isoformat())
+    with pytest.raises(OfflineCloneBlocked, match="precedes"):
+        OfflineResultStore(tmp_path / "reversed" / "results").consume(reversed_path, job, verifier, command_plan=plan, now=NOW, profile=OFFLINE_RESULT_PROFILE_SIMULATION)
+    future = NOW + timedelta(days=1)
+    future_path = _signed_package(tmp_path / "future", result, signer, started_at=future.isoformat(), ended_at=future.isoformat())
+    with pytest.raises(OfflineCloneBlocked, match="future|lifetime"):
+        OfflineResultStore(tmp_path / "future" / "results").consume(future_path, job, verifier, command_plan=plan, now=NOW, profile=OFFLINE_RESULT_PROFILE_SIMULATION)
+
+
+def test_result_consumption_requires_the_verified_job_not_only_its_identifier(tmp_path):
+    job, _, signer, verifier, source, target = _job(tmp_path)
+    plan = ClonezillaCommandRenderer().render(job, _resolved(job, _disk("/dev/nvme1n1", "source"), _disk("/dev/sdc", "target", size=1200)))
+    result = build_fake_result(job, plan, source, target, now=NOW)
+    path = OfflineResultStore(tmp_path / "results").create(result, signer)
+    other_job, _, _, _, _, _ = _job(tmp_path / "other")
+    with pytest.raises(OfflineCloneBlocked, match="job ID"):
+        OfflineResultStore(tmp_path / "results").consume(path, other_job, verifier, command_plan=plan, now=NOW, profile=OFFLINE_RESULT_PROFILE_SIMULATION)
+
+
+def test_success_fields_cannot_bypass_phase_or_terminal_verification(tmp_path):
+    job, _, signer, verifier, source, target = _job(tmp_path)
+    plan = ClonezillaCommandRenderer().render(job, _resolved(job, _disk("/dev/nvme1n1", "source"), _disk("/dev/sdc", "target", size=1200)))
+    result = build_fake_result(job, plan, source, target, now=NOW)
+    for index, changes in enumerate((
+        {"phase": "clone_failed", "target_offline": "unknown"},
+        {"phase": "clone_failed", "exit_status": 1, "structurally_verified": True, "target_offline": "unknown"},
+    )):
+        path = _signed_package(tmp_path / str(index), result, signer, **changes)
+        with pytest.raises(OfflineCloneBlocked):
+            OfflineResultStore(tmp_path / str(index) / "results").consume(path, job, verifier, command_plan=plan, now=NOW, profile=OFFLINE_RESULT_PROFILE_PRODUCTION)
+
+
+def test_fake_result_is_not_accepted_by_production_consumer(tmp_path):
+    job, _, signer, verifier, source, target = _job(tmp_path)
+    plan = ClonezillaCommandRenderer().render(job, _resolved(job, _disk("/dev/nvme1n1", "source"), _disk("/dev/sdc", "target", size=1200)))
+    result = build_fake_result(job, plan, source, target, now=NOW)
+    path = OfflineResultStore(tmp_path / "results").create(result, signer)
+    with pytest.raises(OfflineCloneBlocked, match="fake render-only"):
+        OfflineResultStore(tmp_path / "results").consume(path, job, verifier, command_plan=plan, now=NOW, profile=OFFLINE_RESULT_PROFILE_PRODUCTION)
+
+
+def test_future_production_result_requires_and_accepts_all_trusted_bindings(tmp_path):
+    job, _, signer, verifier, source, target = _job(tmp_path)
+    plan = ClonezillaCommandRenderer().render(job, _resolved(job, _disk("/dev/nvme1n1", "source"), _disk("/dev/sdc", "target", size=1200)))
+    result = replace(
+        build_fake_result(job, plan, source, target, now=NOW),
+        phase=OFFLINE_RESULT_PRODUCTION_SUCCESS_PHASE,
+        structurally_verified=True,
+        target_offline="confirmed_offline",
+        sanitized_error="",
+    )
+    result.validate_semantics(job, command_plan=plan, now=NOW, profile=OFFLINE_RESULT_PROFILE_PRODUCTION)
+    path = OfflineResultStore(tmp_path / "results").create(result, signer)
+    outcome = consume_offline_result(path, job, verifier, command_plan=plan, now=NOW, profile=OFFLINE_RESULT_PROFILE_PRODUCTION)
+    assert outcome.state == "offline_clone_structurally_verified"
+
+
 def test_missing_result_stays_pending(tmp_path):
-    outcome = consume_offline_result(tmp_path / "missing-result", "0" * 32, FakeDetachedVerifier())
+    job, *_ = _job(tmp_path)
+    outcome = consume_offline_result(tmp_path / "missing-result", job, FakeDetachedVerifier())
     assert outcome.state == "offline_result_pending"
     assert outcome.result is None
 
@@ -244,9 +350,13 @@ def test_linux_collector_is_a_blocked_seam_and_fake_e2e_is_safe(tmp_path):
     with pytest.raises(OfflineCloneBlocked, match="reserved"):
         LinuxBlockInventory().list_devices()
     result = simulate_offline_round_trip(tmp_path)
-    assert result["state"] == "offline_clone_structurally_verified"
+    assert result["state"] == "offline_simulation_completed"
     assert result["command_executed"] is False
     assert result["subprocess_called"] is False
     assert result["host_disk_touched"] is False
+    assert "source_node" not in result
+    assert "target_node" not in result
+    assert "/dev/sda" not in json.dumps(result)
+    assert "/dev/sdb" not in json.dumps(result)
     assert result["reboot_boundary"]["reboot_requested"] is False
     assert result["boot_tested"] is False

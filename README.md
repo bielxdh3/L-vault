@@ -102,13 +102,13 @@ O L-vault nao exige software pago. O Windows prepara um pacote de job assinado; 
 
 O motor escolhido para integracao e Clonezilla Live `3.3.3-15`, usando `ocs-onthefly` para clone local de disco inteiro e Partclone como dependencia interna. O resolver nunca passa `SERIALNO=` para `ocs-onthefly`: ele compara fingerprints persistentes novamente no Linux e passa somente os nodes `/dev/...` atuais. Nomes de device, numero de disco, ponto de montagem e GUID copiado nao sao identidade persistente.
 
-O prototipo fake-only implementa schema versionado, assinatura destacada por interface, nonce de uso unico, expiracao, inventario Linux normalizado, resolver fail-closed, renderer argv sem shell, pacote de resultado e consumo com `boot_tested=false`. A simulacao pode ser executada com:
+O prototipo fake-only implementa schema versionado, assinatura destacada por interface, nonce de uso unico, expiracao, inventario Linux normalizado, resolver fail-closed, renderer argv sem shell, pacote de resultado e consumo com `boot_tested=false`. A assinatura protege a integridade de transporte, mas o consumidor tambem exige o job verificado e o hash do plano de comando confiavel; engine, release, labels, fases, timestamps, hashes, destino offline e texto de erro sao validados semanticamente. A simulacao pode ser executada com:
 
 ```powershell
 python -m localvault disk-clone-simulate --root <vault-root>
 ```
 
-O comando acima usa somente inventario e pacotes temporarios falsos. `disk-clone-run` fica em `offline_boot_not_configured` e nao inicia provedor Windows. A tela mostra que o boot offline nao esta configurado, oferece apenas prontidao e simulacao, e nao apresenta uma acao de clone imediato.
+O comando acima usa somente inventario e pacotes temporarios falsos. A fase `fake_engine_rendered_only` e consumida apenas pelo perfil de simulacao e retorna `offline_simulation_completed`; ela nao e evidencia de clone concluido nem de verificacao estrutural. Uma futura fase de producao devera usar `clone_completed_structurally_verified` com `confirmed_offline`, campos vinculados ao job/plano confiavel e `boot_tested=false`; somente entao o resultado podera ser `offline_clone_structurally_verified`. `disk-clone-run` fica em `offline_boot_not_configured` e nao inicia provedor Windows. A tela mostra que o boot offline nao esta configurado, oferece apenas prontidao e simulacao, e nao apresenta uma acao de clone imediato.
 
 O handoff escolhido e um USB Clonezilla Live dedicado com selecao manual de boot. Ele evita alterar permanentemente a ordem de boot e exige uma acao humana; nenhum BCD, UEFI NVRAM, BootNext, USB, particao ou PXE foi alterado. Secure Boot, disponibilidade do verificador GPG no ambiente Live, canal de retorno e recuperacao de crash continuam bloqueadores para uma fase futura autorizada.
 

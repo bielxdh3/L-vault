@@ -38,6 +38,7 @@ RUN_STATES = {
     "deferred",
     "awaiting_offline_boot",
     "offline_boot_not_configured",
+    "offline_simulation_completed",
     "offline_clone_structurally_verified",
     "error",
     "hidden",
@@ -152,7 +153,7 @@ class CountdownController:
     def apply_durable_state(self, run_state: str, *, reason: str = "", progress: dict[str, Any] | None = None) -> str:
         if progress:
             self.progress(progress)
-        if run_state in {"countdown", "preflight", "sampling_activity", "verifying", "returning_target_offline", "success", "awaiting_offline_boot", "offline_boot_not_configured", "offline_clone_structurally_verified"}:
+        if run_state in {"countdown", "preflight", "sampling_activity", "verifying", "returning_target_offline", "success", "awaiting_offline_boot", "offline_boot_not_configured", "offline_simulation_completed", "offline_clone_structurally_verified"}:
             return self.transition(run_state)
         if run_state in {"skipped_outside_window", "skipped_window_expired_before_start", "skipped_not_due", "skipped_no_interactive_session", "skipped_target_missing", "skipped_high_source_activity"}:
             return self.transition("deferred", phase="window expired", details={"reason": reason})
