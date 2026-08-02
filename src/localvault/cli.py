@@ -369,7 +369,7 @@ def disk_clone_simulate(root: Path = root_option()):
     with tempfile.TemporaryDirectory(prefix="localvault-clone-sim-") as temp_root:
         result = simulate_offline_round_trip(Path(temp_root))
     console.print_json(json.dumps(result, ensure_ascii=False, default=str))
-    if result.get("state") != "offline_clone_structurally_verified":
+    if result.get("state") != "offline_simulation_completed":
         raise typer.Exit(1)
 
 

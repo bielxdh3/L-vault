@@ -66,6 +66,7 @@ TERMINAL_STATES = {
     "offline_result_pending",
     "offline_result_received",
     "offline_verification_failed",
+    "offline_simulation_completed",
     "offline_clone_structurally_verified",
 }
 RETRYABLE_FAILURE_STATES = {"failed_provider", "failed_verification", "failed_offline_cleanup"}
@@ -75,6 +76,7 @@ CLONE_STATE_LABELS = {
     "success": "sucesso estrutural; boot nao testado",
     "awaiting_offline_boot": "aguardando boot offline manual",
     "offline_boot_not_configured": "boot offline nao configurado",
+    "offline_simulation_completed": "simulacao fake concluida; nenhum clone executado",
     "offline_clone_structurally_verified": "estrutura verificada; boot nao testado",
 }
 

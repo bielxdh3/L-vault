@@ -29,12 +29,26 @@ OFFLINE_RESULT_SCHEMA = 1
 OFFLINE_ENGINE = "clonezilla"
 OFFLINE_ENGINE_VERSION = "3.3.3-15"
 OFFLINE_ENGINE_COMPATIBILITY = "3.3.3-15 only until the offline runtime is validated"
+OFFLINE_RESULT_PROFILE_SIMULATION = "simulation"
+OFFLINE_RESULT_PROFILE_PRODUCTION = "production"
+OFFLINE_RESULT_FAKE_PHASE = "fake_engine_rendered_only"
+OFFLINE_RESULT_PRODUCTION_SUCCESS_PHASE = "clone_completed_structurally_verified"
+OFFLINE_RESULT_PRODUCTION_FAILURE_PHASE = "clone_failed"
+OFFLINE_RESULT_PHASES = frozenset({OFFLINE_RESULT_FAKE_PHASE, OFFLINE_RESULT_PRODUCTION_SUCCESS_PHASE, OFFLINE_RESULT_PRODUCTION_FAILURE_PHASE})
+OFFLINE_RESULT_TARGET_OFFLINE_VALUES = frozenset({"not_changed_in_simulation", "confirmed_offline", "unknown"})
+OFFLINE_RESULT_MAX_FUTURE_SKEW = timedelta(minutes=5)
+OFFLINE_RESULT_MAX_JOB_SKEW = timedelta(minutes=5)
 JOB_MANIFEST = "manifest.json"
 JOB_SIGNATURE = "manifest.sig"
 RESULT_MANIFEST = "result.json"
 RESULT_SIGNATURE = "result.sig"
 _JOB_ID = re.compile(r"^[0-9a-f]{32}$")
 _NODE = re.compile(r"^/dev/[A-Za-z0-9._+:-]+$")
+_NODE_SEARCH = re.compile(r"/dev/[A-Za-z0-9._+:-]+", re.IGNORECASE)
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_MASKED_LABEL = re.compile(r"^.+ \*{4}\S{4} \(\d+ bytes\)$")
+_PRIVATE_KEY = re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----", re.IGNORECASE)
+_SENSITIVE_IDENTIFIER = re.compile(r"\b(?:wwn|id[_ -]?serial|serial(?:[_ -]?(?:number|no|id))?)(?:\s*[:=]|\s+|-)[^\s,;]+", re.IGNORECASE)
 
 
 class OfflineCloneBlocked(RuntimeError):
@@ -71,6 +85,21 @@ def _utc(value: datetime | str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _strict_utc(value: datetime | str, field: str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise OfflineCloneBlocked(f"offline result {field} timestamp is invalid", "offline_verification_failed") from exc
+    else:
+        raise OfflineCloneBlocked(f"offline result {field} timestamp is invalid", "offline_verification_failed")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise OfflineCloneBlocked(f"offline result {field} timestamp must include a timezone", "offline_verification_failed")
+    return parsed.astimezone(timezone.utc)
+
+
 def _iso(value: datetime) -> str:
     return _utc(value).isoformat(timespec="seconds")
 
@@ -78,6 +107,22 @@ def _iso(value: datetime) -> str:
 def _masked_serial(serial: str) -> str:
     serial = str(serial or "").strip()
     return "(serial oculto)" if not serial else f"****{serial[-4:]}"
+
+
+def _validate_user_visible_text(field: str, value: str, *, label: bool = False, max_length: int = 512) -> None:
+    if not isinstance(value, str) or not value or len(value) > max_length or any(ord(char) < 32 for char in value):
+        raise OfflineCloneBlocked(f"offline result {field} is not safely bounded", "offline_verification_failed")
+    if _NODE_SEARCH.search(value) or _PRIVATE_KEY.search(value) or _SENSITIVE_IDENTIFIER.search(value):
+        raise OfflineCloneBlocked(f"offline result {field} contains sensitive material", "offline_verification_failed")
+    if label and (not _MASKED_LABEL.fullmatch(value) or "wwn" in value.casefold() or "serial" in value.casefold().replace("serial oculto", "")):
+        raise OfflineCloneBlocked(f"offline result {field} is not a safe masked label", "offline_verification_failed")
+
+
+def _sanitize_error(value: str) -> str:
+    value = re.sub(_NODE_SEARCH, "/dev/(oculto)", str(value or ""))
+    value = re.sub(_PRIVATE_KEY, "(chave privada omitida)", value)
+    value = re.sub(_SENSITIVE_IDENTIFIER, "(identificador omitido)", value)
+    return re.sub(r"\s+", " ", value).strip()[:512]
 
 
 @dataclass(frozen=True)
@@ -229,6 +274,8 @@ class OfflineJob:
             raise OfflineCloneBlocked("offline engine release is not allowlisted", "offline_execution_disabled")
         if self.real_execution_authorized:
             raise OfflineCloneBlocked("real offline execution is disabled in this phase", "offline_execution_disabled")
+        _validate_user_visible_text("source label", self.source_label, label=True, max_length=160)
+        _validate_user_visible_text("target label", self.target_label, label=True, max_length=160)
         if min(self.source_capacity_bytes, self.target_capacity_bytes, len(self.required_partition_roles)) <= 0:
             raise OfflineCloneBlocked("offline job geometry is incomplete", "offline_verification_failed")
         if self.target_capacity_bytes < self.source_capacity_bytes:
@@ -582,41 +629,142 @@ class OfflineResult:
     boot_tested: bool = False
     schema: int = OFFLINE_RESULT_SCHEMA
 
+    def _validate_intrinsic(self) -> None:
+        if self.schema != OFFLINE_RESULT_SCHEMA:
+            raise OfflineCloneBlocked("offline result schema is invalid", "offline_verification_failed")
+        if not _JOB_ID.fullmatch(self.job_id):
+            raise OfflineCloneBlocked("offline result job identifier is invalid", "offline_verification_failed")
+        if self.engine != OFFLINE_ENGINE or self.engine_version != OFFLINE_ENGINE_VERSION:
+            raise OfflineCloneBlocked("offline result engine is not allowlisted", "offline_verification_failed")
+        _strict_utc(self.started_at, "started_at")
+        _strict_utc(self.ended_at, "ended_at")
+        _validate_user_visible_text("source label", self.source_label, label=True, max_length=160)
+        _validate_user_visible_text("target label", self.target_label, label=True, max_length=160)
+        if not _SHA256.fullmatch(self.command_hash):
+            raise OfflineCloneBlocked("offline result command hash is not a lowercase SHA-256 digest", "offline_verification_failed")
+        if not _SHA256.fullmatch(self.log_hash):
+            raise OfflineCloneBlocked("offline result log hash is not a lowercase SHA-256 digest", "offline_verification_failed")
+        if type(self.exit_status) is not int or not 0 <= self.exit_status <= 255:
+            raise OfflineCloneBlocked("offline result exit status is out of range", "offline_verification_failed")
+        if type(self.structurally_verified) is not bool or type(self.boot_tested) is not bool:
+            raise OfflineCloneBlocked("offline result verification flags are invalid", "offline_verification_failed")
+        if self.phase not in OFFLINE_RESULT_PHASES:
+            raise OfflineCloneBlocked("offline result phase is not allowlisted", "offline_verification_failed")
+        if self.target_offline not in OFFLINE_RESULT_TARGET_OFFLINE_VALUES:
+            raise OfflineCloneBlocked("offline result target-offline outcome is not allowlisted", "offline_verification_failed")
+        if self.boot_tested:
+            raise OfflineCloneBlocked("offline result claims an unsupported boot-test state", "offline_verification_failed")
+        if not isinstance(self.sanitized_error, str) or len(self.sanitized_error) > 512 or self.sanitized_error != _sanitize_error(self.sanitized_error):
+            raise OfflineCloneBlocked("offline result error text is not sanitized", "offline_verification_failed")
+
+    def validate_semantics(
+        self,
+        job: OfflineJob,
+        *,
+        expected_command_hash: str | None = None,
+        command_plan: ClonezillaCommandPlan | None = None,
+        now: datetime | None = None,
+        profile: str = OFFLINE_RESULT_PROFILE_PRODUCTION,
+    ) -> None:
+        job.validate()
+        self._validate_intrinsic()
+        if profile not in {OFFLINE_RESULT_PROFILE_SIMULATION, OFFLINE_RESULT_PROFILE_PRODUCTION}:
+            raise OfflineCloneBlocked("offline result validation profile is invalid", "offline_verification_failed")
+        if self.job_id != job.job_id:
+            raise OfflineCloneBlocked("offline result job ID does not match the verified job", "offline_verification_failed")
+        if self.engine != job.approved_engine or self.engine_version != job.expected_engine_release:
+            raise OfflineCloneBlocked("offline result engine does not match the verified job", "offline_verification_failed")
+        if self.source_label != job.source_label or self.target_label != job.target_label:
+            raise OfflineCloneBlocked("offline result labels do not match the verified job", "offline_verification_failed")
+        if command_plan is not None:
+            if command_plan.executable or command_plan.batch:
+                raise OfflineCloneBlocked("offline result command plan is not a safe non-executable plan", "offline_execution_disabled")
+            if expected_command_hash is not None and expected_command_hash != command_plan.argv_hash:
+                raise OfflineCloneBlocked("trusted command hash and command plan differ", "offline_verification_failed")
+            expected_command_hash = command_plan.argv_hash
+        if not isinstance(expected_command_hash, str) or not _SHA256.fullmatch(expected_command_hash):
+            raise OfflineCloneBlocked("trusted command hash is required and must be a lowercase SHA-256 digest", "offline_verification_failed")
+        if self.command_hash != expected_command_hash:
+            raise OfflineCloneBlocked("offline result command hash does not match the trusted command plan", "offline_verification_failed")
+
+        started = _strict_utc(self.started_at, "started_at")
+        ended = _strict_utc(self.ended_at, "ended_at")
+        if ended < started:
+            raise OfflineCloneBlocked("offline result end time precedes start time", "offline_verification_failed")
+        created = _utc(job.created_at)
+        expires = _utc(job.expires_at)
+        if started < created - OFFLINE_RESULT_MAX_JOB_SKEW or ended > expires + OFFLINE_RESULT_MAX_JOB_SKEW:
+            raise OfflineCloneBlocked("offline result timestamps fall outside the verified job lifetime", "offline_verification_failed")
+        current = _strict_utc(now or datetime.now(timezone.utc), "consumption")
+        if started > current + OFFLINE_RESULT_MAX_FUTURE_SKEW or ended > current + OFFLINE_RESULT_MAX_FUTURE_SKEW:
+            raise OfflineCloneBlocked("offline result timestamp is unreasonably far in the future", "offline_verification_failed")
+
+        if profile == OFFLINE_RESULT_PROFILE_SIMULATION:
+            if self.phase != OFFLINE_RESULT_FAKE_PHASE:
+                raise OfflineCloneBlocked("simulation consumer accepts only the fake render-only phase", "offline_verification_failed")
+            if self.target_offline != "not_changed_in_simulation":
+                raise OfflineCloneBlocked("simulation result has an invalid target-offline outcome", "offline_verification_failed")
+            if self.structurally_verified:
+                raise OfflineCloneBlocked("fake render-only results cannot claim structural verification", "offline_verification_failed")
+            return
+
+        if self.phase == OFFLINE_RESULT_FAKE_PHASE:
+            raise OfflineCloneBlocked("fake render-only result cannot be consumed as a production result", "offline_verification_failed")
+        if self.target_offline not in {"confirmed_offline", "unknown"}:
+            raise OfflineCloneBlocked("production result has an invalid target-offline outcome", "offline_verification_failed")
+        if self.phase == OFFLINE_RESULT_PRODUCTION_SUCCESS_PHASE:
+            if self.exit_status != 0 or not self.structurally_verified or self.target_offline != "confirmed_offline" or self.sanitized_error:
+                raise OfflineCloneBlocked("production success requires terminal verification semantics", "offline_verification_failed")
+            return
+        if self.phase == OFFLINE_RESULT_PRODUCTION_FAILURE_PHASE:
+            if self.exit_status == 0 or self.structurally_verified:
+                raise OfflineCloneBlocked("production failure phase has inconsistent success fields", "offline_verification_failed")
+            return
+        raise OfflineCloneBlocked("offline result phase is not valid for the production consumer", "offline_verification_failed")
+
     def payload(self) -> dict[str, Any]:
         return asdict(self)
 
     def canonical_bytes(self) -> bytes:
-        if self.schema != OFFLINE_RESULT_SCHEMA or self.boot_tested:
-            raise OfflineCloneBlocked("offline result claims an unsupported boot-test state", "offline_verification_failed")
+        self._validate_intrinsic()
         return canonical_json(self.payload())
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "OfflineResult":
+        if not isinstance(value, dict):
+            raise OfflineCloneBlocked("offline result manifest is not an object", "offline_verification_failed")
+        required = {
+            "job_id", "engine", "engine_version", "started_at", "ended_at", "source_label", "target_label",
+            "command_hash", "exit_status", "phase", "structurally_verified", "target_offline", "log_hash",
+            "sanitized_error", "boot_tested", "schema",
+        }
+        if set(value) != required:
+            raise OfflineCloneBlocked("offline result manifest fields are invalid", "offline_verification_failed")
+        string_fields = ("job_id", "engine", "engine_version", "started_at", "ended_at", "source_label", "target_label", "command_hash", "phase", "target_offline", "log_hash", "sanitized_error")
+        if any(type(value[field]) is not str for field in string_fields):
+            raise OfflineCloneBlocked("offline result manifest field types are invalid", "offline_verification_failed")
+        if type(value["exit_status"]) is not int or type(value["structurally_verified"]) is not bool or type(value["boot_tested"]) is not bool or type(value["schema"]) is not int:
+            raise OfflineCloneBlocked("offline result manifest field types are invalid", "offline_verification_failed")
         result = cls(
-            job_id=str(value.get("job_id") or ""),
-            engine=str(value.get("engine") or ""),
-            engine_version=str(value.get("engine_version") or ""),
-            started_at=str(value.get("started_at") or ""),
-            ended_at=str(value.get("ended_at") or ""),
-            source_label=str(value.get("source_label") or ""),
-            target_label=str(value.get("target_label") or ""),
-            command_hash=str(value.get("command_hash") or ""),
-            exit_status=int(value.get("exit_status") or 0),
-            phase=str(value.get("phase") or ""),
-            structurally_verified=bool(value.get("structurally_verified")),
-            target_offline=str(value.get("target_offline") or ""),
-            log_hash=str(value.get("log_hash") or ""),
-            sanitized_error=str(value.get("sanitized_error") or ""),
-            boot_tested=bool(value.get("boot_tested")),
-            schema=int(value.get("schema") or 0),
+            job_id=value["job_id"],
+            engine=value["engine"],
+            engine_version=value["engine_version"],
+            started_at=value["started_at"],
+            ended_at=value["ended_at"],
+            source_label=value["source_label"],
+            target_label=value["target_label"],
+            command_hash=value["command_hash"],
+            exit_status=value["exit_status"],
+            phase=value["phase"],
+            structurally_verified=value["structurally_verified"],
+            target_offline=value["target_offline"],
+            log_hash=value["log_hash"],
+            sanitized_error=value["sanitized_error"],
+            boot_tested=value["boot_tested"],
+            schema=value["schema"],
         )
-        result.canonical_bytes()
+        result._validate_intrinsic()
         return result
-
-
-def _sanitize_error(value: str) -> str:
-    value = re.sub(r"/dev/[A-Za-z0-9._+:-]+", "/dev/(oculto)", str(value or ""))
-    return re.sub(r"\s+", " ", value).strip()[:512]
 
 
 def fake_structural_verify(source: OfflineBlockDevice, target: OfflineBlockDevice) -> bool:
@@ -640,8 +788,8 @@ def build_fake_result(job: OfflineJob, plan: ClonezillaCommandPlan, source: Offl
         target_label=job.target_label,
         command_hash=plan.argv_hash,
         exit_status=0,
-        phase="fake_engine_rendered_only",
-        structurally_verified=verified,
+        phase=OFFLINE_RESULT_FAKE_PHASE,
+        structurally_verified=False,
         target_offline="not_changed_in_simulation",
         log_hash=hashlib.sha256(log.encode("utf-8")).hexdigest(),
         sanitized_error="" if verified else _sanitize_error("fake structural verification failed"),
@@ -659,7 +807,17 @@ class OfflineResultStore:
         _write_signed_directory(destination, RESULT_MANIFEST, RESULT_SIGNATURE, result.canonical_bytes(), signer)
         return destination
 
-    def consume(self, path: Path, expected_job_id: str, verifier: DetachedVerifier) -> OfflineResult:
+    def consume(
+        self,
+        path: Path,
+        job: OfflineJob,
+        verifier: DetachedVerifier,
+        *,
+        expected_command_hash: str | None = None,
+        command_plan: ClonezillaCommandPlan | None = None,
+        now: datetime | None = None,
+        profile: str = OFFLINE_RESULT_PROFILE_PRODUCTION,
+    ) -> OfflineResult:
         path = Path(path)
         if path.is_symlink() or not path.is_dir() or any((path / name).is_symlink() for name in (RESULT_MANIFEST, RESULT_SIGNATURE)):
             raise OfflineCloneBlocked("offline result package path is unsafe", "offline_verification_failed")
@@ -670,12 +828,17 @@ class OfflineResultStore:
             raise OfflineCloneBlocked("offline result package is incomplete", "offline_verification_failed") from exc
         try:
             result = OfflineResult.from_dict(json.loads(raw.decode("utf-8")))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, AttributeError) as exc:
             raise OfflineCloneBlocked("offline result manifest is invalid", "offline_verification_failed") from exc
-        if result.job_id != expected_job_id:
-            raise OfflineCloneBlocked("offline result job ID does not match", "offline_verification_failed")
         if raw != result.canonical_bytes() or not verifier.verify(raw, signature):
             raise OfflineCloneBlocked("offline result signature or canonical encoding is invalid", "offline_verification_failed")
+        result.validate_semantics(
+            job,
+            expected_command_hash=expected_command_hash,
+            command_plan=command_plan,
+            now=now,
+            profile=profile,
+        )
         return result
 
 
@@ -686,11 +849,32 @@ class OfflineResultOutcome:
     result: OfflineResult | None
 
 
-def consume_offline_result(path: Path, expected_job_id: str, verifier: DetachedVerifier) -> OfflineResultOutcome:
+def consume_offline_result(
+    path: Path,
+    job: OfflineJob,
+    verifier: DetachedVerifier,
+    *,
+    expected_command_hash: str | None = None,
+    command_plan: ClonezillaCommandPlan | None = None,
+    now: datetime | None = None,
+    profile: str = OFFLINE_RESULT_PROFILE_PRODUCTION,
+) -> OfflineResultOutcome:
     if not Path(path).is_dir():
         return OfflineResultOutcome("offline_result_pending", "no offline result package received", None)
-    result = OfflineResultStore(Path(path).parent).consume(path, expected_job_id, verifier)
-    if result.exit_status != 0 or not result.structurally_verified:
+    result = OfflineResultStore(Path(path).parent).consume(
+        path,
+        job,
+        verifier,
+        expected_command_hash=expected_command_hash,
+        command_plan=command_plan,
+        now=now,
+        profile=profile,
+    )
+    if profile == OFFLINE_RESULT_PROFILE_SIMULATION:
+        if result.exit_status != 0 or result.sanitized_error:
+            return OfflineResultOutcome("offline_verification_failed", result.sanitized_error or "fake offline simulation failed", result)
+        return OfflineResultOutcome("offline_simulation_completed", "fake render completed; no clone or structural verification was performed", result)
+    if result.phase != OFFLINE_RESULT_PRODUCTION_SUCCESS_PHASE:
         return OfflineResultOutcome("offline_verification_failed", result.sanitized_error or "offline engine or structural verification failed", result)
     return OfflineResultOutcome("offline_clone_structurally_verified", "structure verified; boot test not manually performed", result)
 
@@ -732,15 +916,13 @@ def simulate_offline_round_trip(root: Path) -> dict[str, Any]:
     plan = ClonezillaCommandRenderer().render(loaded, resolution)
     result = build_fake_result(loaded, plan, source_after, target_after, now=now)
     result_path = OfflineResultStore(root / "results").create(result, signer)
-    outcome = consume_offline_result(result_path, loaded.job_id, verifier)
+    outcome = consume_offline_result(result_path, loaded, verifier, command_plan=plan, now=now, profile=OFFLINE_RESULT_PROFILE_SIMULATION)
     return {
         "state": outcome.state,
         "reason": outcome.reason,
         "job_id": loaded.job_id,
         "job_path": str(job_path),
         "result_path": str(result_path),
-        "source_node": resolution.source_node,
-        "target_node": resolution.target_node,
         "displayed_argv": list(plan.displayed_argv),
         "argv_hash": plan.argv_hash,
         "command_executed": False,

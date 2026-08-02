@@ -21,6 +21,10 @@ The Linux resolver requires exactly one strong source and one strong target matc
 
 Results contain the job ID, engine/version, timestamps, masked labels, command hash, exit status, phase, structural verification, target-offline outcome, bounded sanitized error, log hash, and `boot_tested=false`. A result with a mismatched job ID, bad signature, or tampered canonical JSON is rejected.
 
+Signed transport integrity is only the first boundary. Result consumption also requires the already verified `OfflineJob`, the trusted rendered command plan (or its trusted lowercase SHA-256 `argv_hash`), the detached verifier, and a deterministic current time when testing. Semantic validation then binds the result to the job schema, engine release, masked labels, command hash, timestamps, allowlisted phase/outcome, safe error text, and `boot_tested=false`; a valid signer cannot authorize inconsistent fields.
+
+The fake path uses only `fake_engine_rendered_only` and returns `offline_simulation_completed`. It does not claim a clone or structural verification and is accepted only by the explicit simulation consumer. A future production result must use the terminal `clone_completed_structurally_verified` phase, `confirmed_offline`, exit status zero, and `structurally_verified=true`; only that bound result can become `offline_clone_structurally_verified`. A production consumer never treats the fake phase as clone evidence. Structural verification still does not mean bootability: manual boot testing remains a separate, unperformed human gate.
+
 ## Clonezilla contract examined
 
 Access date: 2026-08-02.
