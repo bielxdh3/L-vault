@@ -1,8 +1,8 @@
-"""Fake-only offline Clonezilla preparation and verification boundaries.
+"""Offline Clonezilla preparation and fail-closed verification boundaries.
 
-This module deliberately has no host block-device commands and no subprocess
-execution.  The future Clonezilla Live runner can reuse the data contracts, but
-the current Windows phase only creates signed packages and dry-renders argv.
+This module deliberately has no host block-device commands or clone-engine
+execution.  The Windows phase creates signed packages and dry-renders argv;
+the only subprocess seam is the explicitly configured detached verifier.
 """
 
 from __future__ import annotations
@@ -13,7 +13,10 @@ import os
 import re
 import secrets
 import shutil
+import stat
+import subprocess
 import tempfile
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -377,10 +380,112 @@ class FakeDetachedVerifier(FakeDetachedSigner):
 
 
 class ProductionOfflineSignatureVerifier:
-    """Production seam; blocked until GPG availability is proven in Clonezilla Live."""
+    """Bounded, explicit ``gpgv`` adapter; never discovers or trusts a key."""
+
+    def __init__(
+        self,
+        verifier_binary: Path | str,
+        public_keyring: Path | str,
+        expected_fingerprint: str,
+        *,
+        keyring_sha256: str | None = None,
+        timeout_seconds: float = 10.0,
+        max_payload_bytes: int = 8 * 1024 * 1024,
+        max_signature_bytes: int = 256 * 1024,
+        max_output_bytes: int = 64 * 1024,
+        command_prefix: tuple[str, ...] = (),
+        command_suffix: tuple[str, ...] = (),
+    ):
+        self.verifier_binary = Path(verifier_binary)
+        self.public_keyring = Path(public_keyring)
+        self.expected_fingerprint = re.sub(r"\s+", "", str(expected_fingerprint)).upper()
+        self.keyring_sha256 = keyring_sha256
+        self.timeout_seconds = float(timeout_seconds)
+        self.max_payload_bytes = int(max_payload_bytes)
+        self.max_signature_bytes = int(max_signature_bytes)
+        self.max_output_bytes = int(max_output_bytes)
+        self.command_prefix = tuple(str(item) for item in command_prefix)
+        self.command_suffix = tuple(str(item) for item in command_suffix)
+        if not re.fullmatch(r"[0-9A-F]{40,64}", self.expected_fingerprint):
+            raise OfflineCloneBlocked("pinned public-key fingerprint is invalid", "offline_verification_failed")
+        if not (0 < self.timeout_seconds <= 60 and 0 < self.max_output_bytes <= 1024 * 1024):
+            raise OfflineCloneBlocked("detached verifier limits are invalid", "offline_verification_failed")
+
+    @staticmethod
+    def _bounded_reader(pipe, limit: int, output: list[bytes]) -> None:
+        total = 0
+        try:
+            while True:
+                chunk = pipe.read(8192)
+                if not chunk:
+                    return
+                total += len(chunk)
+                if total <= limit:
+                    output.append(chunk)
+                else:
+                    output.append(b"\x00LOCALVAULT_OUTPUT_OVERFLOW")
+                    return
+        finally:
+            pipe.close()
+
+    def _check_paths(self) -> None:
+        for label, path in (("verifier", self.verifier_binary), ("public keyring", self.public_keyring)):
+            if path.is_symlink() or not path.is_file():
+                raise OfflineCloneBlocked(f"offline {label} path is unsafe", "offline_verification_failed")
+        try:
+            key_stat = self.public_keyring.stat()
+            if key_stat.st_size <= 0 or key_stat.st_size > 4 * 1024 * 1024 or key_stat.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+                raise OfflineCloneBlocked("offline public keyring is missing, oversized, or writable", "offline_verification_failed")
+            keyring_bytes = self.public_keyring.read_bytes()
+            if _PRIVATE_KEY.search(keyring_bytes.decode("utf-8", errors="ignore")):
+                raise OfflineCloneBlocked("offline public keyring contains private key material", "offline_verification_failed")
+            if self.keyring_sha256 and hashlib.sha256(keyring_bytes).hexdigest() != self.keyring_sha256.lower():
+                raise OfflineCloneBlocked("offline public keyring digest does not match the pin", "offline_verification_failed")
+        except OSError as exc:
+            raise OfflineCloneBlocked("offline public keyring cannot be inspected", "offline_verification_failed") from exc
 
     def verify(self, payload: bytes, signature: bytes) -> bool:
-        raise OfflineCloneBlocked("detached GPG verification is not proven in the selected offline runtime")
+        if not isinstance(payload, bytes) or not isinstance(signature, bytes):
+            raise OfflineCloneBlocked("detached signature inputs are invalid", "offline_verification_failed")
+        if len(payload) > self.max_payload_bytes or len(signature) > self.max_signature_bytes:
+            raise OfflineCloneBlocked("detached signature inputs are oversized", "offline_verification_failed")
+        self._check_paths()
+        with tempfile.TemporaryDirectory(prefix="localvault-gpgv-") as temp_root:
+            temp = Path(temp_root)
+            payload_path, signature_path = temp / "payload", temp / "signature"
+            payload_path.write_bytes(payload)
+            signature_path.write_bytes(signature)
+            argv = (*self.command_prefix, str(self.verifier_binary), *self.command_suffix, "--status-fd", "1", "--keyring", str(self.public_keyring), str(signature_path), str(payload_path))
+            env = {"LANG": "C", "LC_ALL": "C", "TZ": "UTC", "PATH": ""}
+            try:
+                process = subprocess.Popen(argv, cwd=temp_root, env=env, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except (OSError, ValueError) as exc:
+                raise OfflineCloneBlocked("detached verifier could not be started", "offline_verification_failed") from exc
+            stdout: list[bytes] = []
+            stderr: list[bytes] = []
+            readers = [threading.Thread(target=self._bounded_reader, args=(process.stdout, self.max_output_bytes, stdout), daemon=True), threading.Thread(target=self._bounded_reader, args=(process.stderr, self.max_output_bytes, stderr), daemon=True)]
+            for reader in readers:
+                reader.start()
+            try:
+                exit_code = process.wait(timeout=self.timeout_seconds)
+            except subprocess.TimeoutExpired as exc:
+                process.kill()
+                process.wait(timeout=2)
+                raise OfflineCloneBlocked("detached verifier timed out", "offline_verification_failed") from exc
+            for reader in readers:
+                reader.join(timeout=2)
+            out = b"".join(stdout)
+            err = b"".join(stderr)
+            if b"\x00LOCALVAULT_OUTPUT_OVERFLOW" in out or b"\x00LOCALVAULT_OUTPUT_OVERFLOW" in err or len(out) > self.max_output_bytes or len(err) > self.max_output_bytes:
+                raise OfflineCloneBlocked("detached verifier output exceeded the bound", "offline_verification_failed")
+            if exit_code != 0:
+                return False
+            fingerprints = []
+            for line in out.decode("utf-8", errors="replace").splitlines():
+                fields = line.split()
+                if fields and fields[0] == "[GNUPG:]" and len(fields) > 1 and fields[1] == "VALIDSIG" and len(fields) > 2:
+                    fingerprints.append(re.sub(r"\s+", "", fields[2]).upper())
+            return len(fingerprints) == 1 and fingerprints[0] == self.expected_fingerprint
 
 
 class ReplayStore:
