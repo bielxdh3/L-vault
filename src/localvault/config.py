@@ -31,7 +31,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "safety": {"minimum_free_gb": 20, "hash_algorithm": "sha256", "never_delete_sources": True},
     "disk_clone": {
         "enabled": False,
-        "provider": "auto",
+        "provider": "clonezilla_offline",
         "interval_days": 30,
         "schedule_time": "03:00",
         "window_start": "03:00",
