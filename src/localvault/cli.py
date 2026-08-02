@@ -21,11 +21,11 @@ from .dedupe import build_duplicate_report
 from .disk_clone import (
     CloneService,
     DiskCloneBlocked,
-    DiskGeniusProvider,
     EnrollmentStore,
     WindowsDiskInventory,
     WindowsDiskLifecycle,
     disk_clone_dashboard_data,
+    provider_for_config,
     simulate_state_machine,
 )
 from .disk_clone_ui import native_countdown, run_native_ui
@@ -373,18 +373,18 @@ def disk_clone_run(root: Path = root_option()):
 @app.command("disk-clone-show")
 def disk_clone_show(root: Path = root_option()):
     """Signal the existing native clone window to restore; never starts a clone."""
-    from .disk_clone import create_control_request
+    from .disk_clone import active_clone_run_id, create_control_request
 
     p = prepare(root)
-    request_id = create_control_request(p.db, "show", actor="local-command")
+    request_id = create_control_request(p.db, "show", run_id=active_clone_run_id(p.db), actor="local-command")
     console.print(f"Restore request: {request_id}")
 
 
 @app.command("disk-clone-ui")
-def disk_clone_ui(root: Path = root_option(), countdown_seconds: int = typer.Option(300, "--countdown-seconds")):
-    """Run the single native warning window process."""
+def disk_clone_ui(root: Path = root_option(), countdown_seconds: int = typer.Option(300, "--countdown-seconds"), monitor: bool = typer.Option(False, "--monitor")):
+    """Run the native warning or durable progress/error window."""
     p = prepare(root)
-    run_native_ui(p.root, countdown_seconds)
+    run_native_ui(p.root, countdown_seconds, monitor=monitor)
 
 
 @app.command("disk-clone-enroll")
@@ -405,14 +405,20 @@ def disk_clone_enroll(root: Path = root_option()):
     target = next((disk for disk in disks if disk.number == target_number), None)
     if not target or target.number == source.number:
         raise typer.BadParameter("O destino deve ser outro disco fisico.")
-    provider = DiskGeniusProvider()
+    provider = provider_for_config(load_config(root).get("disk_clone", {}))
+    discovery = provider.discover()
     capabilities = provider.validate_capabilities()
     if not capabilities.supported:
-        raise typer.BadParameter(f"Inscricao bloqueada: {capabilities.blocker}")
+        raise typer.BadParameter(f"Inscricao bloqueada para {discovery.name}: {capabilities.blocker or discovery.detail}")
+    refreshed = WindowsDiskInventory().list_disks()
+    target = next((disk for disk in refreshed if disk.matches(target, require_strong=True)), None)
+    source = next((disk for disk in refreshed if disk.matches(source, require_strong=True) and (disk.is_system or disk.is_boot)), None)
+    if not target or not source or target.matches(source, require_strong=False):
+        raise typer.BadParameter("A identidade fisica mudou ou ficou ambigua; inscricao bloqueada.")
     ack = typer.prompt(f"Digite exatamente APAGAR {target.model} {target.masked_serial}")
     if ack != f"APAGAR {target.model} {target.masked_serial}":
         raise typer.BadParameter("Confirmacao destrutiva incorreta.")
-    EnrollmentStore(root).save(source, target, provider.discover().name, "disk_intelligent")
+    EnrollmentStore(root).save(source, target, discovery.name, "disk_intelligent")
     WindowsDiskLifecycle().set_offline(target)
     console.print("Inscricao criada. O provedor nunca e executado durante a inscricao.")
 
