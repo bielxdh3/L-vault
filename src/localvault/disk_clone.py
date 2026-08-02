@@ -54,6 +54,7 @@ TERMINAL_STATES = {
     "failed_verification",
     "interrupted",
     "failed_offline_cleanup",
+    "re_enrollment_required",
 }
 RETRYABLE_FAILURE_STATES = {"failed_provider", "failed_verification", "failed_offline_cleanup"}
 CLONE_STATE_LABELS = {
