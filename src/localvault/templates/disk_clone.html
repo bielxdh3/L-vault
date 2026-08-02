@@ -1,0 +1,47 @@
+{% extends "base.html" %}{% block title %}Clone do disco - LocalVault{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Clone do disco</h1>
+    <p class="muted">Clone físico inicializável do disco de sistema. O recurso permanece desativado até a inscrição local.</p>
+  </div>
+  <span class="badge">{{ "ATIVADO" if enabled else "DESATIVADO" }}</span>
+</section>
+
+<section class="notice">
+  <div>
+    <strong>Atenção: o HD de destino será apagado completamente.</strong>
+    <span>O clone estrutural não é um teste real de inicialização. Evite tarefas pesadas durante a operação.</span>
+  </div>
+</section>
+
+<section class="control-grid">
+  <article><h2>Provedor</h2><p><strong>{{ provider }}</strong> - {{ provider_version or "versão desconhecida" }}</p><p class="muted">{{ provider_blocker or ("capacidade validada" if provider_supported else "bloqueado") }}</p></article>
+  <article><h2>Inscrição</h2><p>{{ enrollment }}</p><p class="muted">Origem: {{ source }}<br>Destino: {{ target }}</p></article>
+  <article><h2>Agendamento</h2><p>Intervalo: <strong>{{ interval_days }} dia(s)</strong></p><p class="muted">Próximo vencimento: {{ next_due_at }}<br>Janela: 03:00–04:00, sem catch-up diurno.</p></article>
+  <article><h2>Estado</h2><p><span class="badge">{{ current_state }}</span></p><p class="muted">Destino offline entre execuções: {{ "sim" if target_offline_expected else "não" }}</p></article>
+</section>
+
+<h2>Ações seguras</h2>
+<section class="quick-actions">
+  <form method="post" action="/disk-clone/action?action=preflight"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Checar preflight</button></form>
+  <form method="post" action="/disk-clone/action?action=simulate"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Simular</button></form>
+  <form method="post" action="/disk-clone/action?action=show"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Mostrar janela nativa</button></form>
+</section>
+
+<form class="filter-panel" method="post" action="/disk-clone/settings">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <label>Intervalo (1–3650 dias) <input type="number" min="1" max="3650" name="interval_days" value="{{ interval_days }}"></label>
+  <button type="submit">Salvar intervalo</button>
+</form>
+
+<p class="muted">Boot test: {{ boot_test }}. Progresso exato só é mostrado quando o provedor fornecer um sinal validado; caso contrário, aparece como estimado ou indisponível.</p>
+{% if progress %}<p>Progresso: <span class="badge">{{ progress.progress_type }}</span> {{ progress.percent or "—" }}% · {{ progress.phase or "" }} · atualizado {{ progress.recorded_at }}</p>{% endif %}
+
+<h2>Histórico recente</h2>
+{% if recent_runs %}
+<table><tr><th>Run</th><th>Estado</th><th>Início</th><th>Fim</th><th>Motivo</th></tr>
+{% for run in recent_runs %}<tr><td>{{ run.run_id }}</td><td><span class="badge">{{ run.state }}</span></td><td>{{ run.started_at }}</td><td>{{ run.finished_at or "—" }}</td><td>{{ run.reason or "" }}</td></tr>{% endfor %}
+</table>
+{% else %}<p>Nenhuma execução registrada.</p>{% endif %}
+{% endblock %}

@@ -20,6 +20,22 @@ safety:
   minimum_free_gb: 20
   hash_algorithm: sha256
   never_delete_sources: true
+disk_clone:
+  enabled: false
+  provider: auto
+  interval_days: 30
+  schedule_time: '03:00'
+  window_start: '03:00'
+  window_end: '04:00'
+  countdown_seconds: 300
+  active_time_threshold_percent: 70
+  active_time_sample_seconds: 300
+  prestart_recheck_seconds: 20
+  require_unlocked_interactive_session: true
+  keep_target_offline: true
+  allow_automatic_retry_same_night: false
+  allow_real_provider_execution: false
+  protected_paths: []
 automation:
   task_prefix: LocalVault
   execution_time_limit_hours: 8
@@ -47,3 +63,11 @@ automation:
       time: 04:00
       days:
       - Sunday
+    disk_clone:
+      enabled: true
+      name: Bootable Disk Clone
+      command: disk-clone-run
+      frequency: daily
+      time: '03:00'
+      days: []
+      start_when_available: false

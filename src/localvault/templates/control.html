@@ -50,6 +50,13 @@
     {% endif %}
   </article>
 
+  <article>
+    <h2>Clone do disco</h2>
+    <p><span class="badge">{{ disk_clone.current_state }}</span></p>
+    <p class="muted">{{ disk_clone.provider }} - {{ disk_clone.enrollment }}</p>
+    <a href="/disk-clone">Abrir Clone do disco</a>
+  </article>
+
 </section>
 
 <h2>Acoes rapidas</h2>

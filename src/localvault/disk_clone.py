@@ -1,0 +1,1373 @@
+from __future__ import annotations
+
+"""Fail-closed orchestration for a bootable Windows disk-clone workflow.
+
+The module deliberately keeps provider execution behind a small boundary.  The
+default provider is unsupported until a local installation, edition, and
+command contract have all been verified.  Tests and the simulation command use
+the fake provider and never touch storage devices.
+"""
+
+import ctypes
+import hashlib
+import hmac
+import json
+import os
+import re
+import shutil
+import subprocess
+import time
+import uuid
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, time as time_type, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterable, Protocol, Sequence
+
+import yaml
+
+from . import db
+from .config import VaultPaths, load_config, paths
+from .locks import BackupLock, lock_is_stale
+from .utils import atomic_write_bytes, atomic_write_text, utc_now
+
+
+ENROLLMENT_FILE = "disk_clone_enrollment.json"
+ENROLLMENT_SECRET_FILE = "disk_clone_enrollment.secret"
+MASKED_SERIAL = "(serial oculto)"
+TERMINAL_STATES = {
+    "success",
+    "skipped_not_due",
+    "skipped_outside_window",
+    "skipped_no_interactive_session",
+    "skipped_target_missing",
+    "skipped_high_source_activity",
+    "blocked_provider",
+    "blocked_identity",
+    "blocked_protected_path",
+    "blocked_size",
+    "blocked_configuration",
+    "cancelled_before_start",
+    "failed_provider",
+    "failed_verification",
+    "interrupted",
+    "failed_offline_cleanup",
+}
+
+
+class DiskCloneError(RuntimeError):
+    pass
+
+
+class DiskCloneBlocked(DiskCloneError):
+    def __init__(self, reason: str, state: str = "blocked_identity"):
+        super().__init__(reason)
+        self.reason = reason
+        self.state = state
+
+
+class DiskCloneConfigError(DiskCloneBlocked):
+    def __init__(self, reason: str):
+        super().__init__(reason, "blocked_configuration")
+
+
+def _clean(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normal(value: Any) -> str:
+    return _clean(value).casefold()
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return _normal(value) in {"1", "true", "yes", "sim", "on"}
+
+
+@dataclass(frozen=True)
+class PartitionIdentity:
+    number: int = 0
+    kind: str = ""
+    size_bytes: int = 0
+    gpt_type: str = ""
+    filesystem: str = ""
+    is_system: bool = False
+    is_boot: bool = False
+    mount_point: str = ""
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "PartitionIdentity":
+        return cls(
+            number=_safe_int(value.get("number")),
+            kind=_clean(value.get("kind") or value.get("type")),
+            size_bytes=_safe_int(value.get("size_bytes") or value.get("size")),
+            gpt_type=_clean(value.get("gpt_type")),
+            filesystem=_clean(value.get("filesystem")),
+            is_system=_safe_bool(value.get("is_system")),
+            is_boot=_safe_bool(value.get("is_boot")),
+            mount_point=_clean(value.get("mount_point") or value.get("drive_letter")),
+        )
+
+
+@dataclass(frozen=True)
+class DiskIdentity:
+    number: int | None = None
+    model: str = ""
+    serial: str = ""
+    pnp_device_id: str = ""
+    storage_unique_id: str = ""
+    physical_id: str = ""
+    bus_type: str = ""
+    media_type: str = ""
+    size_bytes: int = 0
+    logical_sector_size: int = 512
+    physical_sector_size: int = 4096
+    partition_style: str = ""
+    online: bool = True
+    read_only: bool = False
+    is_system: bool = False
+    is_boot: bool = False
+    is_pagefile: bool = False
+    is_crash_dump: bool = False
+    is_clustered: bool = False
+    is_virtual: bool = False
+    is_removable: bool = False
+    bitlocker_state: str = "unknown"
+    mount_points: tuple[str, ...] = ()
+    partitions: tuple[PartitionIdentity, ...] = ()
+    signature: str = ""
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "DiskIdentity":
+        mounts = value.get("mount_points") or value.get("drive_letters") or ()
+        if isinstance(mounts, str):
+            mounts = (mounts,)
+        partitions = value.get("partitions") or ()
+        return cls(
+            number=_safe_int(value.get("number"), -1) if value.get("number") is not None else None,
+            model=_clean(value.get("model") or value.get("friendly_name")),
+            serial=_clean(value.get("serial") or value.get("serial_number")),
+            pnp_device_id=_clean(value.get("pnp_device_id") or value.get("pnp")),
+            storage_unique_id=_clean(value.get("storage_unique_id") or value.get("unique_id")),
+            physical_id=_clean(value.get("physical_id") or value.get("hardware_id")),
+            bus_type=_clean(value.get("bus_type") or value.get("interface_type")),
+            media_type=_clean(value.get("media_type")),
+            size_bytes=_safe_int(value.get("size_bytes") or value.get("size")),
+            logical_sector_size=_safe_int(value.get("logical_sector_size"), 512),
+            physical_sector_size=_safe_int(value.get("physical_sector_size"), 4096),
+            partition_style=_clean(value.get("partition_style")),
+            online=_safe_bool(value.get("online", True)),
+            read_only=_safe_bool(value.get("read_only")),
+            is_system=_safe_bool(value.get("is_system")),
+            is_boot=_safe_bool(value.get("is_boot")),
+            is_pagefile=_safe_bool(value.get("is_pagefile")),
+            is_crash_dump=_safe_bool(value.get("is_crash_dump")),
+            is_clustered=_safe_bool(value.get("is_clustered")),
+            is_virtual=_safe_bool(value.get("is_virtual")),
+            is_removable=_safe_bool(value.get("is_removable")),
+            bitlocker_state=_clean(value.get("bitlocker_state") or "unknown"),
+            mount_points=tuple(_clean(item) for item in mounts if _clean(item)),
+            partitions=tuple(PartitionIdentity.from_dict(item) for item in partitions),
+            signature=_clean(value.get("signature")),
+        )
+
+    def fingerprint_payload(self) -> dict[str, Any]:
+        """Return immutable hardware attributes; disk number and signatures are excluded."""
+        return {
+            "model": self.model,
+            "serial": self.serial,
+            "pnp_device_id": self.pnp_device_id,
+            "storage_unique_id": self.storage_unique_id,
+            "physical_id": self.physical_id,
+            "size_bytes": self.size_bytes,
+            "logical_sector_size": self.logical_sector_size,
+            "physical_sector_size": self.physical_sector_size,
+            "bus_type": self.bus_type,
+        }
+
+    def stable_identifiers(self) -> tuple[str, ...]:
+        return tuple(value for value in (self.serial, self.pnp_device_id, self.storage_unique_id, self.physical_id) if _clean(value))
+
+    def identity_strength(self) -> str:
+        serial = _normal(self.serial)
+        weak_serials = {"", "unknown", "none", "null", "to be filled by o.e.m.", "default string", "0"}
+        if serial in weak_serials or len(self.stable_identifiers()) < 2:
+            return "weak"
+        return "strong"
+
+    @property
+    def masked_serial(self) -> str:
+        serial = _clean(self.serial)
+        return MASKED_SERIAL if not serial else f"****{serial[-4:]}"
+
+    @property
+    def masked_label(self) -> str:
+        return f"{self.model or 'disco'} {self.masked_serial} ({self.size_bytes:,} bytes)"
+
+    def matches(self, enrolled: "DiskIdentity", *, require_strong: bool = True) -> bool:
+        if require_strong and (self.identity_strength() != "strong" or enrolled.identity_strength() != "strong"):
+            return False
+        left, right = self.fingerprint_payload(), enrolled.fingerprint_payload()
+        for key in ("serial", "pnp_device_id", "storage_unique_id", "physical_id"):
+            expected, actual = _normal(right[key]), _normal(left[key])
+            if expected and expected != actual:
+                return False
+        for key in ("model", "size_bytes", "logical_sector_size", "physical_sector_size", "bus_type"):
+            expected, actual = right[key], left[key]
+            if key in {"model", "bus_type"}:
+                if _normal(expected) != _normal(actual):
+                    return False
+            elif expected != actual:
+                return False
+        return True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self) | {"partitions": [asdict(item) for item in self.partitions]}
+
+
+def canonical_json(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def validate_disk_clone_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    if config is not None and not isinstance(config, dict):
+        raise DiskCloneConfigError("Configuracao de clone invalida; a execucao foi bloqueada.")
+    raw = dict(config or {})
+    defaults = {
+        "enabled": False,
+        "provider": "auto",
+        "interval_days": 30,
+        "schedule_time": "03:00",
+        "window_start": "03:00",
+        "window_end": "04:00",
+        "countdown_seconds": 300,
+        "active_time_threshold_percent": 70.0,
+        "active_time_sample_seconds": 300,
+        "prestart_recheck_seconds": 20,
+        "require_unlocked_interactive_session": True,
+        "keep_target_offline": True,
+        "allow_automatic_retry_same_night": False,
+        "allow_real_provider_execution": False,
+    }
+    result = defaults | raw
+    try:
+        result["interval_days"] = int(result["interval_days"])
+        if not 1 <= result["interval_days"] <= 3650:
+            raise ValueError
+        result["countdown_seconds"] = int(result["countdown_seconds"])
+        if not 0 <= result["countdown_seconds"] <= 3600:
+            raise ValueError
+        result["active_time_threshold_percent"] = float(result["active_time_threshold_percent"])
+        if not 0 < result["active_time_threshold_percent"] <= 100:
+            raise ValueError
+        result["active_time_sample_seconds"] = int(result["active_time_sample_seconds"])
+        result["prestart_recheck_seconds"] = int(result["prestart_recheck_seconds"])
+        if result["active_time_sample_seconds"] < 1 or result["prestart_recheck_seconds"] < 1:
+            raise ValueError
+        for key in ("schedule_time", "window_start", "window_end"):
+            _parse_clock(result[key])
+    except (TypeError, ValueError, KeyError) as exc:
+        raise DiskCloneConfigError("Configuracao de clone invalida; a execucao foi bloqueada.") from exc
+    for key in ("enabled", "require_unlocked_interactive_session", "keep_target_offline", "allow_automatic_retry_same_night", "allow_real_provider_execution"):
+        result[key] = _safe_bool(result[key])
+    if _parse_clock(result["window_start"]) >= _parse_clock(result["window_end"]):
+        raise DiskCloneConfigError("A janela de clone deve ter inicio antes do fim.")
+    if not _clean(result["provider"]):
+        raise DiskCloneConfigError("Nenhum provedor de clone configurado.")
+    return result
+
+
+def _parse_clock(value: Any) -> time_type:
+    match = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", _clean(value))
+    if not match:
+        raise ValueError(f"invalid clock: {value}")
+    return time_type(int(match.group(1)), int(match.group(2)))
+
+
+def within_clone_window(now: datetime, start: str = "03:00", end: str = "04:00") -> bool:
+    return _parse_clock(start) <= now.timetz().replace(tzinfo=None) < _parse_clock(end)
+
+
+def parse_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def next_due_at(last_verified_at: Any, interval_days: int, now: datetime | None = None) -> datetime:
+    last = parse_timestamp(last_verified_at)
+    if last is None:
+        return (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return last + timedelta(days=int(interval_days))
+
+
+def clone_is_due(last_verified_at: Any, interval_days: int, now: datetime | None = None) -> bool:
+    return next_due_at(last_verified_at, interval_days, now) <= (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+
+
+class DiskInventory(Protocol):
+    def list_disks(self) -> list[DiskIdentity]: ...
+
+
+class FakeDiskInventory:
+    def __init__(self, disks: Iterable[DiskIdentity] = ()):
+        self.disks = list(disks)
+
+    def list_disks(self) -> list[DiskIdentity]:
+        return list(self.disks)
+
+    def replace(self, disks: Iterable[DiskIdentity]) -> None:
+        self.disks = list(disks)
+
+
+class WindowsDiskInventory:
+    def list_disks(self) -> list[DiskIdentity]:
+        if os.name != "nt":
+            raise DiskCloneBlocked("O inventario de discos so esta disponivel no Windows.")
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$rows = foreach ($disk in Get-Disk) {
+  $parts = @(Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | ForEach-Object {
+    $vol = Get-Volume -Partition $_ -ErrorAction SilentlyContinue
+    [pscustomobject]@{number=$_.PartitionNumber; kind=$_.Type; size_bytes=$_.Size; gpt_type=$_.GptType; filesystem=if($vol){$vol.FileSystem}else{''}; is_system=$_.IsActive; is_boot=$_.IsActive; mount_point=if($vol){$vol.Path}else{''}}
+  })
+  [pscustomobject]@{number=$disk.Number; model=$disk.FriendlyName; serial=$disk.SerialNumber; storage_unique_id=$disk.UniqueId; bus_type=$disk.BusType; media_type=$disk.MediaType; size_bytes=$disk.Size; logical_sector_size=$disk.LogicalSectorSize; physical_sector_size=$disk.PhysicalSectorSize; partition_style=$disk.PartitionStyle; online=(-not $disk.IsOffline); read_only=$disk.IsReadOnly; is_system=$disk.IsSystem; is_boot=$disk.IsBoot; is_pagefile=$disk.IsPagefile; is_crash_dump=$disk.IsCrashDump; is_clustered=$disk.IsClustered; partitions=$parts}
+}
+$rows | ConvertTo-Json -Depth 8 -Compress
+"""
+        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], text=True, capture_output=True, check=False)
+        if result.returncode:
+            raise DiskCloneBlocked("Nao foi possivel obter inventario estruturado dos discos.")
+        try:
+            payload = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise DiskCloneBlocked("Inventario de discos retornou JSON invalido.") from exc
+        if isinstance(payload, dict):
+            payload = [payload]
+        return [DiskIdentity.from_dict(item) for item in payload]
+
+
+def find_matching_disk(disks: Sequence[DiskIdentity], enrolled: DiskIdentity, *, require_strong: bool = True) -> DiskIdentity | None:
+    matches = [disk for disk in disks if disk.matches(enrolled, require_strong=require_strong)]
+    return matches[0] if len(matches) == 1 else None
+
+
+class DiskLifecycle(Protocol):
+    def set_online(self, disk: DiskIdentity) -> None: ...
+    def set_offline(self, disk: DiskIdentity) -> None: ...
+
+
+class FakeDiskLifecycle:
+    def __init__(self):
+        self.online_calls: list[int | None] = []
+        self.offline_calls: list[int | None] = []
+
+    def set_online(self, disk: DiskIdentity) -> None:
+        self.online_calls.append(disk.number)
+
+    def set_offline(self, disk: DiskIdentity) -> None:
+        self.offline_calls.append(disk.number)
+
+
+class WindowsDiskLifecycle:
+    def _set(self, disk: DiskIdentity, offline: bool) -> None:
+        if os.name != "nt" or disk.number is None:
+            raise DiskCloneBlocked("Nao foi possivel identificar o disco fisico para alterar seu estado.")
+        flag = "$true" if offline else "$false"
+        script = f"Set-Disk -Number {int(disk.number)} -IsOffline {flag}"
+        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], text=True, capture_output=True, check=False)
+        if result.returncode:
+            raise DiskCloneError("Falha ao alterar o estado offline do destino.")
+
+    def set_online(self, disk: DiskIdentity) -> None:
+        self._set(disk, False)
+
+    def set_offline(self, disk: DiskIdentity) -> None:
+        self._set(disk, True)
+
+
+@dataclass(frozen=True)
+class ProviderDiscovery:
+    name: str
+    executable: str = ""
+    product: str = ""
+    version: str = ""
+    edition: str = ""
+    architecture: str = ""
+    present: bool = False
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    supported: bool = False
+    whole_disk_clone: bool = False
+    system_disk_clone: bool = False
+    live_clone: bool = False
+    sector_by_sector: bool = False
+    intelligent_clone: bool = False
+    stable_disk_selector: bool = False
+    progress: str = "unavailable"
+    safe_cancellation: bool = False
+    supported_partition_styles: tuple[str, ...] = ()
+    supported_bitlocker_states: tuple[str, ...] = ()
+    destination_size_rule: str = "unknown"
+    blocker: str = ""
+
+
+@dataclass(frozen=True)
+class ClonePlan:
+    provider: str
+    mode: str
+    source_selector: str
+    target_selector: str
+    source_size_bytes: int
+    target_size_bytes: int
+    required_partitions: tuple[str, ...] = ()
+    size_rule: str = ""
+    arguments: tuple[str, ...] = ()
+
+
+@dataclass
+class ProviderProcess:
+    pid: int = 0
+    started_at: str = field(default_factory=utc_now)
+    handle: Any = None
+
+
+@dataclass(frozen=True)
+class ProviderResult:
+    success: bool
+    exit_code: int | None = None
+    reason: str = ""
+    progress_type: str = "unavailable"
+    copied_bytes: int | None = None
+
+
+class CloneProvider(Protocol):
+    def discover(self) -> ProviderDiscovery: ...
+    def validate_capabilities(self) -> ProviderCapabilities: ...
+    def build_plan(self, source: DiskIdentity, target: DiskIdentity) -> ClonePlan: ...
+    def start(self, plan: ClonePlan, event_sink: Callable[[dict[str, Any]], None] | None = None) -> ProviderProcess: ...
+    def request_cancel(self, process: ProviderProcess) -> bool: ...
+    def inspect_result(self, process: ProviderProcess) -> ProviderResult: ...
+
+
+class UnsupportedProvider:
+    def __init__(self, name: str = "unsupported", detail: str = "Nenhum provedor seguro validado."):
+        self.name = name
+        self.detail = detail
+
+    def discover(self) -> ProviderDiscovery:
+        return ProviderDiscovery(self.name, present=False, detail=self.detail)
+
+    def validate_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(blocker=self.detail)
+
+    def build_plan(self, source: DiskIdentity, target: DiskIdentity) -> ClonePlan:
+        raise DiskCloneBlocked(self.detail, "blocked_provider")
+
+    def start(self, plan: ClonePlan, event_sink: Callable[[dict[str, Any]], None] | None = None) -> ProviderProcess:
+        raise DiskCloneBlocked(self.detail, "blocked_provider")
+
+    def request_cancel(self, process: ProviderProcess) -> bool:
+        return False
+
+    def inspect_result(self, process: ProviderProcess) -> ProviderResult:
+        return ProviderResult(False, reason=self.detail)
+
+
+def _find_aomei_executable() -> Path | None:
+    candidates = [
+        shutil.which("AMBackup.exe"),
+        r"C:\Program Files\AOMEI Backupper\AMBackup.exe",
+        r"C:\Program Files (x86)\AOMEI Backupper\AMBackup.exe",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return Path(candidate)
+    return None
+
+
+def _file_product_version(path: Path) -> str:
+    if os.name != "nt":
+        return ""
+    escaped = str(path).replace("'", "''")
+    result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", f"(Get-Item -LiteralPath '{escaped}').VersionInfo.ProductVersion"], text=True, capture_output=True, check=False)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+class AOMEIProvider(UnsupportedProvider):
+    """AOMEI adapter with a read-only discovery path and fail-closed execution."""
+
+    def __init__(self):
+        super().__init__("aomei", "AOMEI Backupper nao foi validado nesta maquina.")
+        self._discovery: ProviderDiscovery | None = None
+        self._capabilities: ProviderCapabilities | None = None
+
+    def discover(self) -> ProviderDiscovery:
+        executable = _find_aomei_executable()
+        if not executable:
+            self._discovery = ProviderDiscovery("aomei", detail="AMBackup.exe ausente; nenhum clone real sera iniciado.")
+        else:
+            version = _file_product_version(executable)
+            self._discovery = ProviderDiscovery("aomei", str(executable), "AOMEI Backupper", version, present=True, detail="Executavel localizado; edicao ainda nao validada.")
+        return self._discovery
+
+    def validate_capabilities(self) -> ProviderCapabilities:
+        discovery = self._discovery or self.discover()
+        if not discovery.present:
+            self._capabilities = ProviderCapabilities(blocker=discovery.detail)
+        else:
+            # The vendor documents /c, /t, /s, /d and /o, but this machine has
+            # no installed edition to validate.  Never infer support from the
+            # executable existing alone.
+            self._capabilities = ProviderCapabilities(
+                blocker="Edicao AOMEI e contrato local de execucao ainda nao foram validados; use simulacao.",
+                whole_disk_clone=True,
+                system_disk_clone=True,
+                live_clone=True,
+                sector_by_sector=True,
+                intelligent_clone=True,
+                stable_disk_selector=False,
+                progress="unavailable",
+                safe_cancellation=False,
+                supported_partition_styles=("GPT", "MBR"),
+                supported_bitlocker_states=("off", "on", "unknown"),
+                destination_size_rule="target_bytes >= source_bytes",
+            )
+        return self._capabilities
+
+    def build_plan(self, source: DiskIdentity, target: DiskIdentity) -> ClonePlan:
+        capabilities = self.validate_capabilities()
+        if not capabilities.supported:
+            raise DiskCloneBlocked(capabilities.blocker, "blocked_provider")
+        return _build_plan("aomei", capabilities, source, target, "disk_intelligent")
+
+    def start(self, plan: ClonePlan, event_sink: Callable[[dict[str, Any]], None] | None = None) -> ProviderProcess:
+        raise DiskCloneBlocked("Execucao AOMEI permanece desabilitada ate validacao local explicita.", "blocked_provider")
+
+
+class DiskGeniusProvider(UnsupportedProvider):
+    def __init__(self):
+        super().__init__("diskgenius", "DiskGenius nao oferece um contrato CLI nao interativo validado para selecionar discos com seguranca.")
+
+    def discover(self) -> ProviderDiscovery:
+        path = Path(r"C:\Program Files\DiskGenius\DiskGenius.exe")
+        if path.is_file():
+            return ProviderDiscovery("diskgenius", str(path), "DiskGenius", _file_product_version(path), edition="unknown", present=True, detail=self.detail)
+        return super().discover()
+
+
+def _build_plan(provider: str, capabilities: ProviderCapabilities, source: DiskIdentity, target: DiskIdentity, mode: str) -> ClonePlan:
+    if source.number is None or target.number is None:
+        raise DiskCloneBlocked("O provedor exige mapeamento fisico atual; numero de disco ausente.", "blocked_identity")
+    if source.number == target.number:
+        raise DiskCloneBlocked("Origem e destino sao o mesmo disco fisico.", "blocked_identity")
+    if source.partition_style and capabilities.supported_partition_styles and source.partition_style.upper() not in capabilities.supported_partition_styles:
+        raise DiskCloneBlocked("Estilo de particao da origem nao suportado pelo provedor.", "blocked_provider")
+    if target.size_bytes < source.size_bytes:
+        raise DiskCloneBlocked("O destino e menor que a origem em bytes exatos.", "blocked_size")
+    required = tuple(part.kind for part in source.partitions if part.kind)
+    return ClonePlan(
+        provider=provider,
+        mode=mode,
+        source_selector=str(source.number),
+        target_selector=str(target.number),
+        source_size_bytes=source.size_bytes,
+        target_size_bytes=target.size_bytes,
+        required_partitions=required,
+        size_rule=capabilities.destination_size_rule or "target_bytes >= source_bytes",
+        arguments=("/c", "/t", "disk", "/s", str(source.number), "/d", str(target.number), "/a", "/o", "yes"),
+    )
+
+
+class FakeProvider:
+    def __init__(self, result: ProviderResult | None = None, capabilities: ProviderCapabilities | None = None):
+        self.result = result or ProviderResult(True, exit_code=0, progress_type="exact", copied_bytes=0)
+        self.capabilities = capabilities or ProviderCapabilities(
+            supported=True,
+            whole_disk_clone=True,
+            system_disk_clone=True,
+            live_clone=True,
+            sector_by_sector=True,
+            intelligent_clone=True,
+            stable_disk_selector=True,
+            progress="exact",
+            safe_cancellation=True,
+            supported_partition_styles=("GPT", "MBR"),
+            supported_bitlocker_states=("off", "on", "unknown"),
+            destination_size_rule="target_bytes >= source_bytes",
+        )
+        self.started = 0
+        self.plans: list[ClonePlan] = []
+
+    def discover(self) -> ProviderDiscovery:
+        return ProviderDiscovery("fake", "fake-provider", "Fake Provider", "1", edition="test", present=True, detail="somente simulacao/teste")
+
+    def validate_capabilities(self) -> ProviderCapabilities:
+        return self.capabilities
+
+    def build_plan(self, source: DiskIdentity, target: DiskIdentity) -> ClonePlan:
+        return _build_plan("fake", self.capabilities, source, target, "disk_intelligent")
+
+    def start(self, plan: ClonePlan, event_sink: Callable[[dict[str, Any]], None] | None = None) -> ProviderProcess:
+        self.started += 1
+        self.plans.append(plan)
+        if event_sink:
+            event_sink({"progress_type": self.result.progress_type, "percent": 50, "copied_bytes": self.result.copied_bytes or 0, "phase": "cloning"})
+        return ProviderProcess(pid=0, handle=self.result)
+
+    def request_cancel(self, process: ProviderProcess) -> bool:
+        return self.capabilities.safe_cancellation
+
+    def inspect_result(self, process: ProviderProcess) -> ProviderResult:
+        return self.result
+
+
+@dataclass(frozen=True)
+class Enrollment:
+    source: DiskIdentity
+    target: DiskIdentity
+    provider: str
+    mode: str
+    created_at: str
+    schema: int = 1
+
+    def payload(self) -> dict[str, Any]:
+        return {"schema": self.schema, "source": self.source.to_dict(), "target": self.target.to_dict(), "provider": self.provider, "mode": self.mode, "created_at": self.created_at}
+
+
+class EnrollmentStore:
+    def __init__(self, root: Path):
+        self.root = Path(root)
+        self.p = paths(self.root)
+        self.manifest_path = self.p.config / ENROLLMENT_FILE
+        self.secret_path = self.p.config / ENROLLMENT_SECRET_FILE
+
+    def _secret(self, create: bool = False) -> bytes | None:
+        if self.secret_path.exists():
+            return self.secret_path.read_bytes()
+        if not create:
+            return None
+        secret = os.urandom(32)
+        atomic_write_bytes(self.secret_path, secret)
+        try:
+            self.secret_path.chmod(0o600)
+        except OSError:
+            pass
+        return secret
+
+    def save(self, source: DiskIdentity, target: DiskIdentity, provider: str, mode: str) -> Enrollment:
+        if not _clean(provider) or not _clean(mode):
+            raise DiskCloneBlocked("Inscricao sem provedor ou modo validado.", "blocked_provider")
+        if source.identity_strength() != "strong" or target.identity_strength() != "strong":
+            raise DiskCloneBlocked("A identidade da origem ou do destino e fraca ou ambigua; inscricao recusada.", "blocked_identity")
+        if source.matches(target, require_strong=False):
+            raise DiskCloneBlocked("Origem e destino nao podem ser o mesmo disco.", "blocked_identity")
+        enrollment = Enrollment(source, target, provider, mode, utc_now())
+        secret = self._secret(create=True)
+        assert secret is not None
+        payload = enrollment.payload()
+        signed = {"payload": payload, "hmac": hmac.new(secret, canonical_json(payload), hashlib.sha256).hexdigest()}
+        atomic_write_text(self.manifest_path, json.dumps(signed, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            self.manifest_path.chmod(0o600)
+        except OSError:
+            pass
+        return enrollment
+
+    def load(self) -> Enrollment | None:
+        if not self.manifest_path.exists():
+            return None
+        secret = self._secret()
+        if not secret:
+            raise DiskCloneBlocked("Segredo local de inscricao ausente.", "blocked_identity")
+        try:
+            signed = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+            payload = signed["payload"]
+            expected = hmac.new(secret, canonical_json(payload), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(str(signed.get("hmac", "")), expected):
+                raise DiskCloneBlocked("Manifesto de inscricao adulterado.", "blocked_identity")
+            return Enrollment(DiskIdentity.from_dict(payload["source"]), DiskIdentity.from_dict(payload["target"]), _clean(payload["provider"]), _clean(payload["mode"]), _clean(payload["created_at"]), _safe_int(payload.get("schema"), 1))
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise DiskCloneBlocked("Manifesto de inscricao invalido.", "blocked_identity") from exc
+
+
+@dataclass(frozen=True)
+class ActivitySample:
+    average_percent: float
+    maximum_percent: float
+    sample_count: int
+    duration_seconds: int
+    mapped_to_source: bool = True
+    reason: str = ""
+
+
+class ActivitySampler(Protocol):
+    def sample(self, source: DiskIdentity, duration_seconds: int) -> ActivitySample: ...
+    def recheck(self, source: DiskIdentity, duration_seconds: int) -> ActivitySample: ...
+
+
+class FakeActivitySampler:
+    def __init__(self, sample: ActivitySample | None = None):
+        self.sample_value = sample or ActivitySample(0, 0, 1, 0)
+
+    def sample(self, source: DiskIdentity, duration_seconds: int) -> ActivitySample:
+        return self.sample_value
+
+    def recheck(self, source: DiskIdentity, duration_seconds: int) -> ActivitySample:
+        return self.sample_value
+
+
+class WindowsActivitySampler:
+    def __init__(self, sleep: Callable[[float], None] = time.sleep):
+        self.sleep = sleep
+
+    def _read(self, source: DiskIdentity) -> float:
+        if os.name != "nt" or source.number is None:
+            raise DiskCloneBlocked("Nao foi possivel mapear o contador de atividade ao disco inscrito.", "blocked_identity")
+        # The instance name is checked against the physical disk number.  An
+        # ambiguous or missing mapping is a block, never a guessed _Total.
+        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Counter '\\PhysicalDisk(*)\\% Disk Time' | Select-Object -ExpandProperty CounterSamples | Select-Object InstanceName,CookedValue | ConvertTo-Json -Compress"], text=True, capture_output=True, check=False)
+        if result.returncode:
+            raise DiskCloneBlocked("Falha ao consultar atividade do disco de origem.", "blocked_identity")
+        try:
+            rows = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise DiskCloneBlocked("Contador de atividade retornou dados invalidos.", "blocked_identity") from exc
+        if isinstance(rows, dict):
+            rows = [rows]
+        matches = [row for row in rows if re.search(rf"(?:^|\s){int(source.number)}(?:\s|$)", _clean(row.get("InstanceName")))]
+        if len(matches) != 1:
+            raise DiskCloneBlocked("Mapeamento do contador de atividade e ambiguo.", "blocked_identity")
+        value = float(matches[0].get("CookedValue", -1))
+        if not 0 <= value <= 100:
+            raise DiskCloneBlocked("Valor de atividade do disco invalido.", "blocked_identity")
+        return value
+
+    def _sample(self, source: DiskIdentity, duration_seconds: int) -> ActivitySample:
+        values: list[float] = []
+        count = max(1, min(int(duration_seconds), 300))
+        for index in range(count):
+            values.append(self._read(source))
+            if index + 1 < count:
+                self.sleep(1)
+        return ActivitySample(sum(values) / len(values), max(values), len(values), count)
+
+    def sample(self, source: DiskIdentity, duration_seconds: int) -> ActivitySample:
+        return self._sample(source, duration_seconds)
+
+    def recheck(self, source: DiskIdentity, duration_seconds: int) -> ActivitySample:
+        return self._sample(source, max(1, min(duration_seconds, 20)))
+
+
+class StructuralVerifier(Protocol):
+    def verify(self, source: DiskIdentity, target: DiskIdentity) -> "VerificationResult": ...
+
+
+@dataclass(frozen=True)
+class VerificationResult:
+    structurally_verified: bool
+    evidence: str = ""
+    boot_tested: bool = False
+
+
+class FakeStructuralVerifier:
+    def __init__(self, result: VerificationResult | None = None):
+        self.result = result or VerificationResult(True, "fake partition table matched; boot test not performed")
+
+    def verify(self, source: DiskIdentity, target: DiskIdentity) -> VerificationResult:
+        return self.result
+
+
+class WindowsStructuralVerifier:
+    def verify(self, source: DiskIdentity, target: DiskIdentity) -> VerificationResult:
+        source_kinds = {_normal(part.kind) for part in source.partitions}
+        target_kinds = {_normal(part.kind) for part in target.partitions}
+        if source.partition_style and _normal(source.partition_style) != _normal(target.partition_style):
+            return VerificationResult(False, "estilo de particao diferente")
+        for required in ("efi", "system", "windows"):
+            if required in source_kinds and required not in target_kinds:
+                return VerificationResult(False, f"particao obrigatoria ausente: {required}")
+        return VerificationResult(True, "layout estrutural conferido; boot test nao realizado")
+
+
+class CloneLock:
+    def __init__(self, path: Path, stale_after: timedelta = timedelta(hours=12)):
+        self.path = Path(path)
+        self.stale_after = stale_after
+        self.token = uuid.uuid4().hex
+        self.acquired = False
+
+    def acquire(self, run_id: str) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists():
+            if lock_is_stale(self.path, self.stale_after) and not _pid_is_live(self.path):
+                self.path.unlink(missing_ok=True)
+            else:
+                raise RuntimeError("Outro clone ou operacao de importacao esta em andamento.")
+        payload = {"token": self.token, "run_id": run_id, "pid": os.getpid(), "started_at": utc_now()}
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as exc:
+            raise RuntimeError("Outro clone esta em andamento.") from exc
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False))
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            self.path.unlink(missing_ok=True)
+            raise
+        self.acquired = True
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if hmac.compare_digest(str(payload.get("token", "")), self.token):
+            self.path.unlink(missing_ok=True)
+        self.acquired = False
+
+    def __enter__(self):
+        raise RuntimeError("CloneLock exige acquire(run_id) para vincular o proprietario.")
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
+
+
+def _pid_is_live(path: Path) -> bool:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        pid = int(payload.get("pid", 0))
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def _process_is_live(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def windows_interactive_session_available() -> bool:
+    """Return true only for an active console desktop that can display a warning."""
+    if os.name != "nt":
+        return False
+    try:
+        session_id = ctypes.windll.kernel32.WTSGetActiveConsoleSessionId()
+        if session_id == 0xFFFFFFFF:
+            return False
+        # OpenInputDesktop fails while Windows is presenting the secure lock
+        # desktop, which is the case we must not silently bypass.
+        handle = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0001)
+        if not handle:
+            return False
+        ctypes.windll.user32.CloseDesktop(handle)
+        return True
+    except (AttributeError, OSError):
+        return False
+
+
+def protected_path_conflicts(target: DiskIdentity, protected_paths: Iterable[Path | str]) -> list[str]:
+    mounts = [Path(item).anchor.casefold() for item in target.mount_points if Path(item).anchor]
+    conflicts: list[str] = []
+    for raw_path in protected_paths:
+        value = Path(raw_path)
+        anchor = value.anchor.casefold()
+        if anchor and anchor in mounts:
+            conflicts.append(str(value))
+    return conflicts
+
+
+def _source_paths(p: VaultPaths, cfg: dict[str, Any]) -> list[Path]:
+    values = [p.root, p.db, p.logs, p.config, p.reports, p.inbox]
+    source_cfg = cfg.get("source_sync", {})
+    values.extend(Path(item) for item in source_cfg.get("google_takeout_sources", []) if _clean(item))
+    values.extend(Path(item) for item in cfg.get("disk_clone", {}).get("protected_paths", []) if _clean(item))
+    return values
+
+
+def _provider_for_config(config: dict[str, Any]) -> CloneProvider:
+    name = _normal(config.get("provider", "auto"))
+    if name == "fake":
+        return FakeProvider()
+    if name == "aomei":
+        return AOMEIProvider()
+    if name == "diskgenius":
+        return DiskGeniusProvider()
+    aomei = AOMEIProvider()
+    if aomei.discover().present:
+        return aomei
+    return DiskGeniusProvider()
+
+
+@dataclass(frozen=True)
+class PreflightResult:
+    ok: bool
+    state: str
+    reason: str
+    source: DiskIdentity | None = None
+    target: DiskIdentity | None = None
+    plan: ClonePlan | None = None
+    discovery: ProviderDiscovery | None = None
+    capabilities: ProviderCapabilities | None = None
+    activity: ActivitySample | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+class CloneService:
+    def __init__(
+        self,
+        p: VaultPaths,
+        *,
+        inventory: DiskInventory | None = None,
+        provider: CloneProvider | None = None,
+        lifecycle: DiskLifecycle | None = None,
+        sampler: ActivitySampler | None = None,
+        verifier: StructuralVerifier | None = None,
+        clock: Callable[[], datetime] | None = None,
+        is_admin: Callable[[], bool] | None = None,
+        session_available: Callable[[], bool] | None = None,
+    ):
+        self.p = p
+        self.config = validate_disk_clone_config(load_config(p.root).get("disk_clone", {}))
+        self.inventory = inventory or WindowsDiskInventory()
+        self.provider = provider or _provider_for_config(self.config)
+        self.lifecycle = lifecycle or WindowsDiskLifecycle()
+        self.sampler = sampler or WindowsActivitySampler()
+        self.verifier = verifier or WindowsStructuralVerifier()
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.is_admin = is_admin or (lambda: bool(ctypes.windll.shell32.IsUserAnAdmin()) if os.name == "nt" else False)
+        self.session_available = session_available or windows_interactive_session_available
+        self.enrollment = EnrollmentStore(p.root)
+
+    @property
+    def clone_lock_path(self) -> Path:
+        return self.p.logs / "localvault_disk_clone.lock"
+
+    def _profile(self) -> dict[str, Any] | None:
+        with db.connect(self.p.db) as conn:
+            row = conn.execute("SELECT * FROM disk_clone_profile WHERE id=1").fetchone()
+        return dict(row) if row else None
+
+    def status(self) -> dict[str, Any]:
+        profile = self._profile()
+        try:
+            enrollment = self.enrollment.load()
+            enrollment_status = "valido" if enrollment else "ausente"
+        except DiskCloneBlocked as exc:
+            enrollment, enrollment_status = None, f"bloqueado: {exc.reason}"
+        discovery = self.provider.discover()
+        capabilities = self.provider.validate_capabilities()
+        last_verified = profile.get("last_verified_at") if profile else None
+        due = next_due_at(last_verified, self.config["interval_days"], self.clock())
+        return {
+            "enabled": self.config["enabled"],
+            "provider": discovery.name,
+            "provider_present": discovery.present,
+            "provider_version": discovery.version,
+            "provider_edition": discovery.edition or "desconhecida",
+            "provider_supported": capabilities.supported,
+            "provider_blocker": capabilities.blocker or discovery.detail,
+            "enrollment": enrollment_status,
+            "source": enrollment.source.masked_label if enrollment else "nao inscrito",
+            "target": enrollment.target.masked_label if enrollment else "nao inscrito",
+            "target_offline_expected": self.config["keep_target_offline"],
+            "last_verified_at": last_verified,
+            "next_due_at": due.isoformat(),
+            "interval_days": self.config["interval_days"],
+            "current_state": _latest_clone_state(self.p.db),
+            "progress": _latest_clone_progress(self.p.db),
+            "recent_runs": _clone_runs(self.p.db),
+            "boot_test": "nao testado manualmente",
+        }
+
+    def reconcile_interrupted(self) -> int:
+        """Mark abandoned runs interrupted; never infer success from partial data."""
+        cutoff = self.clock().astimezone(timezone.utc) - timedelta(hours=12)
+        placeholders = ",".join("?" for _ in TERMINAL_STATES)
+        with db.connect(self.p.db) as conn:
+            rows = conn.execute(f"SELECT run_id,provider_pid,started_at FROM disk_clone_runs WHERE state NOT IN ({placeholders})", tuple(TERMINAL_STATES)).fetchall()
+        changed = 0
+        for row in rows:
+            started = parse_timestamp(row["started_at"])
+            if started and started > cutoff:
+                continue
+            if _process_is_live(_safe_int(row["provider_pid"])):
+                continue
+            _transition(self.p.db, row["run_id"], "interrupted", "estado do provedor desconhecido apos reinicio; sucesso nao inferido")
+            _finish_clone_run(self.p.db, row["run_id"], "interrupted", "estado do provedor desconhecido apos reinicio")
+            changed += 1
+        return changed
+
+    def request_cancel(self, run_id: str, process: ProviderProcess) -> bool:
+        """Cancel only through a provider-documented safe mechanism."""
+        capabilities = self.provider.validate_capabilities()
+        if not capabilities.safe_cancellation:
+            return False
+        accepted = bool(self.provider.request_cancel(process))
+        if accepted:
+            _transition(self.p.db, run_id, "cancel_requested", "cancelamento seguro solicitado ao provedor")
+        return accepted
+
+    def preflight(self, *, perform_activity: bool = False, require_enabled: bool = True) -> PreflightResult:
+        if require_enabled and not self.config["enabled"]:
+            return PreflightResult(False, "blocked_configuration", "A clonagem esta desativada por padrao.")
+        now = self.clock().astimezone(timezone.utc)
+        if os.name != "nt" and not isinstance(self.inventory, FakeDiskInventory):
+            return PreflightResult(False, "blocked_configuration", "A clonagem automatica e exclusiva do Windows.")
+        if not within_clone_window(now, self.config["window_start"], self.config["window_end"]):
+            return PreflightResult(False, "skipped_outside_window", "Fora da janela local 03:00-04:00; nenhuma midia foi tocada.")
+        if not self.is_admin():
+            return PreflightResult(False, "blocked_identity", "Privilegios administrativos sao obrigatorios.")
+        if self.config["require_unlocked_interactive_session"] and not self.session_available():
+            return PreflightResult(False, "skipped_no_interactive_session", "Nao ha sessao interativa desbloqueada visivel.")
+        backup_lock_path = self.p.logs / "localvault_backup.lock"
+        if backup_lock_path.exists() and not lock_is_stale(backup_lock_path):
+            return PreflightResult(False, "blocked_identity", "Outro backup/importacao protegido esta em andamento.")
+        profile = self._profile()
+        if profile and not clone_is_due(profile.get("last_verified_at"), self.config["interval_days"], now):
+            return PreflightResult(False, "skipped_not_due", "Nenhum clone esta devido.")
+        if not profile:
+            # A first run is due after enrollment; absence of enrollment is a
+            # distinct identity block below.
+            pass
+        if Path(self.clone_lock_path).exists() and not lock_is_stale(self.clone_lock_path):
+            return PreflightResult(False, "blocked_identity", "Outro clone esta em andamento.")
+        try:
+            enrollment = self.enrollment.load()
+        except DiskCloneBlocked as exc:
+            return PreflightResult(False, exc.state, exc.reason)
+        if not enrollment:
+            return PreflightResult(False, "blocked_identity", "Nenhum destino foi inscrito localmente.")
+        discovery = self.provider.discover()
+        capabilities = self.provider.validate_capabilities()
+        if not capabilities.supported:
+            return PreflightResult(False, "blocked_provider", capabilities.blocker or discovery.detail, discovery=discovery, capabilities=capabilities)
+        try:
+            disks = self.inventory.list_disks()
+        except DiskCloneBlocked as exc:
+            return PreflightResult(False, exc.state, exc.reason, discovery=discovery, capabilities=capabilities)
+        source_candidates = [disk for disk in disks if disk.is_system or disk.is_boot]
+        source = find_matching_disk(source_candidates, enrollment.source)
+        if not source:
+            return PreflightResult(False, "blocked_identity", "O disco de origem inscrito nao e o atual disco de sistema.", discovery=discovery, capabilities=capabilities)
+        target = find_matching_disk(disks, enrollment.target)
+        if not target:
+            return PreflightResult(False, "skipped_target_missing", "O destino inscrito nao foi encontrado.", source, discovery=discovery, capabilities=capabilities)
+        if source.number == target.number:
+            return PreflightResult(False, "blocked_identity", "Origem e destino sao o mesmo disco.", source, target, discovery=discovery, capabilities=capabilities)
+        conflicts = protected_path_conflicts(target, _source_paths(self.p, load_config(self.p.root)))
+        if conflicts:
+            return PreflightResult(False, "blocked_protected_path", "O destino contem caminho protegido do L-vault.", source, target, discovery=discovery, capabilities=capabilities, details={"conflicts": conflicts})
+        if target.size_bytes < source.size_bytes:
+            return PreflightResult(False, "blocked_size", "O destino e menor que a origem em bytes exatos.", source, target, discovery=discovery, capabilities=capabilities)
+        if capabilities.supported_bitlocker_states and _normal(source.bitlocker_state) not in {_normal(item) for item in capabilities.supported_bitlocker_states}:
+            return PreflightResult(False, "blocked_provider", "O estado BitLocker da origem nao e suportado pelo provedor validado.", source, target, discovery=discovery, capabilities=capabilities)
+        source_kinds = {_normal(part.kind) for part in source.partitions}
+        if source.is_system and _normal(source.partition_style) == "gpt" and "efi" not in source_kinds:
+            return PreflightResult(False, "blocked_provider", "A particao EFI obrigatoria nao foi identificada.", source, target, discovery=discovery, capabilities=capabilities)
+        if source.is_system and not ({"windows", "basic data", "basic_data"} & source_kinds):
+            return PreflightResult(False, "blocked_provider", "A particao Windows obrigatoria nao foi identificada.", source, target, discovery=discovery, capabilities=capabilities)
+        if enrollment.provider != discovery.name or enrollment.mode != "disk_intelligent":
+            return PreflightResult(False, "blocked_provider", "O provedor ou modo atual nao corresponde ao manifesto inscrito.", source, target, discovery=discovery, capabilities=capabilities)
+        try:
+            plan = self.provider.build_plan(source, target)
+        except DiskCloneBlocked as exc:
+            return PreflightResult(False, exc.state, exc.reason, source, target, discovery, capabilities)
+        activity = None
+        if perform_activity:
+            try:
+                activity = self.sampler.sample(source, self.config["active_time_sample_seconds"])
+            except DiskCloneBlocked as exc:
+                return PreflightResult(False, exc.state, exc.reason, source, target, plan, discovery, capabilities)
+            if not activity.mapped_to_source or activity.sample_count < 1:
+                return PreflightResult(False, "blocked_identity", "Amostragem de atividade insuficiente ou ambigua.", source, target, plan, discovery, capabilities, activity)
+            if activity.average_percent >= self.config["active_time_threshold_percent"]:
+                return PreflightResult(False, "skipped_high_source_activity", "Atividade media da origem esta acima do limite; nova tentativa somente na proxima noite.", source, target, plan, discovery, capabilities, activity)
+        return PreflightResult(True, "preflight", "Todas as validacoes nao destrutivas passaram.", source, target, plan, discovery, capabilities, activity)
+
+    def execute(self, *, trigger: str = "scheduled", countdown: Callable[[int], str] | None = None, simulation: bool = False) -> dict[str, Any]:
+        self.reconcile_interrupted()
+        run_id = uuid.uuid4().hex
+        _create_clone_run(self.p.db, run_id, trigger, self.clock())
+        _transition(self.p.db, run_id, "preflight", "inicio")
+        if countdown is None and not simulation:
+            reason = "A janela nativa de cinco minutos nao foi fornecida; execucao destrutiva bloqueada."
+            _transition(self.p.db, run_id, "blocked_configuration", reason)
+            _finish_clone_run(self.p.db, run_id, "blocked_configuration", reason)
+            return {"run_id": run_id, "state": "blocked_configuration", "reason": reason}
+        try:
+            result = self.preflight(perform_activity=True, require_enabled=not simulation)
+        except DiskCloneBlocked as exc:
+            result = PreflightResult(False, exc.state, exc.reason)
+        if not result.ok:
+            _transition(self.p.db, run_id, result.state, result.reason)
+            _finish_clone_run(self.p.db, run_id, result.state, result.reason, result.activity)
+            return {"run_id": run_id, "state": result.state, "reason": result.reason}
+        _save_run_metadata(self.p.db, run_id, result)
+        activity = result.activity
+        _transition(self.p.db, run_id, "sampling_activity", "amostragem concluida")
+        _save_activity(self.p.db, run_id, activity)
+        if countdown:
+            _transition(self.p.db, run_id, "countdown", "aviso destrutivo exibido")
+            decision = countdown(self.config["countdown_seconds"])
+            with db.connect(self.p.db) as conn:
+                conn.execute("UPDATE disk_clone_runs SET countdown_outcome=? WHERE run_id=?", (decision, run_id))
+            if decision == "cancel":
+                _transition(self.p.db, run_id, "cancelled_before_start", "cancelado antes do provedor")
+                _finish_clone_run(self.p.db, run_id, "cancelled_before_start", "cancelado antes do provedor", activity)
+                return {"run_id": run_id, "state": "cancelled_before_start"}
+        _transition(self.p.db, run_id, "prestart_revalidation", "revalidacao final")
+        try:
+            recheck = self.sampler.recheck(result.source, self.config["prestart_recheck_seconds"]) if result.source else None
+            if recheck and (not recheck.mapped_to_source or recheck.average_percent >= self.config["active_time_threshold_percent"]):
+                raise DiskCloneBlocked("A rechecagem de atividade bloqueou o inicio.", "skipped_high_source_activity")
+            if not simulation and not self.config["allow_real_provider_execution"]:
+                raise DiskCloneBlocked("Execucao real esta desabilitada ate inscricao e validacao local explicitas.", "blocked_provider")
+            if not result.source or not result.target or not result.plan:
+                raise DiskCloneBlocked("Plano de clone ausente.", "blocked_identity")
+            backup_lock = BackupLock(self.p.logs / "localvault_backup.lock")
+            clone_lock = CloneLock(self.clone_lock_path)
+            backup_lock.acquire()
+            try:
+                clone_lock.acquire(run_id)
+                offline_completed = False
+                try:
+                    _transition(self.p.db, run_id, "bringing_target_online", "destino identificado; preparando acesso")
+                    if self.config["keep_target_offline"]:
+                        self.lifecycle.set_online(result.target)
+                        online_target = find_matching_disk(self.inventory.list_disks(), result.target)
+                        if not online_target:
+                            raise DiskCloneBlocked("O destino mudou depois de ficar online.", "blocked_identity")
+                        result = PreflightResult(True, result.state, result.reason, result.source, online_target, result.plan, result.discovery, result.capabilities, result.activity, result.details)
+                    _transition(self.p.db, run_id, "starting_provider", "iniciando provedor validado")
+                    process = self.provider.start(result.plan, lambda event: _save_progress(self.p.db, run_id, event))
+                    with db.connect(self.p.db) as conn:
+                        conn.execute("UPDATE disk_clone_runs SET provider_pid=? WHERE run_id=?", (process.pid or None, run_id))
+                    _transition(self.p.db, run_id, "cloning", "provedor em execucao")
+                    provider_result = self.provider.inspect_result(process)
+                    with db.connect(self.p.db) as conn:
+                        conn.execute("UPDATE disk_clone_runs SET provider_exit_code=? WHERE run_id=?", (provider_result.exit_code, run_id))
+                    if not provider_result.success:
+                        raise DiskCloneError(provider_result.reason or "O provedor falhou.")
+                    verification = self.verifier.verify(result.source, result.target)
+                    _save_verification(self.p.db, run_id, verification)
+                    if not verification.structurally_verified:
+                        raise DiskCloneBlocked(verification.evidence or "A verificacao estrutural falhou.", "failed_verification")
+                    _transition(self.p.db, run_id, "verifying", "estrutura verificada; boot test nao realizado")
+                    if self.config["keep_target_offline"]:
+                        _transition(self.p.db, run_id, "returning_target_offline", "retornando destino offline")
+                        self.lifecycle.set_offline(result.target)
+                        _set_target_offline(self.p.db, run_id, "confirmed")
+                        offline_completed = True
+                    _transition(self.p.db, run_id, "success", "provedor e estrutura confirmados; boot test nao realizado")
+                    _finish_clone_run(self.p.db, run_id, "success", "clone verificado estruturalmente", activity)
+                    _mark_success(self.p.db, self.clock(), self.config["interval_days"], result.discovery.name if result.discovery else "unknown")
+                    return {"run_id": run_id, "state": "success", "verification": verification.evidence, "boot_tested": False}
+                except DiskCloneBlocked as exc:
+                    _transition(self.p.db, run_id, exc.state, exc.reason)
+                    _finish_clone_run(self.p.db, run_id, exc.state, exc.reason, activity)
+                    return {"run_id": run_id, "state": exc.state, "reason": exc.reason}
+                except Exception as exc:
+                    _transition(self.p.db, run_id, "failed_provider", str(exc))
+                    _finish_clone_run(self.p.db, run_id, "failed_provider", str(exc), activity)
+                    return {"run_id": run_id, "state": "failed_provider", "reason": str(exc)}
+                finally:
+                    if self.config["keep_target_offline"] and result.target and not offline_completed:
+                        try:
+                            self.lifecycle.set_offline(result.target)
+                            _set_target_offline(self.p.db, run_id, "confirmed")
+                        except Exception as cleanup_error:
+                            _set_target_offline(self.p.db, run_id, "failed")
+                            _transition(self.p.db, run_id, "failed_offline_cleanup", str(cleanup_error))
+                            _finish_clone_run(self.p.db, run_id, "failed_offline_cleanup", str(cleanup_error), activity)
+                    clone_lock.release()
+            finally:
+                backup_lock.release()
+        except DiskCloneBlocked as exc:
+            _transition(self.p.db, run_id, exc.state, exc.reason)
+            _finish_clone_run(self.p.db, run_id, exc.state, exc.reason, activity)
+            return {"run_id": run_id, "state": exc.state, "reason": exc.reason}
+        except RuntimeError as exc:
+            _transition(self.p.db, run_id, "blocked_identity", str(exc))
+            _finish_clone_run(self.p.db, run_id, "blocked_identity", str(exc), activity)
+            return {"run_id": run_id, "state": "blocked_identity", "reason": str(exc)}
+
+
+def simulate_state_machine(root: Path) -> dict[str, Any]:
+    """Run a complete fake success path without using the host disk inventory."""
+    p = paths(root)
+    p.root.mkdir(parents=True, exist_ok=True)
+    db.init_db(p.db)
+    source = DiskIdentity(0, "Fake NVMe", "SRC-1234", "PNP-SRC", "UID-SRC", "PHY-SRC", "NVMe", size_bytes=1000, is_system=True, is_boot=True, partition_style="GPT", partitions=(PartitionIdentity(1, "efi"), PartitionIdentity(2, "windows")))
+    target = DiskIdentity(1, "Fake HDD", "DST-5678", "PNP-DST", "UID-DST", "PHY-DST", "SATA", size_bytes=1000, online=False, partition_style="GPT", partitions=source.partitions)
+    store = EnrollmentStore(root)
+    store.save(source, target, "fake", "disk_intelligent")
+    cfg_path = p.config / "config.yaml"
+    cfg = load_config(root)
+    cfg["disk_clone"] = validate_disk_clone_config({"enabled": False, "provider": "fake", "countdown_seconds": 0})
+    atomic_write_text(cfg_path, yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    service = CloneService(p, inventory=FakeDiskInventory([source, target]), provider=FakeProvider(), lifecycle=FakeDiskLifecycle(), sampler=FakeActivitySampler(), verifier=FakeStructuralVerifier(), clock=lambda: datetime.now(timezone.utc), is_admin=lambda: True, session_available=lambda: True)
+    return service.execute(trigger="simulation", countdown=lambda seconds: "confirm", simulation=True)
+
+
+def _create_clone_run(db_path: Path, run_id: str, trigger: str, now: datetime) -> None:
+    with db.connect(db_path) as conn:
+        conn.execute("INSERT INTO disk_clone_runs(run_id,trigger_type,scheduled_at,state) VALUES(?,?,?,?)", (run_id, trigger, now.astimezone(timezone.utc).isoformat(), "scheduled"))
+
+
+def _transition(db_path: Path, run_id: str, state: str, reason: str) -> None:
+    with db.connect(db_path) as conn:
+        conn.execute("INSERT INTO disk_clone_events(run_id,state,reason,occurred_at) VALUES(?,?,?,?)", (run_id, state, reason[:1000], utc_now()))
+        conn.execute("UPDATE disk_clone_runs SET state=?,reason=? WHERE run_id=?", (state, reason[:1000], run_id))
+
+
+def _finish_clone_run(db_path: Path, run_id: str, state: str, reason: str, activity: ActivitySample | None = None) -> None:
+    with db.connect(db_path) as conn:
+        conn.execute("UPDATE disk_clone_runs SET state=?,reason=?,finished_at=?,activity_average=?,activity_max=?,activity_samples=?,activity_duration=? WHERE run_id=?", (state, reason[:1000], utc_now(), activity.average_percent if activity else None, activity.maximum_percent if activity else None, activity.sample_count if activity else None, activity.duration_seconds if activity else None, run_id))
+
+
+def _save_activity(db_path: Path, run_id: str, activity: ActivitySample | None) -> None:
+    if not activity:
+        return
+    with db.connect(db_path) as conn:
+        conn.execute("UPDATE disk_clone_runs SET activity_average=?,activity_max=?,activity_samples=?,activity_duration=? WHERE run_id=?", (activity.average_percent, activity.maximum_percent, activity.sample_count, activity.duration_seconds, run_id))
+
+
+def _save_run_metadata(db_path: Path, run_id: str, result: PreflightResult) -> None:
+    with db.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE disk_clone_runs SET source_label=?,target_label=?,source_size_bytes=?,target_size_bytes=?,provider=?,provider_version=?,provider_edition=?,provider_mode=? WHERE run_id=?",
+            (
+                result.source.masked_label if result.source else None,
+                result.target.masked_label if result.target else None,
+                result.source.size_bytes if result.source else None,
+                result.target.size_bytes if result.target else None,
+                result.discovery.name if result.discovery else None,
+                result.discovery.version if result.discovery else None,
+                result.discovery.edition if result.discovery else None,
+                result.plan.mode if result.plan else None,
+                run_id,
+            ),
+        )
+
+
+def _save_progress(db_path: Path, run_id: str, event: dict[str, Any]) -> None:
+    progress_type = _clean(event.get("progress_type") or "unavailable")
+    if progress_type not in {"exact", "estimated", "unavailable"}:
+        progress_type = "unavailable"
+    percent = None
+    if event.get("percent") is not None:
+        try:
+            percent = max(0.0, min(99.99, float(event["percent"])))
+        except (TypeError, ValueError):
+            percent = None
+    with db.connect(db_path) as conn:
+        conn.execute("INSERT INTO disk_clone_progress(run_id,progress_type,percent,copied_bytes,speed_bytes,eta_seconds,phase,recorded_at) VALUES(?,?,?,?,?,?,?,?)", (run_id, progress_type, percent, _safe_int(event.get("copied_bytes"), 0) if event.get("copied_bytes") is not None else None, _safe_int(event.get("speed_bytes"), 0) if event.get("speed_bytes") is not None else None, _safe_int(event.get("eta_seconds"), 0) if event.get("eta_seconds") is not None else None, _clean(event.get("phase")), utc_now()))
+        conn.execute("UPDATE disk_clone_runs SET progress_type=? WHERE run_id=?", (progress_type, run_id))
+
+
+def _save_verification(db_path: Path, run_id: str, result: VerificationResult) -> None:
+    with db.connect(db_path) as conn:
+        conn.execute("INSERT INTO disk_clone_verifications(run_id,structurally_verified,boot_tested,evidence,verified_at) VALUES(?,?,?,?,?)", (run_id, int(result.structurally_verified), int(result.boot_tested), result.evidence[:2000], utc_now()))
+        conn.execute("UPDATE disk_clone_runs SET verification_status=? WHERE run_id=?", ("structurally_verified" if result.structurally_verified else "failed", run_id))
+
+
+def _set_target_offline(db_path: Path, run_id: str, status: str) -> None:
+    with db.connect(db_path) as conn:
+        conn.execute("UPDATE disk_clone_runs SET target_offline_result=? WHERE run_id=?", (status, run_id))
+
+
+def _mark_success(db_path: Path, now: datetime, interval_days: int, provider: str) -> None:
+    last = now.astimezone(timezone.utc).isoformat()
+    due = (now.astimezone(timezone.utc) + timedelta(days=interval_days)).isoformat()
+    with db.connect(db_path) as conn:
+        conn.execute("INSERT INTO disk_clone_profile(id,last_verified_at,next_due_at,provider) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET last_verified_at=excluded.last_verified_at,next_due_at=excluded.next_due_at,provider=excluded.provider", (last, due, provider))
+
+
+def _latest_clone_state(db_path: Path) -> str:
+    with db.connect(db_path) as conn:
+        row = conn.execute("SELECT state FROM disk_clone_runs ORDER BY rowid DESC LIMIT 1").fetchone()
+    return row[0] if row else "idle"
+
+
+def _latest_clone_progress(db_path: Path) -> dict[str, Any] | None:
+    with db.connect(db_path) as conn:
+        row = conn.execute("SELECT progress_type,percent,copied_bytes,speed_bytes,eta_seconds,phase,recorded_at FROM disk_clone_progress ORDER BY id DESC LIMIT 1").fetchone()
+    return dict(row) if row else None
+
+
+def _clone_runs(db_path: Path) -> list[dict[str, Any]]:
+    with db.connect(db_path) as conn:
+        rows = conn.execute("SELECT * FROM disk_clone_runs ORDER BY rowid DESC LIMIT 20").fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item.pop("source_serial", None)
+            item.pop("target_serial", None)
+            result.append(item)
+        return result
+
+
+def create_control_request(db_path: Path, action: str, run_id: str | None = None, actor: str = "local") -> str:
+    if action not in {"show", "preflight", "simulate", "cancel", "acknowledge", "retry"}:
+        raise ValueError("Acao de clone nao permitida.")
+    request_id = uuid.uuid4().hex
+    with db.connect(db_path) as conn:
+        conn.execute("INSERT INTO disk_clone_controls(request_id,action,run_id,actor,created_at) VALUES(?,?,?,?,?)", (request_id, action, run_id, actor, utc_now()))
+    return request_id
+
+
+def update_disk_clone_settings(root: Path, *, interval_days: int | None = None, enabled: bool | None = None) -> dict[str, Any]:
+    cfg = load_config(root)
+    section = dict(cfg.get("disk_clone", {}))
+    if interval_days is not None:
+        section["interval_days"] = interval_days
+    if enabled is not None:
+        if enabled and not EnrollmentStore(root).load():
+            raise DiskCloneBlocked("Nao e permitido habilitar sem manifesto de inscricao valido.", "blocked_identity")
+        section["enabled"] = enabled
+    section = validate_disk_clone_config(section)
+    cfg["disk_clone"] = section
+    atomic_write_text(paths(root).config / "config.yaml", yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    with db.connect(paths(root).db) as conn:
+        row = conn.execute("SELECT last_verified_at FROM disk_clone_profile WHERE id=1").fetchone()
+        if row and row["last_verified_at"]:
+            due = next_due_at(row["last_verified_at"], section["interval_days"], datetime.now(timezone.utc)).isoformat()
+            conn.execute("UPDATE disk_clone_profile SET next_due_at=?,updated_at=? WHERE id=1", (due, utc_now()))
+    return section
+
+
+def disk_clone_dashboard_data(p: VaultPaths) -> dict[str, Any]:
+    try:
+        service = CloneService(p)
+        return service.status()
+    except DiskCloneBlocked as exc:
+        return {"enabled": False, "provider": "unknown", "provider_supported": False, "provider_blocker": exc.reason, "enrollment": "bloqueado", "current_state": "blocked_configuration", "recent_runs": []}

@@ -4,6 +4,7 @@ import logging
 import os
 import json
 import subprocess
+import tempfile
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
@@ -17,6 +18,17 @@ from .config import DEFAULT_ROOT, ensure_config, ensure_directories, load_config
 from .auth import load_auth, set_password
 from .auto_takeout import auto_takeout as run_auto_takeout
 from .dedupe import build_duplicate_report
+from .disk_clone import (
+    CloneService,
+    DiskCloneBlocked,
+    DiskGeniusProvider,
+    EnrollmentStore,
+    WindowsDiskInventory,
+    WindowsDiskLifecycle,
+    disk_clone_dashboard_data,
+    simulate_state_machine,
+)
+from .disk_clone_ui import native_countdown, run_native_ui
 from .gmail_api import backup_gmail_api as run_gmail_api
 from .gmail_audit import audit_gmail_duplicates, repair_stale_gmail_runs
 from .gmail_maintenance import rename_existing_gmail_files
@@ -313,6 +325,96 @@ def health_check(root: Path = root_option()):
     for item in health["checks"]:
         marker = "OK" if item["ok"] else "ATENCAO"
         console.print(f"{marker} - {item['name']}: {item['detail']}")
+
+
+@app.command("disk-clone-status")
+def disk_clone_status(root: Path = root_option()):
+    """Show safe provider, enrollment, due-date, and run state information."""
+    p = prepare(root)
+    console.print_json(json.dumps(disk_clone_dashboard_data(p), ensure_ascii=False, default=str))
+
+
+@app.command("disk-clone-check")
+def disk_clone_check(root: Path = root_option()):
+    """Run non-destructive clone preflight; never launches a provider."""
+    p = prepare(root)
+    try:
+        result = CloneService(p).preflight(perform_activity=False, require_enabled=False)
+    except DiskCloneBlocked as exc:
+        console.print(f"State: {exc.state}\nReason: {exc.reason}")
+        raise typer.Exit(1)
+    console.print(f"State: {result.state}\nReason: {result.reason}")
+    if result.details:
+        console.print_json(json.dumps(result.details, ensure_ascii=False, default=str))
+    if not result.ok:
+        raise typer.Exit(1)
+
+
+@app.command("disk-clone-simulate")
+def disk_clone_simulate(root: Path = root_option()):
+    """Exercise the complete fake state machine without touching host disks."""
+    with tempfile.TemporaryDirectory(prefix="localvault-clone-sim-") as temp_root:
+        result = simulate_state_machine(Path(temp_root))
+    console.print_json(json.dumps(result, ensure_ascii=False, default=str))
+    if result.get("state") != "success":
+        raise typer.Exit(1)
+
+
+@app.command("disk-clone-run")
+def disk_clone_run(root: Path = root_option()):
+    """Run the guarded scheduled workflow; unsupported providers remain blocked."""
+    p = prepare(root)
+    result = CloneService(p).execute(trigger="scheduled", countdown=lambda seconds: native_countdown(p.root, seconds))
+    console.print_json(json.dumps(result, ensure_ascii=False, default=str))
+    if result.get("state") not in {"success", "skipped_not_due", "skipped_outside_window", "skipped_no_interactive_session", "skipped_target_missing", "skipped_high_source_activity"}:
+        raise typer.Exit(1)
+
+
+@app.command("disk-clone-show")
+def disk_clone_show(root: Path = root_option()):
+    """Signal the existing native clone window to restore; never starts a clone."""
+    from .disk_clone import create_control_request
+
+    p = prepare(root)
+    request_id = create_control_request(p.db, "show", actor="local-command")
+    console.print(f"Restore request: {request_id}")
+
+
+@app.command("disk-clone-ui")
+def disk_clone_ui(root: Path = root_option(), countdown_seconds: int = typer.Option(300, "--countdown-seconds")):
+    """Run the single native warning window process."""
+    p = prepare(root)
+    run_native_ui(p.root, countdown_seconds)
+
+
+@app.command("disk-clone-enroll")
+def disk_clone_enroll(root: Path = root_option()):
+    """Interactively enroll a distinct physical target by stable identity."""
+    if os.name != "nt":
+        raise typer.BadParameter("A inscricao de clone exige Windows e privilegios administrativos.")
+    p = prepare(root)
+    disks = WindowsDiskInventory().list_disks()
+    source = next((disk for disk in disks if disk.is_system or disk.is_boot), None)
+    if not source:
+        raise typer.BadParameter("Nao foi possivel identificar o disco de sistema atual.")
+    console.print("Discos fisicos detectados (o numero abaixo e apenas uma selecao momentanea):")
+    for disk in disks:
+        marker = " [SISTEMA]" if disk.number == source.number else ""
+        console.print(f"  {disk.number}: {disk.model} {disk.masked_serial} {disk.size_bytes:,} bytes{marker}")
+    target_number = typer.prompt("Numero momentaneo do HD de destino", type=int)
+    target = next((disk for disk in disks if disk.number == target_number), None)
+    if not target or target.number == source.number:
+        raise typer.BadParameter("O destino deve ser outro disco fisico.")
+    provider = DiskGeniusProvider()
+    capabilities = provider.validate_capabilities()
+    if not capabilities.supported:
+        raise typer.BadParameter(f"Inscricao bloqueada: {capabilities.blocker}")
+    ack = typer.prompt(f"Digite exatamente APAGAR {target.model} {target.masked_serial}")
+    if ack != f"APAGAR {target.model} {target.masked_serial}":
+        raise typer.BadParameter("Confirmacao destrutiva incorreta.")
+    EnrollmentStore(root).save(source, target, provider.discover().name, "disk_intelligent")
+    WindowsDiskLifecycle().set_offline(target)
+    console.print("Inscricao criada. O provedor nunca e executado durante a inscricao.")
 
 
 @app.command("serve")

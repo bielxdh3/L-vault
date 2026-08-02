@@ -10,7 +10,7 @@ from email.message import EmailMessage
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from jinja2 import pass_context
@@ -20,6 +20,7 @@ from . import db
 from .config import load_config, paths
 from .auth import SESSION_MAX_AGE, load_auth, verify_password
 from .control_panel import control_panel_data, start_background_command
+from .disk_clone import CloneService, DiskCloneBlocked, create_control_request, disk_clone_dashboard_data, update_disk_clone_settings
 from .vault_index import cleanup_missing_index_entries, dashboard_data, delete_local_file_and_index, open_in_explorer, safe_vault_path
 
 PACKAGE_DIR = Path(__file__).parent
@@ -100,6 +101,32 @@ def create_app(root: Path | None = None) -> FastAPI:
         data = control_panel_data(p)
         data["request"] = request
         return templates.TemplateResponse(request, "control.html", data)
+
+    @app.get("/disk-clone", response_class=HTMLResponse)
+    def disk_clone_page(request: Request):
+        data = disk_clone_dashboard_data(p)
+        data["request"] = request
+        return templates.TemplateResponse(request, "disk_clone.html", data)
+
+    @app.get("/disk-clone/status")
+    def disk_clone_status():
+        return JSONResponse(disk_clone_dashboard_data(p))
+
+    @app.post("/disk-clone/action")
+    def disk_clone_action(action: str = Query(...), run_id: str | None = Query(None)):
+        try:
+            create_control_request(p.db, action, run_id=run_id, actor="dashboard")
+        except ValueError:
+            raise HTTPException(400)
+        return RedirectResponse("/disk-clone", status_code=303)
+
+    @app.post("/disk-clone/settings")
+    def disk_clone_settings(interval_days: int | None = Query(None), enabled: bool | None = Query(None)):
+        try:
+            update_disk_clone_settings(p.root, interval_days=interval_days, enabled=enabled)
+        except (DiskCloneBlocked, ValueError):
+            raise HTTPException(400)
+        return RedirectResponse("/disk-clone", status_code=303)
 
     @app.post("/control/run")
     def control_run(command: str = Query(...)):

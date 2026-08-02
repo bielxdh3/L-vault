@@ -102,7 +102,11 @@ foreach ($Task in $Tasks) {{
   if (-not $Task.Enabled) {{ Write-Host "Skipping disabled task: $($Task.Name)"; continue }}
   $ActionArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$Runner`" -TaskName `"$($Task.FullName)`" -CommandArgs `"$($Task.Command)`""
   $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $ActionArgs
-  $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit $ExecutionTimeLimit
+  if ($Task.StartWhenAvailable) {{
+    $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit $ExecutionTimeLimit
+  }} else {{
+    $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit $ExecutionTimeLimit
+  }}
   $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
   Register-ScheduledTask -TaskName $Task.FullName -Action $Action -Trigger (New-LocalVaultTrigger $Task) -Settings $Settings -Principal $Principal -Description "LocalVault Backup Manager: $($Task.Command)" -Force | Out-Null
   Write-Host "Registered: $($Task.FullName)"
@@ -140,5 +144,6 @@ def _powershell_tasks(automation: dict[str, Any]) -> str:
         freq = str(task.get("frequency", "daily")).capitalize()
         time = str(task.get("time", "03:00"))
         days = ", ".join(f'"{d}"' for d in (task.get("days") or []))
-        lines.append(f'  @{{ Key="{key}"; FullName="{full}"; Name="{name}"; Command="{cmd}"; Frequency="{freq}"; Time="{time}"; Days=@({days}); Enabled={enabled} }}')
+        start_when_available = "$false" if task.get("start_when_available", True) is False or task.get("catch_up") is False else "$true"
+        lines.append(f'  @{{ Key="{key}"; FullName="{full}"; Name="{name}"; Command="{cmd}"; Frequency="{freq}"; Time="{time}"; Days=@({days}); Enabled={enabled}; StartWhenAvailable={start_when_available} }}')
     return ",\n".join(lines)
