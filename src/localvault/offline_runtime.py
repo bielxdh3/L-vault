@@ -35,6 +35,7 @@ from .offline_clone import (
     OfflineJob,
     OfflineResult,
     OfflineResultStore,
+    ProductionOfflineSignatureVerifier,
     SignatureVerificationEvidence,
     ClonezillaCommandRenderer,
     build_fake_result,
@@ -45,10 +46,10 @@ from .offline_clone import (
 from .utils import atomic_write_bytes, sha256_file
 
 
-RUNTIME_MANIFEST_SCHEMA = 2
+RUNTIME_MANIFEST_SCHEMA = 3
 RUNTIME_MANIFEST_FILE = "runtime-manifest.json"
 RUNTIME_MANIFEST_SIGNATURE = "runtime-manifest.sig"
-EXTRACTION_MANIFEST_SCHEMA = 1
+EXTRACTION_MANIFEST_SCHEMA = 2
 EXTRACTION_MANIFEST_FILE = "extraction-manifest.json"
 EXTRACTION_MANIFEST_SIGNATURE = "extraction-manifest.sig"
 RETURN_CHANNEL_SCHEMA = 1
@@ -73,11 +74,19 @@ REQUIRED_RUNTIME_TOOLS = (
     "ocs-onthefly",
 )
 CLONEZILLA_SIGNER_FINGERPRINT = "54C0821A48715DAFD61BFCAF667857D045599AFD"
+LOCAL_EXTRACTION_ATTESTATION_DOMAIN = "localvault.clonezilla.extraction-attestation.v1"
+LOCAL_EXTRACTION_ATTESTATION_SCHEME = "detached-gpgv-v1"
+PRODUCTION_EXTRACTION_METHOD = "clonezilla-iso-extract-v1"
+PRODUCTION_EXTRACTION_POLICY = "localvault-clonezilla-extractor-v1"
+SYNTHETIC_EXTRACTION_METHOD = "synthetic-test-fixture-v1"
+SYNTHETIC_EXTRACTION_POLICY = "synthetic-test-fixture-policy-v1"
+RUNTIME_VALIDATION_PROFILE_SYNTHETIC_TEST = "synthetic_test"
+RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC = "production_static"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX_FINGERPRINT = re.compile(r"^[0-9A-F]{40,64}$")
 _JOB_ID = re.compile(r"^[0-9a-f]{32}$")
 _SAFE_FILENAME = re.compile(r"^[^\\/:\x00-\x1f\x7f]+$")
-_EXTRACTION_METHODS = frozenset({"clonezilla-iso-extract-v1", "synthetic-test-fixture-v1"})
+_EXTRACTION_METHODS = frozenset({PRODUCTION_EXTRACTION_METHOD, SYNTHETIC_EXTRACTION_METHOD})
 _OVERLAY_NAMES = frozenset({"upper", "upperdir", "work", "overlay", "cow"})
 _MAX_TOOL_BYTES = 64 * 1024 * 1024
 _MAX_INVENTORY_FILE_BYTES = 4 * 1024 * 1024 * 1024
@@ -143,6 +152,49 @@ def _fsync_file(path: Path, data: bytes) -> None:
         os.fsync(handle.fileno())
 
 
+def _derived_verifier_evidence(verifier: Any) -> SignatureVerificationEvidence:
+    try:
+        evidence = verifier.verification_evidence
+    except (AttributeError, OfflineCloneBlocked) as exc:
+        raise OfflineCloneBlocked("detached verifier did not expose derived key evidence", "offline_verification_failed") from exc
+    if not isinstance(evidence, SignatureVerificationEvidence):
+        raise OfflineCloneBlocked("detached verifier evidence has an invalid type", "offline_verification_failed")
+    if not _HEX_FINGERPRINT.fullmatch(evidence.pinned_fingerprint) or not _HEX64.fullmatch(evidence.keyring_sha256):
+        raise OfflineCloneBlocked("detached verifier evidence is invalid", "offline_verification_failed")
+    return evidence
+
+
+class _VerifierRole:
+    """A typed trust-domain boundary around one immutable verifier instance."""
+
+    def __init__(self, verifier: Any):
+        if isinstance(verifier, _VerifierRole) or not callable(getattr(verifier, "verify", None)):
+            raise OfflineCloneBlocked("offline verifier role is missing or ambiguous", "offline_verification_failed")
+        self._verifier = verifier
+
+    @property
+    def verification_evidence(self) -> SignatureVerificationEvidence:
+        return _derived_verifier_evidence(self._verifier)
+
+    @property
+    def raw_verifier(self) -> Any:
+        return self._verifier
+
+    def verify(self, payload: bytes, signature: bytes) -> bool:
+        result = self._verifier.verify(payload, signature)
+        if type(result) is not bool:
+            raise OfflineCloneBlocked("offline verifier returned an ambiguous result", "offline_verification_failed")
+        return result
+
+
+class OfficialChecksumVerifier(_VerifierRole):
+    """Only verifies the official Clonezilla/DRBL checksum manifest."""
+
+
+class LocalExtractionAttestationVerifier(_VerifierRole):
+    """Only verifies a local L-vault extraction attestation."""
+
+
 @dataclass(frozen=True)
 class OfflineRuntimeManifest:
     artifact: "RuntimeArtifactEvidence" = field(default_factory=lambda: RuntimeArtifactEvidence())
@@ -203,13 +255,30 @@ class OfflineRuntimeManifest:
 class RuntimeExtractionManifest:
     source_iso_filename: str
     source_iso_sha256: str
+    attestation_domain: str
+    attestation_scheme: str
     extraction_method: str
+    extractor_policy_version: str
     inventory_sha256: str
     files: tuple[dict[str, Any], ...]
+    created_at: str
+    production_extraction_completed: bool
     schema: int = EXTRACTION_MANIFEST_SCHEMA
 
     def payload(self) -> dict[str, Any]:
-        return {"schema": self.schema, "source_iso_filename": self.source_iso_filename, "source_iso_sha256": self.source_iso_sha256, "extraction_method": self.extraction_method, "inventory_sha256": self.inventory_sha256, "files": [dict(entry) for entry in self.files]}
+        return {
+            "schema": self.schema,
+            "attestation_domain": self.attestation_domain,
+            "attestation_scheme": self.attestation_scheme,
+            "source_iso_filename": self.source_iso_filename,
+            "source_iso_sha256": self.source_iso_sha256,
+            "extraction_method": self.extraction_method,
+            "extractor_policy_version": self.extractor_policy_version,
+            "inventory_sha256": self.inventory_sha256,
+            "files": [dict(entry) for entry in self.files],
+            "created_at": self.created_at,
+            "production_extraction_completed": self.production_extraction_completed,
+        }
 
     def validate(self) -> None:
         if self.schema != EXTRACTION_MANIFEST_SCHEMA:
@@ -217,8 +286,27 @@ class RuntimeExtractionManifest:
         _safe_filename(self.source_iso_filename, field="extraction source ISO filename")
         if not _HEX64.fullmatch(self.source_iso_sha256):
             raise OfflineCloneBlocked("offline extraction source ISO digest is invalid", "offline_verification_failed")
+        if self.attestation_domain != LOCAL_EXTRACTION_ATTESTATION_DOMAIN:
+            raise OfflineCloneBlocked("local extraction attestation domain is invalid", "offline_verification_failed")
+        if self.attestation_scheme != LOCAL_EXTRACTION_ATTESTATION_SCHEME:
+            raise OfflineCloneBlocked("local extraction attestation scheme is invalid", "offline_verification_failed")
         if self.extraction_method not in _EXTRACTION_METHODS:
             raise OfflineCloneBlocked("offline extraction method is not allowlisted", "offline_verification_failed")
+        expected_policy = SYNTHETIC_EXTRACTION_POLICY if self.extraction_method == SYNTHETIC_EXTRACTION_METHOD else PRODUCTION_EXTRACTION_POLICY
+        if self.extractor_policy_version != expected_policy:
+            raise OfflineCloneBlocked("offline extraction policy is invalid", "offline_verification_failed")
+        if type(self.production_extraction_completed) is not bool:
+            raise OfflineCloneBlocked("offline extraction completion evidence is invalid", "offline_verification_failed")
+        if self.extraction_method == SYNTHETIC_EXTRACTION_METHOD and self.production_extraction_completed:
+            raise OfflineCloneBlocked("synthetic extraction cannot claim production completion", "offline_verification_failed")
+        if self.extraction_method == PRODUCTION_EXTRACTION_METHOD and not self.production_extraction_completed:
+            raise OfflineCloneBlocked("production extraction completion evidence is missing", "offline_verification_failed")
+        try:
+            timestamp = datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise OfflineCloneBlocked("offline extraction creation timestamp is invalid", "offline_verification_failed") from exc
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise OfflineCloneBlocked("offline extraction creation timestamp must include a timezone", "offline_verification_failed")
         if not _HEX64.fullmatch(self.inventory_sha256):
             raise OfflineCloneBlocked("offline extraction inventory digest is invalid", "offline_verification_failed")
         previous = ""
@@ -242,10 +330,22 @@ class RuntimeExtractionManifest:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "RuntimeExtractionManifest":
-        required = {"schema", "source_iso_filename", "source_iso_sha256", "extraction_method", "inventory_sha256", "files"}
+        required = {"schema", "attestation_domain", "attestation_scheme", "source_iso_filename", "source_iso_sha256", "extraction_method", "extractor_policy_version", "inventory_sha256", "files", "created_at", "production_extraction_completed"}
         if set(value) != required or not isinstance(value.get("files"), list):
             raise OfflineCloneBlocked("offline extraction manifest fields are invalid", "offline_verification_failed")
-        manifest = cls(source_iso_filename=value["source_iso_filename"], source_iso_sha256=value["source_iso_sha256"], extraction_method=value["extraction_method"], inventory_sha256=value["inventory_sha256"], files=tuple(value["files"]), schema=value["schema"])
+        manifest = cls(
+            source_iso_filename=value["source_iso_filename"],
+            source_iso_sha256=value["source_iso_sha256"],
+            attestation_domain=value["attestation_domain"],
+            attestation_scheme=value["attestation_scheme"],
+            extraction_method=value["extraction_method"],
+            extractor_policy_version=value["extractor_policy_version"],
+            inventory_sha256=value["inventory_sha256"],
+            files=tuple(value["files"]),
+            created_at=value["created_at"],
+            production_extraction_completed=value["production_extraction_completed"],
+            schema=value["schema"],
+        )
         manifest.validate()
         return manifest
 
@@ -263,12 +363,18 @@ class RuntimeArtifactEvidence:
     official_checksum_manifest_sha256: str = ""
     official_checksum_signature_state: str = "missing"
     official_checksum_signature_verified: bool = False
-    signer_fingerprint: str = ""
-    keyring_sha256: str = ""
+    official_signer_fingerprint: str = ""
+    official_keyring_sha256: str = ""
+    local_attestation_scheme: str = ""
+    local_attestation_domain: str = ""
+    local_attestor_fingerprint: str = ""
+    local_attestor_keyring_sha256: str = ""
     extraction_manifest_schema: int = 0
     extraction_method: str = ""
+    extraction_policy_version: str = ""
     extraction_manifest_sha256: str = ""
     extraction_inventory_sha256: str = ""
+    local_extraction_signature_state: str = "missing"
     extraction_signature_verified: bool = False
     required_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -277,22 +383,38 @@ class RuntimeArtifactEvidence:
             raise OfflineCloneBlocked("offline runtime artifact release or architecture is not allowlisted", "offline_verification_failed")
         if self.iso_filename:
             _safe_filename(self.iso_filename, field="runtime ISO filename")
-        for field_name in ("iso_sha256", "official_checksum_manifest_sha256", "keyring_sha256", "extraction_manifest_sha256", "extraction_inventory_sha256"):
+        for field_name in ("iso_sha256", "official_checksum_manifest_sha256", "official_keyring_sha256", "local_attestor_keyring_sha256", "extraction_manifest_sha256", "extraction_inventory_sha256"):
             value = getattr(self, field_name)
             if value and not _HEX64.fullmatch(value):
                 raise OfflineCloneBlocked(f"offline runtime {field_name} is invalid", "offline_verification_failed")
-        if self.signer_fingerprint and not _HEX_FINGERPRINT.fullmatch(self.signer_fingerprint):
-            raise OfflineCloneBlocked("offline runtime signer fingerprint is invalid", "offline_verification_failed")
+        for field_name in ("official_signer_fingerprint", "local_attestor_fingerprint"):
+            value = getattr(self, field_name)
+            if value and not _HEX_FINGERPRINT.fullmatch(value):
+                raise OfflineCloneBlocked(f"offline runtime {field_name} is invalid", "offline_verification_failed")
+        if self.official_signer_fingerprint and self.local_attestor_fingerprint and self.official_signer_fingerprint == self.local_attestor_fingerprint:
+            raise OfflineCloneBlocked("official and local runtime fingerprints must be distinct", "offline_verification_failed")
+        if self.official_keyring_sha256 and self.local_attestor_keyring_sha256 and self.official_keyring_sha256 == self.local_attestor_keyring_sha256:
+            raise OfflineCloneBlocked("official and local runtime keyrings must be distinct", "offline_verification_failed")
         if self.official_checksum_signature_state not in {"missing", "verified", "invalid"}:
             raise OfflineCloneBlocked("offline runtime checksum signature state is invalid", "offline_verification_failed")
         if type(self.official_checksum_signature_verified) is not bool or type(self.extraction_signature_verified) is not bool:
             raise OfflineCloneBlocked("offline runtime signature evidence is invalid", "offline_verification_failed")
         if self.official_checksum_signature_verified != (self.official_checksum_signature_state == "verified" and bool(self.official_checksum_manifest_sha256)):
             raise OfflineCloneBlocked("offline runtime checksum signature evidence is inconsistent", "offline_verification_failed")
+        if self.local_extraction_signature_state not in {"missing", "verified", "invalid"}:
+            raise OfflineCloneBlocked("offline runtime local extraction signature state is invalid", "offline_verification_failed")
+        if self.extraction_signature_verified != (self.local_extraction_signature_state == "verified" and bool(self.extraction_manifest_sha256)):
+            raise OfflineCloneBlocked("offline runtime local extraction signature evidence is inconsistent", "offline_verification_failed")
+        if self.local_attestation_scheme and self.local_attestation_scheme != LOCAL_EXTRACTION_ATTESTATION_SCHEME:
+            raise OfflineCloneBlocked("offline runtime local attestation scheme is invalid", "offline_verification_failed")
+        if self.local_attestation_domain and self.local_attestation_domain != LOCAL_EXTRACTION_ATTESTATION_DOMAIN:
+            raise OfflineCloneBlocked("offline runtime local attestation domain is invalid", "offline_verification_failed")
         if self.extraction_manifest_schema not in {0, EXTRACTION_MANIFEST_SCHEMA}:
             raise OfflineCloneBlocked("offline runtime extraction manifest schema is invalid", "offline_verification_failed")
         if self.extraction_method and self.extraction_method not in _EXTRACTION_METHODS:
             raise OfflineCloneBlocked("offline runtime extraction method is invalid", "offline_verification_failed")
+        if self.extraction_policy_version and self.extraction_policy_version not in {PRODUCTION_EXTRACTION_POLICY, SYNTHETIC_EXTRACTION_POLICY}:
+            raise OfflineCloneBlocked("offline runtime extraction policy is invalid", "offline_verification_failed")
         if set(self.required_tools) != set(REQUIRED_RUNTIME_TOOLS):
             raise OfflineCloneBlocked("offline runtime tool evidence has unexpected entries", "offline_verification_failed")
         for name in REQUIRED_RUNTIME_TOOLS:
@@ -339,7 +461,7 @@ class RuntimeManifestStore:
             raise
         return destination
 
-    def load(self, path: Path, verifier: Any) -> OfflineRuntimeManifest:
+    def load(self, path: Path, local_attestation_verifier: LocalExtractionAttestationVerifier) -> OfflineRuntimeManifest:
         path = Path(path)
         if path.is_symlink() or not path.is_dir() or set(item.name for item in path.iterdir()) != {RUNTIME_MANIFEST_FILE, RUNTIME_MANIFEST_SIGNATURE}:
             raise OfflineCloneBlocked("offline runtime manifest package is unsafe or incomplete", "offline_verification_failed")
@@ -348,8 +470,13 @@ class RuntimeManifestStore:
         raw, value = _read_json(path / RUNTIME_MANIFEST_FILE)
         manifest = OfflineRuntimeManifest.from_dict(value)
         signature = (path / RUNTIME_MANIFEST_SIGNATURE).read_bytes()
-        if raw != manifest.canonical_bytes() or not verifier.verify(raw, signature):
+        if type(local_attestation_verifier) is not LocalExtractionAttestationVerifier:
+            raise OfflineCloneBlocked("local extraction attestation verifier role is required", "offline_verification_failed")
+        verifier_evidence = local_attestation_verifier.verification_evidence
+        if raw != manifest.canonical_bytes() or not local_attestation_verifier.verify(raw, signature):
             raise OfflineCloneBlocked("offline runtime manifest signature is invalid", "offline_verification_failed")
+        if manifest.artifact.local_attestor_fingerprint != verifier_evidence.pinned_fingerprint or manifest.artifact.local_attestor_keyring_sha256 != verifier_evidence.keyring_sha256:
+            raise OfflineCloneBlocked("offline runtime local attestor evidence does not match its verifier", "offline_verification_failed")
         return manifest
 
 
@@ -426,12 +553,6 @@ class OfflineRuntimeValidator:
         if extraction is None:
             return tools, sorted(set((*blockers, "extracted_tree_binding_missing")))
         expected_payload = [dict(entry) for entry in extraction.files]
-        if extraction.extraction_method == "synthetic-test-fixture-v1":
-            actual_by_path = {entry["path"]: entry for entry in actual_payload}
-            for expected in expected_payload:
-                actual_entry = actual_by_path.get(expected["path"])
-                if actual_entry and not actual_entry["executable"] and expected["executable"]:
-                    actual_entry["executable"] = True
         if actual_payload != expected_payload:
             actual_by_path = {entry["path"]: entry for entry in actual_payload}
             expected_by_path = {entry["path"]: entry for entry in expected_payload}
@@ -469,15 +590,7 @@ class OfflineRuntimeValidator:
 
     @staticmethod
     def _verifier_evidence(verifier: Any) -> SignatureVerificationEvidence:
-        try:
-            evidence = verifier.verification_evidence
-        except (AttributeError, OfflineCloneBlocked) as exc:
-            raise OfflineCloneBlocked("detached verifier did not expose derived key evidence", "offline_verification_failed") from exc
-        if not isinstance(evidence, SignatureVerificationEvidence):
-            raise OfflineCloneBlocked("detached verifier evidence has an invalid type", "offline_verification_failed")
-        if not _HEX_FINGERPRINT.fullmatch(evidence.pinned_fingerprint) or not _HEX64.fullmatch(evidence.keyring_sha256):
-            raise OfflineCloneBlocked("detached verifier evidence is invalid", "offline_verification_failed")
-        return evidence
+        return _derived_verifier_evidence(verifier)
 
     def validate(
         self,
@@ -486,23 +599,83 @@ class OfflineRuntimeValidator:
         extracted_tree: Path | None = None,
         checksums_path: Path | None = None,
         checksums_signature: bytes | None = None,
-        verifier: Any | None = None,
+        official_verifier: OfficialChecksumVerifier | None = None,
+        local_attestation_verifier: LocalExtractionAttestationVerifier | None = None,
         extraction_manifest_path: Path | None = None,
         extraction_manifest_signature: bytes | None = None,
         provenance: str = "official-artifact-not-present",
         architecture: str = "amd64",
         vm_boot_completed: bool = False,
+        profile: str = RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC,
     ) -> RuntimeReadinessReport:
         blockers: list[str] = []
-        evidence: dict[str, Any] = {"iso_present": False, "iso_signature_verified": False, "checksum_signature_verified": False, "verifier_fingerprint_derived": False, "keyring_sha256_derived": False, "extracted_tree_binding_verified": False, "required_tools_static_only": True, "vm_boot_completed": False, "physical_boot_completed": False}
+        evidence: dict[str, Any] = {
+            "validation_profile": profile,
+            "iso_present": False,
+            "official_publisher_provenance_verified": False,
+            "official_signature_state": "missing",
+            "official_signature_verified": False,
+            "official_signer_fingerprint": "",
+            "official_keyring_sha256": "",
+            "local_extraction_attestation_verified": False,
+            "local_extraction_attestation_state": "missing",
+            "local_attestation_scheme": "",
+            "local_attestation_domain": "",
+            "local_attestor_fingerprint": "",
+            "local_attestor_keyring_sha256": "",
+            "extracted_tree_binding_verified": False,
+            "required_tools_static_only": True,
+            "vm_boot_completed": False,
+            "physical_boot_completed": False,
+        }
+        if profile not in {RUNTIME_VALIDATION_PROFILE_SYNTHETIC_TEST, RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC}:
+            blockers.append("offline_runtime_validation_profile_invalid")
         iso_digest = ""
         iso_name = Path(iso_path).name if iso_path else ""
         checksum_digest = ""
         checksum_signature_state = "missing"
-        verifier_evidence: SignatureVerificationEvidence | None = None
+        local_signature_state = "missing"
+        official_evidence: SignatureVerificationEvidence | None = None
+        local_evidence: SignatureVerificationEvidence | None = None
         extraction: RuntimeExtractionManifest | None = None
         if self.expected_release != OFFLINE_ENGINE_VERSION:
             blockers.append("pinned_release_changed_without_compatibility_decision")
+
+        if type(official_verifier) is not OfficialChecksumVerifier:
+            blockers.append("official_checksum_verifier_missing_or_ambiguous")
+        else:
+            try:
+                official_evidence = official_verifier.verification_evidence
+                evidence["official_signer_fingerprint"] = official_evidence.pinned_fingerprint
+                evidence["official_keyring_sha256"] = official_evidence.keyring_sha256
+                if profile == RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC and not isinstance(official_verifier.raw_verifier, ProductionOfflineSignatureVerifier):
+                    blockers.append("production_official_verifier_is_test_only")
+            except OfflineCloneBlocked as exc:
+                blockers.append(exc.reason)
+
+        if type(local_attestation_verifier) is not LocalExtractionAttestationVerifier:
+            blockers.append("local_extraction_attestation_verifier_missing_or_ambiguous")
+        else:
+            try:
+                local_evidence = local_attestation_verifier.verification_evidence
+                evidence["local_attestor_fingerprint"] = local_evidence.pinned_fingerprint
+                evidence["local_attestor_keyring_sha256"] = local_evidence.keyring_sha256
+                if profile == RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC and not isinstance(local_attestation_verifier.raw_verifier, ProductionOfflineSignatureVerifier):
+                    blockers.append("production_local_attestation_verifier_is_test_only")
+            except OfflineCloneBlocked as exc:
+                blockers.append(exc.reason)
+
+        if official_verifier is not None and local_attestation_verifier is not None:
+            if type(official_verifier) is not OfficialChecksumVerifier or type(local_attestation_verifier) is not LocalExtractionAttestationVerifier:
+                blockers.append("offline_verifier_role_missing_or_ambiguous")
+            elif official_verifier.raw_verifier is local_attestation_verifier.raw_verifier:
+                blockers.append("official_local_trust_roots_shared")
+        if official_evidence and local_evidence:
+            if official_evidence.pinned_fingerprint == local_evidence.pinned_fingerprint:
+                blockers.append("official_local_fingerprints_shared")
+            if official_evidence.keyring_sha256 == local_evidence.keyring_sha256:
+                blockers.append("official_local_keyrings_shared")
+
         if iso_path is None:
             blockers.append("official_iso_missing")
         else:
@@ -521,7 +694,7 @@ class OfflineRuntimeValidator:
                     blockers.append("iso_checksum_mismatch")
                 if checksums_path is None:
                     blockers.append("official_checksum_manifest_missing")
-                elif checksums_signature is None or verifier is None:
+                elif checksums_signature is None or type(official_verifier) is not OfficialChecksumVerifier:
                     blockers.append("official_checksum_signature_missing")
                 else:
                     try:
@@ -534,28 +707,25 @@ class OfflineRuntimeValidator:
                             checksum_raw = checksum_file.read_bytes()
                             checksum_digest = hashlib.sha256(checksum_raw).hexdigest()
                             evidence["official_checksum_manifest_sha256"] = checksum_digest
-                        if checksum_raw and not verifier.verify(checksum_raw, checksums_signature):
+                        if checksum_raw and not official_verifier.verify(checksum_raw, checksums_signature):
                             checksum_signature_state = "invalid"
                             blockers.append("official_checksum_signature_invalid")
                         elif checksum_raw:
                             checksum_signature_state = "verified"
-                            evidence["checksum_signature_verified"] = True
+                            evidence["official_signature_verified"] = True
+                            evidence["official_signature_state"] = "verified"
                             expected_line = re.compile(rf"^{re.escape(self.expected_iso_sha256)}\s+\*?{re.escape(iso_name)}\s*$", re.IGNORECASE | re.MULTILINE)
                             if not expected_line.search(checksum_raw.decode("utf-8")):
                                 blockers.append("official_checksum_entry_missing")
+                            elif iso_digest != self.expected_iso_sha256:
+                                blockers.append("official_iso_digest_not_bound")
                             else:
-                                evidence["iso_signature_verified"] = True
-                                try:
-                                    verifier_evidence = self._verifier_evidence(verifier)
-                                    evidence["verifier_fingerprint_derived"] = True
-                                    evidence["keyring_sha256_derived"] = True
-                                except OfflineCloneBlocked as exc:
-                                    blockers.append(exc.reason)
+                                evidence["official_publisher_provenance_verified"] = True
                     except (OSError, UnicodeDecodeError, OfflineCloneBlocked):
                         blockers.append("official_checksum_manifest_invalid")
         if extracted_tree is not None:
             if extraction_manifest_path is None or extraction_manifest_signature is None:
-                blockers.append("extracted_tree_binding_missing")
+                blockers.extend(("extracted_tree_binding_missing", "local_extraction_attestation_missing"))
             else:
                 try:
                     raw, value = _read_json(Path(extraction_manifest_path), max_bytes=8 * 1024 * 1024)
@@ -564,18 +734,34 @@ class OfflineRuntimeValidator:
                     extraction = RuntimeExtractionManifest.from_dict(value)
                     if extraction.source_iso_filename != iso_name or extraction.source_iso_sha256 != iso_digest:
                         blockers.append("extracted_tree_source_iso_mismatch")
-                    if verifier is None or not verifier.verify(raw, extraction_manifest_signature):
-                        blockers.append("extraction_manifest_signature_invalid")
+                    evidence["local_attestation_scheme"] = extraction.attestation_scheme
+                    evidence["local_attestation_domain"] = extraction.attestation_domain
+                    evidence["extraction_manifest_sha256"] = hashlib.sha256(raw).hexdigest()
+                    evidence["extraction_inventory_sha256"] = extraction.inventory_sha256
+                    if extraction.extraction_method == SYNTHETIC_EXTRACTION_METHOD and profile != RUNTIME_VALIDATION_PROFILE_SYNTHETIC_TEST:
+                        blockers.append("synthetic_fixture_not_allowed_in_production")
+                    if extraction.extraction_method == PRODUCTION_EXTRACTION_METHOD and profile != RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC:
+                        blockers.append("production_manifest_not_allowed_in_synthetic")
+                    if type(local_attestation_verifier) is not LocalExtractionAttestationVerifier:
+                        blockers.append("local_extraction_attestation_verifier_missing")
+                    elif not local_attestation_verifier.verify(raw, extraction_manifest_signature):
+                        local_signature_state = "invalid"
+                        blockers.extend(("extraction_manifest_signature_invalid", "local_extraction_attestation_invalid"))
                     else:
-                        verifier_evidence = self._verifier_evidence(verifier)
-                        evidence["extracted_tree_binding_verified"] = True
-                        evidence["extraction_manifest_sha256"] = hashlib.sha256(raw).hexdigest()
-                        evidence["extraction_inventory_sha256"] = extraction.inventory_sha256
+                        local_signature_state = "verified"
+                        evidence["local_extraction_attestation_state"] = "verified"
+                        if not any(item in blockers for item in ("extracted_tree_source_iso_mismatch", "synthetic_fixture_not_allowed_in_production", "production_manifest_not_allowed_in_synthetic")):
+                            evidence["local_extraction_attestation_verified"] = True
+                            evidence["extracted_tree_binding_verified"] = True
                 except (OSError, UnicodeDecodeError, OfflineCloneBlocked, TypeError, ValueError) as exc:
-                    blockers.append(getattr(exc, "reason", "extraction_manifest_invalid"))
+                    local_signature_state = "invalid"
+                    evidence["local_extraction_attestation_state"] = "invalid"
+                    blockers.extend((getattr(exc, "reason", "extraction_manifest_invalid"), "local_extraction_attestation_invalid"))
         tools, tree_blockers = self._check_tree(Path(extracted_tree), extraction) if extracted_tree is not None else ({name: _missing_tool() for name in REQUIRED_RUNTIME_TOOLS}, ["extracted_tree_missing"])
         blockers.extend(tree_blockers)
         evidence["tool_presence"] = {name: bool(entry["present"]) for name, entry in tools.items()}
+        evidence["official_signature_state"] = checksum_signature_state
+        evidence["official_signature_verified"] = checksum_signature_state == "verified" and bool(checksum_digest)
         try:
             evidence["iso_provenance"] = _safe_provenance(provenance)[:512]
         except OfflineCloneBlocked as exc:
@@ -590,14 +776,20 @@ class OfflineRuntimeValidator:
             iso_sha256=iso_digest,
             official_checksum_manifest_sha256=checksum_digest,
             official_checksum_signature_state=checksum_signature_state,
-            official_checksum_signature_verified=bool(evidence["iso_signature_verified"]),
-            signer_fingerprint=verifier_evidence.pinned_fingerprint if verifier_evidence else "",
-            keyring_sha256=verifier_evidence.keyring_sha256 if verifier_evidence else "",
+            official_checksum_signature_verified=bool(evidence["official_signature_verified"]),
+            official_signer_fingerprint=official_evidence.pinned_fingerprint if official_evidence else "",
+            official_keyring_sha256=official_evidence.keyring_sha256 if official_evidence else "",
+            local_attestation_scheme=extraction.attestation_scheme if extraction else "",
+            local_attestation_domain=extraction.attestation_domain if extraction else "",
+            local_attestor_fingerprint=local_evidence.pinned_fingerprint if local_evidence else "",
+            local_attestor_keyring_sha256=local_evidence.keyring_sha256 if local_evidence else "",
             extraction_manifest_schema=extraction.schema if extraction else 0,
             extraction_method=extraction.extraction_method if extraction else "",
+            extraction_policy_version=extraction.extractor_policy_version if extraction else "",
             extraction_manifest_sha256=evidence.get("extraction_manifest_sha256", ""),
             extraction_inventory_sha256=extraction.inventory_sha256 if extraction else "",
-            extraction_signature_verified=bool(evidence["extracted_tree_binding_verified"]),
+            local_extraction_signature_state=local_signature_state,
+            extraction_signature_verified=local_signature_state == "verified",
             required_tools=tools,
         )
         manifest = OfflineRuntimeManifest(artifact=artifact, iso_provenance=evidence["iso_provenance"])
@@ -608,7 +800,7 @@ class OfflineRuntimeValidator:
         if blockers:
             state = "offline_runtime_blocked"
         else:
-            state = "offline_runtime_static_validation_passed"
+            state = "offline_runtime_synthetic_validation_passed" if profile == RUNTIME_VALIDATION_PROFILE_SYNTHETIC_TEST else "offline_runtime_static_validation_passed"
         return RuntimeReadinessReport(state, tuple(sorted(set(blockers))), evidence, manifest)
 
 

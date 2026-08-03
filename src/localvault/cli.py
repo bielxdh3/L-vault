@@ -34,7 +34,14 @@ from .disk_clone import (
 )
 from .disk_clone_ui import native_countdown, run_native_ui
 from .offline_clone import ProductionOfflineSignatureVerifier, simulate_offline_round_trip
-from .offline_runtime import CLONEZILLA_SIGNER_FINGERPRINT, OfflineRuntimeValidator, simulate_virtual_offline_round_trip
+from .offline_runtime import (
+    CLONEZILLA_SIGNER_FINGERPRINT,
+    LocalExtractionAttestationVerifier,
+    OfficialChecksumVerifier,
+    OfflineRuntimeValidator,
+    RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC,
+    simulate_virtual_offline_round_trip,
+)
 from .gmail_api import backup_gmail_api as run_gmail_api
 from .gmail_audit import audit_gmail_duplicates, repair_stale_gmail_runs
 from .gmail_maintenance import rename_existing_gmail_files
@@ -404,22 +411,32 @@ def disk_clone_runtime_validate(
     checksums_signature: Optional[Path] = typer.Option(None, "--checksums-signature", help="Detached signature for --checksums."),
     extraction_manifest: Optional[Path] = typer.Option(None, "--extraction-manifest", help="Canonical signed extraction manifest for --extracted-tree."),
     extraction_signature: Optional[Path] = typer.Option(None, "--extraction-signature", help="Detached signature for --extraction-manifest."),
-    verifier_binary: Optional[Path] = typer.Option(None, "--verifier-binary", help="Explicit read-only gpgv-compatible verifier; never discovered."),
-    public_keyring: Optional[Path] = typer.Option(None, "--public-keyring", help="Pinned read-only public keyring used by the verifier."),
+    official_verifier_binary: Optional[Path] = typer.Option(None, "--official-verifier-binary", help="Explicit read-only gpgv-compatible verifier for official Clonezilla checksums; never discovered."),
+    official_public_keyring: Optional[Path] = typer.Option(None, "--official-public-keyring", help="Pinned read-only DRBL/Clonezilla public keyring."),
+    local_attestation_verifier_binary: Optional[Path] = typer.Option(None, "--local-attestation-verifier-binary", help="Explicit read-only verifier for L-vault extraction attestations; never discovered."),
+    local_attestation_public_keyring: Optional[Path] = typer.Option(None, "--local-attestation-public-keyring", help="Pinned read-only L-vault extraction-attestation public keyring."),
+    profile: str = typer.Option(RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC, "--profile", help="Validation profile: production_static (default) or synthetic_test."),
 ):
     """Inspect supplied Clonezilla artifacts and their signed tree binding without booting or touching storage."""
     prepare(root)
-    verifier = None
-    if verifier_binary is not None and public_keyring is not None:
-        verifier = ProductionOfflineSignatureVerifier(verifier_binary, public_keyring, CLONEZILLA_SIGNER_FINGERPRINT)
+    config = load_config(root).get("disk_clone", {})
+    official_verifier = None
+    local_attestation_verifier = None
+    if official_verifier_binary is not None and official_public_keyring is not None:
+        official_verifier = OfficialChecksumVerifier(ProductionOfflineSignatureVerifier(official_verifier_binary, official_public_keyring, CLONEZILLA_SIGNER_FINGERPRINT))
+    local_fingerprint = str(config.get("local_attestation_fingerprint", ""))
+    if local_attestation_verifier_binary is not None and local_attestation_public_keyring is not None and local_fingerprint:
+        local_attestation_verifier = LocalExtractionAttestationVerifier(ProductionOfflineSignatureVerifier(local_attestation_verifier_binary, local_attestation_public_keyring, local_fingerprint))
     report = OfflineRuntimeValidator().validate(
         iso_path=iso,
         extracted_tree=extracted_tree,
         checksums_path=checksums,
         checksums_signature=_read_signature_file(checksums_signature),
-        verifier=verifier,
+        official_verifier=official_verifier,
+        local_attestation_verifier=local_attestation_verifier,
         extraction_manifest_path=extraction_manifest,
         extraction_manifest_signature=_read_signature_file(extraction_signature),
+        profile=profile,
     )
     console.print_json(json.dumps(report.payload(), ensure_ascii=False, default=str))
     if report.state == "offline_runtime_blocked":

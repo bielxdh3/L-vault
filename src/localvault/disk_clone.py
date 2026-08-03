@@ -80,6 +80,7 @@ CLONE_STATE_LABELS = {
     "offline_clone_structurally_verified": "estrutura verificada; boot nao testado",
     "offline_runtime_unavailable": "runtime offline indisponivel",
     "offline_runtime_static_validation_passed": "ISO e arvore assinada vinculadas; ferramentas apenas inspecionadas; VM e boot fisico nao testados",
+    "offline_runtime_synthetic_validation_passed": "fixture sintetizado validado apenas para teste; runtime de producao bloqueado",
     "offline_runtime_virtual_validation_passed": "validacao virtual offline concluida; hardware nao provado",
     "offline_return_channel_ready": "canal virtual de retorno pronto; clone nao executado",
     "offline_runtime_blocked": "runtime offline bloqueado; nenhuma execucao",
@@ -336,6 +337,13 @@ def validate_disk_clone_config(config: dict[str, Any] | None) -> dict[str, Any]:
         "offline_runtime_tree_binding": "signed_extraction_manifest_required",
         "offline_runtime_tool_execution": "disabled_static_inspection_only",
         "offline_return_channel": "temporary_directory_fixture_only",
+        "official_publisher_trust": "pinned_clonezilla_drbl_only",
+        "local_extraction_attestation": "required_separate_trust_root",
+        "local_attestation_fingerprint": "",
+        "local_signing": "unavailable_not_configured",
+        "real_extraction": "disabled",
+        "static_inspection": "only",
+        "real_execution": "disabled",
     }
     result = defaults | raw
     try:
@@ -362,6 +370,10 @@ def validate_disk_clone_config(config: dict[str, Any] | None) -> dict[str, Any]:
         raise DiskCloneConfigError("A execucao real permanece desativada nesta fase.")
     if result["offline_runtime_validation"] != "static_or_virtual_only" or result["offline_runtime_tree_binding"] != "signed_extraction_manifest_required" or result["offline_runtime_tool_execution"] != "disabled_static_inspection_only" or result["offline_return_channel"] != "temporary_directory_fixture_only":
         raise DiskCloneConfigError("A politica de runtime offline nao e allowlisted.")
+    if result["official_publisher_trust"] != "pinned_clonezilla_drbl_only" or result["local_extraction_attestation"] != "required_separate_trust_root" or result["local_signing"] != "unavailable_not_configured" or result["real_extraction"] != "disabled" or result["static_inspection"] != "only" or result["real_execution"] != "disabled":
+        raise DiskCloneConfigError("A politica de confianca do runtime offline nao e allowlisted.")
+    if not isinstance(result["local_attestation_fingerprint"], str) or len(result["local_attestation_fingerprint"]) > 64:
+        raise DiskCloneConfigError("A evidencia do attestor local e invalida.")
     if _parse_clock(result["window_start"]) >= _parse_clock(result["window_end"]):
         raise DiskCloneConfigError("A janela de clone deve ter inicio antes do fim.")
     if not _clean(result["provider"]):

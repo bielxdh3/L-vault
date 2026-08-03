@@ -11,7 +11,7 @@ L-vault uses a two-stage boundary:
 
 The USB path is intentionally manual and not configured by this repository. It avoids permanent boot-order changes and makes the return to Windows a human action. No BCD, UEFI NVRAM, BootNext, recovery partition, PXE configuration, USB device, or reboot is touched here.
 
-The implementation keeps the private signing key outside the package. Production detached verification now uses an explicitly supplied `gpgv` binary and read-only pinned public keyring, a full fingerprint, bounded argv execution, minimal environment, timeout, and bounded output. No key discovery or private-key operation is performed. Tests continue to use an in-memory fake signer/verifier for the synthetic round trip.
+The implementation keeps the private signing key outside the package. Official publisher provenance and local extraction attestation are separate trust domains: `OfficialChecksumVerifier` accepts only the pinned DRBL/Clonezilla fingerprint and keyring, while `LocalExtractionAttestationVerifier` accepts only a separately configured L-vault attestor. The validator rejects shared fingerprints, shared derived keyring digests, role substitution, missing derived evidence, and legacy collapsed signer fields. Production detached verification uses explicitly supplied `gpgv` binaries and read-only pinned public keyrings; no key discovery or private-key operation is performed.
 
 ## Identity and package safety
 
@@ -52,16 +52,16 @@ ocs-onthefly -f <fresh-source-node> -d <fresh-target-node> -k0 -j2 -r -iefi -p t
 
 ## Virtual runtime contract
 
-`OfflineRuntimeManifest` is the authoritative runtime-artifact evidence object. It binds the pinned release, architecture, exact ISO filename and SHA-256, official checksum-manifest SHA-256, detached-checksum state, the normalized fingerprint and keyring SHA-256 derived from the verifier/keyring actually used, a signed extraction-manifest digest and inventory digest, strict required-tool evidence, job/result schemas, renderer policy, return-channel type, and explicit `vm_boot_completed=false`/`physical_boot_completed=false`. It is canonical JSON with a detached signature and rejects unsafe paths, release drift, extra fields, and tampering.
+`OfflineRuntimeManifest` is the authoritative runtime-artifact evidence object. It separately records official checksum-manifest/signature/fingerprint/keyring evidence and local attestation scheme/domain/fingerprint/keyring, extraction policy, signed manifest/inventory digests, exact ISO binding, strict required-tool evidence, job/result schemas, renderer policy, return-channel type, and explicit `vm_boot_completed=false`/`physical_boot_completed=false`. It is canonical JSON with a detached signature and rejects unsafe paths, release drift, extra fields, legacy collapsed signer fields, and tampering.
 
-`OfflineRuntimeValidator` only reads a caller-supplied ISO, checksum manifest, signed extraction manifest, and extracted tree. A directory containing files with the right names is never enough: the extraction manifest must be canonical, signed, bound to the exact ISO filename/digest, and a complete inventory match for the tree. Required tools must be exactly one regular, non-empty, bounded, executable candidate at an allowlisted image path; they are reported as `present_unexecuted` and are never executed. Symlinks, special files, overlays, traversal, duplicate candidates, altered digests, stale signatures, and unrelated trees block the state. On this machine the official ISO, extracted tree, and safe VM stack were not present, so the honest state is `offline_runtime_blocked`; no VM boot occurred.
+`OfflineRuntimeValidator` only reads a caller-supplied ISO, official checksum manifest, local signed extraction attestation, and extracted tree. A directory containing files with the right names is never enough: the attestation must use the fixed `localvault.clonezilla.extraction-attestation.v1` domain, canonical signed payload, exact ISO filename/digest, and complete inventory match. `synthetic_test` can return only `offline_runtime_synthetic_validation_passed`; the normal `production_static` profile rejects synthetic methods, fake verifiers, and fixture-only overrides. Required tools must be exactly one regular, non-empty, bounded, executable candidate at an allowlisted image path; they are reported as `present_unexecuted` and are never executed. Symlinks, special files, overlays, traversal, duplicate candidates, altered digests, stale signatures, and unrelated trees block the state. On this machine the official ISO, extracted tree, and trusted local attestor were not present, so the honest state is `offline_runtime_blocked`; no VM boot occurred.
 
 `VirtualReturnChannel` is a temporary-directory fixture for the future dedicated FAT exchange volume. Its durable states are `pending -> running -> result -> consumed`, with `failed` as a terminal fail-closed state. Result and binding manifests are signed, atomically published, nonce/job-bound, bounded, replay-resistant across restart, and recovered as failed after partial publication. `VirtualOfflineRunner` accepts only the structural `VirtualSimulationPolicy`; it resolves synthetic devices, renders argv, and publishes a fake result without an engine subprocess. A production consumer rejects that fake result.
 
 The safe command is:
 
 ```powershell
-python -m localvault disk-clone-runtime-validate --root <vault-root> --iso <official.iso> --extracted-tree <tree> --checksums <SHA256SUMS> --checksums-signature <SHA256SUMS.sig> --extraction-manifest <extraction-manifest.json> --extraction-signature <extraction-manifest.sig> --verifier-binary <gpgv> --public-keyring <trusted.gpg>
+python -m localvault disk-clone-runtime-validate --root <vault-root> --iso <official.iso> --extracted-tree <tree> --checksums <SHA256SUMS> --checksums-signature <SHA256SUMS.sig> --extraction-manifest <extraction-manifest.json> --extraction-signature <extraction-manifest.sig> --official-verifier-binary <gpgv> --official-public-keyring <drbl-public.gpg> --local-attestation-verifier-binary <gpgv> --local-attestation-public-keyring <local-attestor-public.gpg>
 ```
 
 The virtual-only return-channel fixture remains separate:
@@ -70,7 +70,7 @@ The virtual-only return-channel fixture remains separate:
 python -m localvault disk-clone-virtual-roundtrip --root <vault-root>
 ```
 
-The first command reports whether the ISO hash, official checksum signature, verifier evidence, signed tree binding, and static tool policy passed. The second uses only synthetic devices and temporary files and reports `consumed` only after the signed result has completed the durable virtual round trip. Neither command proves bootability, Secure Boot operation on this machine, VM boot, physical boot, or a real clone.
+The first command defaults to `production_static` and reports whether official publisher provenance, local extraction attestation, exact ISO/tree binding, and static tool policy passed. `--profile synthetic_test` is test-only and cannot produce production static success. A local signature attests that the trusted local extraction workflow signed the manifest; it is not Clonezilla/DRBL provenance and does not prove arbitrary extraction correctness. The second command uses only synthetic devices and temporary files and reports `consumed` only after the signed result has completed the durable virtual round trip. Neither command proves bootability, Secure Boot operation on this machine, VM boot, physical boot, or a real clone.
 
 ## Safe next phase
 
