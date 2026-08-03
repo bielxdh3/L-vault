@@ -49,6 +49,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "offline_runtime_tree_binding": "signed_extraction_manifest_required",
         "offline_runtime_tool_execution": "disabled_static_inspection_only",
         "offline_return_channel": "temporary_directory_fixture_only",
+        "official_publisher_trust": "pinned_clonezilla_drbl_only",
+        "local_extraction_attestation": "required_separate_trust_root",
+        "local_attestation_fingerprint": "",
+        "local_signing": "unavailable_not_configured",
+        "real_extraction": "disabled",
+        "static_inspection": "only",
+        "real_execution": "disabled",
         "protected_paths": [],
     },
     "automation": {

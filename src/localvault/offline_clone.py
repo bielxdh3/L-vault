@@ -383,6 +383,14 @@ class FakeDetachedSigner:
 
 
 class FakeDetachedVerifier(FakeDetachedSigner):
+    @property
+    def verification_evidence(self) -> SignatureVerificationEvidence:
+        key_material = hashlib.sha256(self._secret).digest()
+        return SignatureVerificationEvidence(
+            pinned_fingerprint=hashlib.sha256(key_material).hexdigest()[:40].upper(),
+            keyring_sha256=hashlib.sha256(key_material).hexdigest(),
+        )
+
     def verify(self, payload: bytes, signature: bytes) -> bool:
         return secrets.compare_digest(self.sign(payload), signature)
 
@@ -418,6 +426,7 @@ class ProductionOfflineSignatureVerifier:
             raise OfflineCloneBlocked("pinned public-key fingerprint is invalid", "offline_verification_failed")
         if not (0 < self.timeout_seconds <= 60 and 0 < self.max_output_bytes <= 1024 * 1024):
             raise OfflineCloneBlocked("detached verifier limits are invalid", "offline_verification_failed")
+        self._check_paths()
 
     @staticmethod
     def _bounded_reader(pipe, limit: int, output: list[bytes]) -> None:
