@@ -23,8 +23,8 @@ from .disk_clone import (
 
 WARNING_TEXT = (
     "PREPARACAO DE CLONAGEM OFFLINE\n\n"
-    "O L-vault prepara um job assinado para Clonezilla Live; a clonagem ocorre somente depois de um boot offline manual.\n\n"
-    "Nenhum software pago e necessario. Este fluxo nao reinicia, nao altera boot e nao escreve em discos nesta fase."
+    "O L-vault prepara um job assinado para Clonezilla Live; uma arvore estatica so e aceita quando esta criptograficamente vinculada ao ISO verificado.\n\n"
+    "As ferramentas sao apenas inspecionadas, nunca executadas. VM, Secure Boot, boot fisico, reinicio e escrita em discos nao ocorreram nesta fase."
 )
 
 RUN_STATES = {
