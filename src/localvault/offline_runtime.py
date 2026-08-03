@@ -74,6 +74,8 @@ REQUIRED_RUNTIME_TOOLS = (
     "ocs-onthefly",
 )
 CLONEZILLA_SIGNER_FINGERPRINT = "54C0821A48715DAFD61BFCAF667857D045599AFD"
+CLONEZILLA_STABLE_AMD64_ISO_FILENAME = "clonezilla-live-3.3.3-15-amd64.iso"
+CLONEZILLA_STABLE_AMD64_ISO_SHA256 = "482518ea32af3b82ed15d09e2e7714806775deb62aeed81491e534f6cc6bbc47"
 LOCAL_EXTRACTION_ATTESTATION_DOMAIN = "localvault.clonezilla.extraction-attestation.v1"
 LOCAL_EXTRACTION_ATTESTATION_SCHEME = "detached-gpgv-v1"
 PRODUCTION_EXTRACTION_METHOD = "clonezilla-iso-extract-v1"
@@ -94,6 +96,13 @@ _TOOL_PATH_ALLOWLIST = {
     name: frozenset(f"{directory}/{name}" for directory in ("bin", "sbin", "usr/bin", "usr/sbin"))
     for name in REQUIRED_RUNTIME_TOOLS
 }
+
+
+def _canonical_fingerprint(value: Any) -> str:
+    fingerprint = re.sub(r"\s+", "", str(value)).upper()
+    if not _HEX_FINGERPRINT.fullmatch(fingerprint):
+        raise OfflineCloneBlocked("detached verifier evidence is invalid", "offline_verification_failed")
+    return fingerprint
 
 
 def _now() -> str:
@@ -159,9 +168,60 @@ def _derived_verifier_evidence(verifier: Any) -> SignatureVerificationEvidence:
         raise OfflineCloneBlocked("detached verifier did not expose derived key evidence", "offline_verification_failed") from exc
     if not isinstance(evidence, SignatureVerificationEvidence):
         raise OfflineCloneBlocked("detached verifier evidence has an invalid type", "offline_verification_failed")
-    if not _HEX_FINGERPRINT.fullmatch(evidence.pinned_fingerprint) or not _HEX64.fullmatch(evidence.keyring_sha256):
+    fingerprint = _canonical_fingerprint(evidence.pinned_fingerprint)
+    keyring_sha256 = str(evidence.keyring_sha256).lower()
+    if not _HEX64.fullmatch(keyring_sha256):
         raise OfflineCloneBlocked("detached verifier evidence is invalid", "offline_verification_failed")
-    return evidence
+    return SignatureVerificationEvidence(pinned_fingerprint=fingerprint, keyring_sha256=keyring_sha256)
+
+
+@dataclass(frozen=True, init=False)
+class ClonezillaProductionTrustPolicy:
+    """Immutable production contract for the supported Clonezilla artifact."""
+
+    release: str
+    architecture: str
+    official_iso_filename: str
+    official_signer_fingerprint: str
+    official_iso_sha256: str
+
+    def __init__(self) -> None:
+        # Keep the production contract independent from caller/config/test data.
+        object.__setattr__(self, "release", "3.3.3-15")
+        object.__setattr__(self, "architecture", "amd64")
+        object.__setattr__(self, "official_iso_filename", "clonezilla-live-3.3.3-15-amd64.iso")
+        object.__setattr__(self, "official_signer_fingerprint", "54C0821A48715DAFD61BFCAF667857D045599AFD")
+        object.__setattr__(self, "official_iso_sha256", "482518ea32af3b82ed15d09e2e7714806775deb62aeed81491e534f6cc6bbc47")
+
+    def validate(self) -> None:
+        if (
+            self.release != "3.3.3-15"
+            or self.architecture != "amd64"
+            or self.official_iso_filename != "clonezilla-live-3.3.3-15-amd64.iso"
+            or self.official_signer_fingerprint != "54C0821A48715DAFD61BFCAF667857D045599AFD"
+            or self.official_iso_sha256 != "482518ea32af3b82ed15d09e2e7714806775deb62aeed81491e534f6cc6bbc47"
+        ):
+            raise OfflineCloneBlocked("production Clonezilla trust policy is not the compiled contract", "offline_verification_failed")
+
+    @property
+    def expected_iso_sha256(self) -> str:
+        return self.official_iso_sha256
+
+
+@dataclass(frozen=True)
+class SyntheticRuntimeTrustPolicy:
+    """Fixture-only digest policy; never accepted by production validation."""
+
+    expected_iso_sha256: str
+    release: str = "3.3.3-15"
+    architecture: str = "amd64"
+    official_iso_filename: str | None = None
+
+    def __post_init__(self) -> None:
+        digest = str(self.expected_iso_sha256).strip().lower()
+        if not _HEX64.fullmatch(digest):
+            raise OfflineCloneBlocked("synthetic ISO digest is invalid", "offline_verification_failed")
+        object.__setattr__(self, "expected_iso_sha256", digest)
 
 
 class _VerifierRole:
@@ -189,6 +249,13 @@ class _VerifierRole:
 
 class OfficialChecksumVerifier(_VerifierRole):
     """Only verifies the official Clonezilla/DRBL checksum manifest."""
+
+    @property
+    def verification_evidence(self) -> SignatureVerificationEvidence:
+        evidence = super().verification_evidence
+        if isinstance(self.raw_verifier, ProductionOfflineSignatureVerifier) and evidence.pinned_fingerprint != ClonezillaProductionTrustPolicy().official_signer_fingerprint:
+            raise OfflineCloneBlocked("official_fingerprint_not_pinned", "offline_verification_failed")
+        return evidence
 
 
 class LocalExtractionAttestationVerifier(_VerifierRole):
@@ -494,9 +561,16 @@ class RuntimeReadinessReport:
 class OfflineRuntimeValidator:
     """Inspect only a supplied, cryptographically bound ISO/tree; never boots it."""
 
-    def __init__(self, *, expected_release: str = OFFLINE_ENGINE_VERSION, expected_iso_sha256: str = "482518ea32af3b82ed15d09e2e7714806775deb62aeed81491e534f6cc6bbc47"):
-        self.expected_release = expected_release
-        self.expected_iso_sha256 = expected_iso_sha256.lower()
+    def __init__(self) -> None:
+        self._trust_policy: ClonezillaProductionTrustPolicy | SyntheticRuntimeTrustPolicy = ClonezillaProductionTrustPolicy()
+        self._profile = RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC
+
+    @classmethod
+    def synthetic_test(cls, expected_iso_sha256: str) -> "OfflineRuntimeValidator":
+        validator = cls.__new__(cls)
+        validator._trust_policy = SyntheticRuntimeTrustPolicy(expected_iso_sha256)
+        validator._profile = RUNTIME_VALIDATION_PROFILE_SYNTHETIC_TEST
+        return validator
 
     @staticmethod
     def _scan_tree(root: Path) -> tuple[list[dict[str, Any]], list[str]]:
@@ -604,10 +678,10 @@ class OfflineRuntimeValidator:
         extraction_manifest_path: Path | None = None,
         extraction_manifest_signature: bytes | None = None,
         provenance: str = "official-artifact-not-present",
-        architecture: str = "amd64",
         vm_boot_completed: bool = False,
-        profile: str = RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC,
     ) -> RuntimeReadinessReport:
+        profile = self._profile
+        trust_policy = self._trust_policy
         blockers: list[str] = []
         evidence: dict[str, Any] = {
             "validation_profile": profile,
@@ -628,8 +702,6 @@ class OfflineRuntimeValidator:
             "vm_boot_completed": False,
             "physical_boot_completed": False,
         }
-        if profile not in {RUNTIME_VALIDATION_PROFILE_SYNTHETIC_TEST, RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC}:
-            blockers.append("offline_runtime_validation_profile_invalid")
         iso_digest = ""
         iso_name = Path(iso_path).name if iso_path else ""
         checksum_digest = ""
@@ -638,7 +710,12 @@ class OfflineRuntimeValidator:
         official_evidence: SignatureVerificationEvidence | None = None
         local_evidence: SignatureVerificationEvidence | None = None
         extraction: RuntimeExtractionManifest | None = None
-        if self.expected_release != OFFLINE_ENGINE_VERSION:
+        if isinstance(trust_policy, ClonezillaProductionTrustPolicy):
+            try:
+                trust_policy.validate()
+            except OfflineCloneBlocked as exc:
+                blockers.append(exc.reason)
+        if trust_policy.release != "3.3.3-15":
             blockers.append("pinned_release_changed_without_compatibility_decision")
 
         if type(official_verifier) is not OfficialChecksumVerifier:
@@ -648,6 +725,8 @@ class OfflineRuntimeValidator:
                 official_evidence = official_verifier.verification_evidence
                 evidence["official_signer_fingerprint"] = official_evidence.pinned_fingerprint
                 evidence["official_keyring_sha256"] = official_evidence.keyring_sha256
+                if profile == RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC and official_evidence.pinned_fingerprint != trust_policy.official_signer_fingerprint:
+                    blockers.append("official_fingerprint_not_pinned")
                 if profile == RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC and not isinstance(official_verifier.raw_verifier, ProductionOfflineSignatureVerifier):
                     blockers.append("production_official_verifier_is_test_only")
             except OfflineCloneBlocked as exc:
@@ -690,7 +769,9 @@ class OfflineRuntimeValidator:
                 except OfflineCloneBlocked as exc:
                     blockers.append(exc.reason)
                 evidence["iso_sha256"] = iso_digest
-                if iso_digest != self.expected_iso_sha256:
+                if trust_policy.official_iso_filename is not None and iso_name != trust_policy.official_iso_filename:
+                    blockers.append("official_iso_filename_mismatch")
+                if iso_digest != trust_policy.expected_iso_sha256:
                     blockers.append("iso_checksum_mismatch")
                 if checksums_path is None:
                     blockers.append("official_checksum_manifest_missing")
@@ -714,10 +795,10 @@ class OfflineRuntimeValidator:
                             checksum_signature_state = "verified"
                             evidence["official_signature_verified"] = True
                             evidence["official_signature_state"] = "verified"
-                            expected_line = re.compile(rf"^{re.escape(self.expected_iso_sha256)}\s+\*?{re.escape(iso_name)}\s*$", re.IGNORECASE | re.MULTILINE)
+                            expected_line = re.compile(rf"^{re.escape(trust_policy.expected_iso_sha256)}\s+\*?{re.escape(iso_name)}\s*$", re.IGNORECASE | re.MULTILINE)
                             if not expected_line.search(checksum_raw.decode("utf-8")):
                                 blockers.append("official_checksum_entry_missing")
-                            elif iso_digest != self.expected_iso_sha256:
+                            elif iso_digest != trust_policy.expected_iso_sha256:
                                 blockers.append("official_iso_digest_not_bound")
                             else:
                                 evidence["official_publisher_provenance_verified"] = True
@@ -771,7 +852,8 @@ class OfflineRuntimeValidator:
             blockers.append("vm_boot_claim_requires_recorded_isolated_run")
         evidence["vm_boot_completed"] = False
         artifact = RuntimeArtifactEvidence(
-            architecture=architecture,
+            clonezilla_release=trust_policy.release,
+            architecture=trust_policy.architecture,
             iso_filename=iso_name,
             iso_sha256=iso_digest,
             official_checksum_manifest_sha256=checksum_digest,
