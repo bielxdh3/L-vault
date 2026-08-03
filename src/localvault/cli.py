@@ -36,10 +36,12 @@ from .disk_clone_ui import native_countdown, run_native_ui
 from .offline_clone import ProductionOfflineSignatureVerifier, simulate_offline_round_trip
 from .offline_runtime import (
     CLONEZILLA_SIGNER_FINGERPRINT,
+    CLONEZILLA_STABLE_AMD64_ISO_SHA256,
     LocalExtractionAttestationVerifier,
     OfficialChecksumVerifier,
     OfflineRuntimeValidator,
     RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC,
+    RUNTIME_VALIDATION_PROFILE_SYNTHETIC_TEST,
     simulate_virtual_offline_round_trip,
 )
 from .gmail_api import backup_gmail_api as run_gmail_api
@@ -419,6 +421,8 @@ def disk_clone_runtime_validate(
 ):
     """Inspect supplied Clonezilla artifacts and their signed tree binding without booting or touching storage."""
     prepare(root)
+    if profile not in {RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC, RUNTIME_VALIDATION_PROFILE_SYNTHETIC_TEST}:
+        raise typer.BadParameter("profile must be production_static or synthetic_test", param_hint="--profile")
     config = load_config(root).get("disk_clone", {})
     official_verifier = None
     local_attestation_verifier = None
@@ -427,7 +431,8 @@ def disk_clone_runtime_validate(
     local_fingerprint = str(config.get("local_attestation_fingerprint", ""))
     if local_attestation_verifier_binary is not None and local_attestation_public_keyring is not None and local_fingerprint:
         local_attestation_verifier = LocalExtractionAttestationVerifier(ProductionOfflineSignatureVerifier(local_attestation_verifier_binary, local_attestation_public_keyring, local_fingerprint))
-    report = OfflineRuntimeValidator().validate(
+    validator = OfflineRuntimeValidator() if profile == RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC else OfflineRuntimeValidator.synthetic_test(CLONEZILLA_STABLE_AMD64_ISO_SHA256)
+    report = validator.validate(
         iso_path=iso,
         extracted_tree=extracted_tree,
         checksums_path=checksums,
@@ -436,7 +441,6 @@ def disk_clone_runtime_validate(
         local_attestation_verifier=local_attestation_verifier,
         extraction_manifest_path=extraction_manifest,
         extraction_manifest_signature=_read_signature_file(extraction_signature),
-        profile=profile,
     )
     console.print_json(json.dumps(report.payload(), ensure_ascii=False, default=str))
     if report.state == "offline_runtime_blocked":
