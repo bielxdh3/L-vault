@@ -1,4 +1,4 @@
-vault_root: E:\LocalVault
+vault_root: '<VAULT_ROOT>'
 viewer:
   host: 127.0.0.1
   port: 8787
@@ -6,8 +6,8 @@ viewer:
   page_size: 60
 gmail:
   api_enabled: false
-  credentials_file: E:\LocalVault\config\google_oauth_client_secret.json
-  token_file: E:\LocalVault\config\gmail_token.json
+  credentials_file: '<VAULT_ROOT>\config\google_oauth_client_secret.json'
+  token_file: '<VAULT_ROOT>\config\gmail_token.json'
   modify_remote: false
   batch_size: 100
 photos:
@@ -15,7 +15,7 @@ photos:
 source_sync:
   enabled: true
   google_takeout_sources:
-  - C:\Users\bielx\Downloads
+  - '<DOWNLOADS_DIRECTORY>'
 safety:
   minimum_free_gb: 20
   hash_algorithm: sha256
