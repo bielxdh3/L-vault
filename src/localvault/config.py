@@ -44,6 +44,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "keep_target_offline": True,
         "allow_automatic_retry_same_night": False,
         "allow_real_provider_execution": False,
+        "real_execution_authorized": False,
+        "offline_runtime_validation": "static_or_virtual_only",
+        "offline_runtime_tree_binding": "signed_extraction_manifest_required",
+        "offline_runtime_tool_execution": "disabled_static_inspection_only",
+        "offline_return_channel": "temporary_directory_fixture_only",
         "protected_paths": [],
     },
     "automation": {

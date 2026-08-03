@@ -69,6 +69,14 @@ class DetachedVerifier(Protocol):
     def verify(self, payload: bytes, signature: bytes) -> bool: ...
 
 
+@dataclass(frozen=True)
+class SignatureVerificationEvidence:
+    """Evidence from the exact verifier/keyring used for a verification."""
+
+    pinned_fingerprint: str
+    keyring_sha256: str
+
+
 def canonical_json(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -388,7 +396,6 @@ class ProductionOfflineSignatureVerifier:
         public_keyring: Path | str,
         expected_fingerprint: str,
         *,
-        keyring_sha256: str | None = None,
         timeout_seconds: float = 10.0,
         max_payload_bytes: int = 8 * 1024 * 1024,
         max_signature_bytes: int = 256 * 1024,
@@ -398,15 +405,16 @@ class ProductionOfflineSignatureVerifier:
     ):
         self.verifier_binary = Path(verifier_binary)
         self.public_keyring = Path(public_keyring)
-        self.expected_fingerprint = re.sub(r"\s+", "", str(expected_fingerprint)).upper()
-        self.keyring_sha256 = keyring_sha256
+        self._pinned_fingerprint = re.sub(r"\s+", "", str(expected_fingerprint)).upper()
+        self._bound_keyring_sha256: str | None = None
+        self._last_verification_evidence: SignatureVerificationEvidence | None = None
         self.timeout_seconds = float(timeout_seconds)
         self.max_payload_bytes = int(max_payload_bytes)
         self.max_signature_bytes = int(max_signature_bytes)
         self.max_output_bytes = int(max_output_bytes)
         self.command_prefix = tuple(str(item) for item in command_prefix)
         self.command_suffix = tuple(str(item) for item in command_suffix)
-        if not re.fullmatch(r"[0-9A-F]{40,64}", self.expected_fingerprint):
+        if not re.fullmatch(r"[0-9A-F]{40,64}", self._pinned_fingerprint):
             raise OfflineCloneBlocked("pinned public-key fingerprint is invalid", "offline_verification_failed")
         if not (0 < self.timeout_seconds <= 60 and 0 < self.max_output_bytes <= 1024 * 1024):
             raise OfflineCloneBlocked("detached verifier limits are invalid", "offline_verification_failed")
@@ -428,6 +436,26 @@ class ProductionOfflineSignatureVerifier:
         finally:
             pipe.close()
 
+    @property
+    def expected_fingerprint(self) -> str:
+        return self._pinned_fingerprint
+
+    @property
+    def pinned_fingerprint(self) -> str:
+        return self._pinned_fingerprint
+
+    @property
+    def keyring_sha256(self) -> str:
+        if self._last_verification_evidence is None:
+            self._check_paths()
+        return self.verification_evidence.keyring_sha256
+
+    @property
+    def verification_evidence(self) -> SignatureVerificationEvidence:
+        if self._last_verification_evidence is None:
+            raise OfflineCloneBlocked("detached verifier evidence is unavailable", "offline_verification_failed")
+        return self._last_verification_evidence
+
     def _check_paths(self) -> None:
         for label, path in (("verifier", self.verifier_binary), ("public keyring", self.public_keyring)):
             if path.is_symlink() or not path.is_file():
@@ -439,8 +467,14 @@ class ProductionOfflineSignatureVerifier:
             keyring_bytes = self.public_keyring.read_bytes()
             if _PRIVATE_KEY.search(keyring_bytes.decode("utf-8", errors="ignore")):
                 raise OfflineCloneBlocked("offline public keyring contains private key material", "offline_verification_failed")
-            if self.keyring_sha256 and hashlib.sha256(keyring_bytes).hexdigest() != self.keyring_sha256.lower():
-                raise OfflineCloneBlocked("offline public keyring digest does not match the pin", "offline_verification_failed")
+            keyring_sha256 = hashlib.sha256(keyring_bytes).hexdigest()
+            if self._bound_keyring_sha256 is not None and self._bound_keyring_sha256 != keyring_sha256:
+                raise OfflineCloneBlocked("offline public keyring changed during verification", "offline_verification_failed")
+            self._bound_keyring_sha256 = keyring_sha256
+            self._last_verification_evidence = SignatureVerificationEvidence(
+                pinned_fingerprint=self._pinned_fingerprint,
+                keyring_sha256=keyring_sha256,
+            )
         except OSError as exc:
             raise OfflineCloneBlocked("offline public keyring cannot be inspected", "offline_verification_failed") from exc
 

@@ -33,8 +33,8 @@ from .disk_clone import (
     resolved_protected_path_conflicts,
 )
 from .disk_clone_ui import native_countdown, run_native_ui
-from .offline_clone import simulate_offline_round_trip
-from .offline_runtime import OfflineRuntimeValidator, simulate_virtual_offline_round_trip
+from .offline_clone import ProductionOfflineSignatureVerifier, simulate_offline_round_trip
+from .offline_runtime import CLONEZILLA_SIGNER_FINGERPRINT, OfflineRuntimeValidator, simulate_virtual_offline_round_trip
 from .gmail_api import backup_gmail_api as run_gmail_api
 from .gmail_audit import audit_gmail_duplicates, repair_stale_gmail_runs
 from .gmail_maintenance import rename_existing_gmail_files
@@ -71,6 +71,14 @@ def prepare(root: Path):
     migrate_to_takeout_photos(p)
     configure_logging(p.logs)
     return p
+
+
+def _read_signature_file(path: Optional[Path]) -> bytes | None:
+    if path is None:
+        return None
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 256 * 1024:
+        raise typer.BadParameter("signature file is missing, unsafe, or oversized")
+    return path.read_bytes()
 
 
 def configure_logging(logs_dir: Path) -> None:
@@ -392,10 +400,27 @@ def disk_clone_runtime_validate(
     root: Path = root_option(),
     iso: Optional[Path] = typer.Option(None, "--iso", help="Existing official Clonezilla ISO; never downloaded."),
     extracted_tree: Optional[Path] = typer.Option(None, "--extracted-tree", help="Existing extracted ISO tree; never modified."),
+    checksums: Optional[Path] = typer.Option(None, "--checksums", help="Signed official checksum manifest; never downloaded."),
+    checksums_signature: Optional[Path] = typer.Option(None, "--checksums-signature", help="Detached signature for --checksums."),
+    extraction_manifest: Optional[Path] = typer.Option(None, "--extraction-manifest", help="Canonical signed extraction manifest for --extracted-tree."),
+    extraction_signature: Optional[Path] = typer.Option(None, "--extraction-signature", help="Detached signature for --extraction-manifest."),
+    verifier_binary: Optional[Path] = typer.Option(None, "--verifier-binary", help="Explicit read-only gpgv-compatible verifier; never discovered."),
+    public_keyring: Optional[Path] = typer.Option(None, "--public-keyring", help="Pinned read-only public keyring used by the verifier."),
 ):
-    """Inspect supplied Clonezilla artifacts without booting or touching storage."""
+    """Inspect supplied Clonezilla artifacts and their signed tree binding without booting or touching storage."""
     prepare(root)
-    report = OfflineRuntimeValidator().validate(iso_path=iso, extracted_tree=extracted_tree)
+    verifier = None
+    if verifier_binary is not None and public_keyring is not None:
+        verifier = ProductionOfflineSignatureVerifier(verifier_binary, public_keyring, CLONEZILLA_SIGNER_FINGERPRINT)
+    report = OfflineRuntimeValidator().validate(
+        iso_path=iso,
+        extracted_tree=extracted_tree,
+        checksums_path=checksums,
+        checksums_signature=_read_signature_file(checksums_signature),
+        verifier=verifier,
+        extraction_manifest_path=extraction_manifest,
+        extraction_manifest_signature=_read_signature_file(extraction_signature),
+    )
     console.print_json(json.dumps(report.payload(), ensure_ascii=False, default=str))
     if report.state == "offline_runtime_blocked":
         raise typer.Exit(1)

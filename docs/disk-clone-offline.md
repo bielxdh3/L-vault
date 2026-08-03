@@ -52,20 +52,25 @@ ocs-onthefly -f <fresh-source-node> -d <fresh-target-node> -k0 -j2 -r -iefi -p t
 
 ## Virtual runtime contract
 
-`OfflineRuntimeManifest` binds the pinned release, architecture, ISO SHA-256 and detached-checksum state, required tool presence, public-key fingerprint/keyring digest, job/result schemas, renderer policy, return-channel type, Secure Boot evidence, and explicit `physical_boot_completed=false`. It is canonical JSON with a detached signature and rejects unsafe paths, release drift, extra fields, and tampering.
+`OfflineRuntimeManifest` is the authoritative runtime-artifact evidence object. It binds the pinned release, architecture, exact ISO filename and SHA-256, official checksum-manifest SHA-256, detached-checksum state, the normalized fingerprint and keyring SHA-256 derived from the verifier/keyring actually used, a signed extraction-manifest digest and inventory digest, strict required-tool evidence, job/result schemas, renderer policy, return-channel type, and explicit `vm_boot_completed=false`/`physical_boot_completed=false`. It is canonical JSON with a detached signature and rejects unsafe paths, release drift, extra fields, and tampering.
 
-`OfflineRuntimeValidator` only reads a caller-supplied ISO or extracted tree. It never downloads, installs, boots, mounts, attaches, or modifies an artifact. It rejects missing or mismatched provenance, missing tools, symlink escapes, unexpected overlay markers, and unverifiable checksum manifests. On this machine the official ISO, extracted tree, and safe VM stack were not present, so the honest state is `offline_runtime_blocked`; no VM boot occurred.
+`OfflineRuntimeValidator` only reads a caller-supplied ISO, checksum manifest, signed extraction manifest, and extracted tree. A directory containing files with the right names is never enough: the extraction manifest must be canonical, signed, bound to the exact ISO filename/digest, and a complete inventory match for the tree. Required tools must be exactly one regular, non-empty, bounded, executable candidate at an allowlisted image path; they are reported as `present_unexecuted` and are never executed. Symlinks, special files, overlays, traversal, duplicate candidates, altered digests, stale signatures, and unrelated trees block the state. On this machine the official ISO, extracted tree, and safe VM stack were not present, so the honest state is `offline_runtime_blocked`; no VM boot occurred.
 
 `VirtualReturnChannel` is a temporary-directory fixture for the future dedicated FAT exchange volume. Its durable states are `pending -> running -> result -> consumed`, with `failed` as a terminal fail-closed state. Result and binding manifests are signed, atomically published, nonce/job-bound, bounded, replay-resistant across restart, and recovered as failed after partial publication. `VirtualOfflineRunner` accepts only the structural `VirtualSimulationPolicy`; it resolves synthetic devices, renders argv, and publishes a fake result without an engine subprocess. A production consumer rejects that fake result.
 
-The safe commands are:
+The safe command is:
 
 ```powershell
-python -m localvault disk-clone-runtime-validate --root <vault-root>
+python -m localvault disk-clone-runtime-validate --root <vault-root> --iso <official.iso> --extracted-tree <tree> --checksums <SHA256SUMS> --checksums-signature <SHA256SUMS.sig> --extraction-manifest <extraction-manifest.json> --extraction-signature <extraction-manifest.sig> --verifier-binary <gpgv> --public-keyring <trusted.gpg>
+```
+
+The virtual-only return-channel fixture remains separate:
+
+```powershell
 python -m localvault disk-clone-virtual-roundtrip --root <vault-root>
 ```
 
-The first command reports blockers when artifacts are absent. The second uses only synthetic devices and temporary files and reports `consumed` only after the signed result has completed the durable virtual round trip. Neither command proves bootability, Secure Boot operation on this machine, or a real clone.
+The first command reports whether the ISO hash, official checksum signature, verifier evidence, signed tree binding, and static tool policy passed. The second uses only synthetic devices and temporary files and reports `consumed` only after the signed result has completed the durable virtual round trip. Neither command proves bootability, Secure Boot operation on this machine, VM boot, physical boot, or a real clone.
 
 ## Safe next phase
 

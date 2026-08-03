@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import textwrap
 from datetime import datetime, timedelta, timezone
@@ -16,11 +17,14 @@ from localvault.offline_clone import (
     OfflineBlockDevice,
     OfflineCloneBlocked,
     ProductionOfflineSignatureVerifier,
+    SignatureVerificationEvidence,
     build_offline_job,
     resolve_offline_devices,
 )
 from localvault.offline_runtime import (
     REQUIRED_RUNTIME_TOOLS,
+    RuntimeArtifactEvidence,
+    RuntimeExtractionManifest,
     OfflineRuntimeManifest,
     OfflineRuntimeValidator,
     RuntimeManifestStore,
@@ -48,12 +52,40 @@ def _tools_tree(root: Path) -> None:
     for name in REQUIRED_RUNTIME_TOOLS:
         folder = root / "usr" / ("sbin" if name == "ocs-onthefly" else "bin")
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / name).write_text("synthetic", encoding="utf-8")
+        path = folder / name
+        path.write_text("synthetic-" + name, encoding="utf-8")
+        path.chmod(0o755)
+
+
+class _FixtureVerifier(FakeDetachedVerifier):
+    @property
+    def verification_evidence(self) -> SignatureVerificationEvidence:
+        return SignatureVerificationEvidence("A" * 40, hashlib.sha256(b"fixture-public-keyring").hexdigest())
+
+
+def _extraction_manifest(tmp_path: Path, tree: Path, iso: Path, signer: FakeDetachedSigner, *, source_iso_sha256: str | None = None, force_executable: bool = True) -> tuple[Path, bytes]:
+    inventory, _ = OfflineRuntimeValidator._scan_tree(tree)
+    if force_executable:
+        for entry in inventory:
+            if Path(entry["path"]).name in REQUIRED_RUNTIME_TOOLS:
+                entry["executable"] = True
+    manifest = RuntimeExtractionManifest(
+        source_iso_filename=iso.name,
+        source_iso_sha256=source_iso_sha256 or hashlib.sha256(iso.read_bytes()).hexdigest(),
+        extraction_method="synthetic-test-fixture-v1",
+        inventory_sha256=hashlib.sha256(json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        files=tuple(inventory),
+    )
+    path = tmp_path / "extraction-manifest.json"
+    raw = manifest.canonical_bytes()
+    path.write_bytes(raw)
+    return path, signer.sign(raw)
 
 
 def test_manifest_is_canonical_signed_and_tampering_fails(tmp_path: Path):
-    tools = {name: {"present": True, "version": "fixture", "path": f"/usr/{'sbin' if name == 'ocs-onthefly' else 'bin'}/{name}"} for name in REQUIRED_RUNTIME_TOOLS}
-    manifest = OfflineRuntimeManifest(required_tools=tools, iso_sha256="a" * 64, iso_signature_state="verified", public_key_fingerprint="A" * 40)
+    tools = {name: {"present": True, "status": "present_unexecuted", "path": f"/usr/{'sbin' if name == 'ocs-onthefly' else 'bin'}/{name}", "file_type": "regular", "size": 8, "sha256": "a" * 64, "executable": True} for name in REQUIRED_RUNTIME_TOOLS}
+    artifact = RuntimeArtifactEvidence(iso_filename="clonezilla.iso", iso_sha256="a" * 64, official_checksum_manifest_sha256="b" * 64, official_checksum_signature_state="verified", official_checksum_signature_verified=True, signer_fingerprint="A" * 40, keyring_sha256="c" * 64, extraction_manifest_schema=1, extraction_method="synthetic-test-fixture-v1", extraction_manifest_sha256="d" * 64, extraction_inventory_sha256="e" * 64, required_tools=tools)
+    manifest = OfflineRuntimeManifest(artifact=artifact, iso_provenance="synthetic fixture")
     store = RuntimeManifestStore(tmp_path)
     package = store.create(manifest, FakeDetachedSigner())
     assert store.load(package, FakeDetachedVerifier()) == manifest
@@ -77,18 +109,26 @@ def test_runtime_validator_requires_official_artifacts_and_can_pass_static_fixtu
     checksums = tmp_path / "SHA256SUMS"
     checksums.write_text(f"{digest} *{iso.name}\n", encoding="utf-8")
     signer = FakeDetachedSigner()
+    verifier = _FixtureVerifier()
+    extraction_manifest, extraction_signature = _extraction_manifest(tmp_path, tree, iso, signer)
     report = OfflineRuntimeValidator(expected_iso_sha256=digest).validate(
         iso_path=iso,
         extracted_tree=tree,
         checksums_path=checksums,
         checksums_signature=signer.sign(checksums.read_bytes()),
-        verifier=FakeDetachedVerifier(),
+        verifier=verifier,
+        extraction_manifest_path=extraction_manifest,
+        extraction_manifest_signature=extraction_signature,
         provenance="official stable artifact; filename only",
     )
     assert report.state == "offline_runtime_static_validation_passed"
     assert report.blockers == ()
     assert report.manifest.physical_boot_completed is False
     assert report.manifest.vm_boot_completed is False
+    assert report.manifest.artifact.iso_filename == iso.name
+    assert report.manifest.artifact.signer_fingerprint == verifier.verification_evidence.pinned_fingerprint
+    assert report.manifest.artifact.keyring_sha256 == verifier.verification_evidence.keyring_sha256
+    assert report.evidence["extracted_tree_binding_verified"] is True
 
 
 def test_runtime_validator_rejects_missing_tool_and_checksum_mismatch(tmp_path: Path):
@@ -99,8 +139,164 @@ def test_runtime_validator_rejects_missing_tool_and_checksum_mismatch(tmp_path: 
     (tree / "usr" / "bin" / "gpgv").unlink()
     report = OfflineRuntimeValidator(expected_iso_sha256="0" * 64).validate(iso_path=iso, extracted_tree=tree)
     assert "iso_checksum_mismatch" in report.blockers
-    assert "missing_tool:gpgv" in report.blockers
+    assert "extracted_tree_binding_missing" in report.blockers
     assert report.state == "offline_runtime_blocked"
+
+
+def test_correct_iso_with_unrelated_fabricated_tree_is_blocked(tmp_path: Path):
+    iso = tmp_path / "clonezilla.iso"
+    iso.write_bytes(b"fixture")
+    tree = tmp_path / "unrelated-tree"
+    _tools_tree(tree)
+    checksums = tmp_path / "SHA256SUMS"
+    checksums.write_text(f"{hashlib.sha256(iso.read_bytes()).hexdigest()} *{iso.name}\n", encoding="utf-8")
+    signer = FakeDetachedSigner()
+    report = OfflineRuntimeValidator(expected_iso_sha256=hashlib.sha256(iso.read_bytes()).hexdigest()).validate(iso_path=iso, extracted_tree=tree, checksums_path=checksums, checksums_signature=signer.sign(checksums.read_bytes()), verifier=_FixtureVerifier())
+    assert report.state == "offline_runtime_blocked"
+    assert "extracted_tree_binding_missing" in report.blockers
+
+
+@pytest.mark.parametrize("kind", ["empty", "directory", "symlink", "outside", "duplicate", "non_executable"])
+def test_required_tool_policy_blocks_unsafe_candidates(tmp_path: Path, kind: str):
+    iso = tmp_path / "clonezilla.iso"
+    iso.write_bytes(b"fixture")
+    tree = tmp_path / "tree"
+    _tools_tree(tree)
+    candidate = tree / "usr" / "bin" / "gpg"
+    if kind == "empty":
+        candidate.write_bytes(b"")
+    elif kind == "directory":
+        candidate.unlink()
+        candidate.mkdir()
+    elif kind == "symlink":
+        candidate.unlink()
+        try:
+            candidate.symlink_to(tree / "usr" / "bin" / "gpgv")
+        except OSError:
+            pytest.skip("symlink fixtures are unavailable on this host")
+    elif kind == "outside":
+        candidate.unlink()
+        outside = tmp_path / "outside-gpg"
+        outside.write_text("outside", encoding="utf-8")
+        try:
+            candidate.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlink fixtures are unavailable on this host")
+    elif kind == "duplicate":
+        duplicate = tree / "usr" / "sbin" / "gpg"
+        duplicate.parent.mkdir(parents=True, exist_ok=True)
+        duplicate.write_text("duplicate", encoding="utf-8")
+        duplicate.chmod(0o755)
+    elif kind == "non_executable":
+        candidate.chmod(0o644)
+    signer = FakeDetachedSigner()
+    manifest, signature = _extraction_manifest(tmp_path, tree, iso, signer, force_executable=kind != "non_executable")
+    checksums = tmp_path / "SHA256SUMS"
+    digest = hashlib.sha256(iso.read_bytes()).hexdigest()
+    checksums.write_text(f"{digest} *{iso.name}\n", encoding="utf-8")
+    report = OfflineRuntimeValidator(expected_iso_sha256=digest).validate(iso_path=iso, extracted_tree=tree, checksums_path=checksums, checksums_signature=signer.sign(checksums.read_bytes()), verifier=_FixtureVerifier(), extraction_manifest_path=manifest, extraction_manifest_signature=signature)
+    assert report.state == "offline_runtime_blocked"
+    assert any(name in " ".join(report.blockers) for name in ("gpg", "symlink", "non_executable", "ambiguous", "missing"))
+
+
+def test_tree_manifest_binding_rejects_wrong_iso_digest_and_altered_file(tmp_path: Path):
+    iso = tmp_path / "clonezilla.iso"
+    iso.write_bytes(b"fixture")
+    tree = tmp_path / "tree"
+    _tools_tree(tree)
+    signer = FakeDetachedSigner()
+    wrong_manifest, wrong_signature = _extraction_manifest(tmp_path, tree, iso, signer, source_iso_sha256="f" * 64)
+    checksums = tmp_path / "SHA256SUMS"
+    digest = hashlib.sha256(iso.read_bytes()).hexdigest()
+    checksums.write_text(f"{digest} *{iso.name}\n", encoding="utf-8")
+    report = OfflineRuntimeValidator(expected_iso_sha256=digest).validate(iso_path=iso, extracted_tree=tree, checksums_path=checksums, checksums_signature=signer.sign(checksums.read_bytes()), verifier=_FixtureVerifier(), extraction_manifest_path=wrong_manifest, extraction_manifest_signature=wrong_signature)
+    assert report.state == "offline_runtime_blocked"
+    assert "extracted_tree_source_iso_mismatch" in report.blockers
+
+    altered = tree / "usr" / "bin" / "gpg"
+    altered.write_text("altered", encoding="utf-8")
+    report = OfflineRuntimeValidator(expected_iso_sha256=digest).validate(iso_path=iso, extracted_tree=tree, checksums_path=checksums, checksums_signature=signer.sign(checksums.read_bytes()), verifier=_FixtureVerifier(), extraction_manifest_path=wrong_manifest, extraction_manifest_signature=wrong_signature)
+    assert report.state == "offline_runtime_blocked"
+    assert "extracted_tree_file_digest_mismatch" in report.blockers
+
+
+def test_extraction_manifest_is_strict_canonical_and_signed(tmp_path: Path):
+    iso = tmp_path / "clonezilla.iso"
+    iso.write_bytes(b"fixture")
+    tree = tmp_path / "tree"
+    _tools_tree(tree)
+    signer = FakeDetachedSigner()
+    manifest, signature = _extraction_manifest(tmp_path, tree, iso, signer)
+    raw = json.loads(manifest.read_text(encoding="utf-8"))
+    raw["unexpected"] = True
+    manifest.write_text(json.dumps(raw), encoding="utf-8")
+    checksums = tmp_path / "SHA256SUMS"
+    digest = hashlib.sha256(iso.read_bytes()).hexdigest()
+    checksums.write_text(f"{digest} *{iso.name}\n", encoding="utf-8")
+    report = OfflineRuntimeValidator(expected_iso_sha256=digest).validate(iso_path=iso, extracted_tree=tree, checksums_path=checksums, checksums_signature=signer.sign(checksums.read_bytes()), verifier=_FixtureVerifier(), extraction_manifest_path=manifest, extraction_manifest_signature=signature)
+    assert report.state == "offline_runtime_blocked"
+    assert "manifest" in " ".join(report.blockers)
+
+
+@pytest.mark.parametrize("mutation", ["added", "removed", "wrong_signature"])
+def test_extraction_manifest_changes_or_signature_replay_are_blocked(tmp_path: Path, mutation: str):
+    iso = tmp_path / "clonezilla.iso"
+    iso.write_bytes(b"fixture")
+    tree = tmp_path / "tree"
+    _tools_tree(tree)
+    signer = FakeDetachedSigner()
+    manifest, signature = _extraction_manifest(tmp_path, tree, iso, signer)
+    if mutation == "wrong_signature":
+        signature = b"wrong-signature"
+    else:
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+        if mutation == "removed":
+            raw["files"] = raw["files"][1:]
+        else:
+            raw["files"].append({"path": "usr/bin/extra-tool", "file_type": "regular", "size": 1, "sha256": "a" * 64, "executable": True})
+        raw["inventory_sha256"] = hashlib.sha256(json.dumps(raw["files"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        raw_bytes = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        manifest.write_bytes(raw_bytes)
+        signature = signer.sign(raw_bytes)
+    checksums = tmp_path / "SHA256SUMS"
+    digest = hashlib.sha256(iso.read_bytes()).hexdigest()
+    checksums.write_text(f"{digest} *{iso.name}\n", encoding="utf-8")
+    report = OfflineRuntimeValidator(expected_iso_sha256=digest).validate(iso_path=iso, extracted_tree=tree, checksums_path=checksums, checksums_signature=signer.sign(checksums.read_bytes()), verifier=_FixtureVerifier(), extraction_manifest_path=manifest, extraction_manifest_signature=signature)
+    assert report.state == "offline_runtime_blocked"
+    assert any("extraction" in blocker or "inventory" in blocker for blocker in report.blockers)
+
+
+def test_runtime_public_payload_does_not_leak_fixture_paths_or_device_nodes(tmp_path: Path):
+    report = OfflineRuntimeValidator().validate(provenance="synthetic fixture")
+    payload = json.dumps(report.payload(), ensure_ascii=False)
+    assert str(tmp_path) not in payload
+    assert "/dev/" not in payload
+    assert "private key" not in payload.casefold()
+
+
+def test_verifier_evidence_is_derived_and_legacy_keyring_injection_is_not_accepted(tmp_path: Path):
+    verifier, fingerprint = _fake_verifier(tmp_path)
+    assert verifier.pinned_fingerprint == fingerprint
+    assert verifier.keyring_sha256 == hashlib.sha256(b"public test keyring").hexdigest()
+    with pytest.raises(TypeError):
+        ProductionOfflineSignatureVerifier(sys.executable, verifier.public_keyring, fingerprint, keyring_sha256="a" * 64)
+
+
+def test_production_keyring_writable_or_changed_during_verification_is_blocked(tmp_path: Path):
+    verifier, _ = _fake_verifier(tmp_path)
+    verifier.public_keyring.chmod(0o644)
+    with pytest.raises(OfflineCloneBlocked, match="writable"):
+        verifier.verify(b"payload", b"detached")
+
+    stable_dir = tmp_path / "stable"
+    stable_dir.mkdir()
+    stable, _ = _fake_verifier(stable_dir)
+    assert stable.verify(b"payload", b"detached") is True
+    stable.public_keyring.chmod(0o644)
+    stable.public_keyring.write_bytes(b"changed public keyring")
+    stable.public_keyring.chmod(0o444)
+    with pytest.raises(OfflineCloneBlocked, match="changed"):
+        stable.verify(b"payload", b"detached")
 
 
 def _fake_verifier(tmp_path: Path, mode: str = "valid") -> tuple[ProductionOfflineSignatureVerifier, str]:
