@@ -49,6 +49,8 @@ python -m localvault schedule --root <VAULT_ROOT>
 python -m localvault disk-clone-status --root <VAULT_ROOT>
 python -m localvault disk-clone-check --root <VAULT_ROOT>
 python -m localvault disk-clone-simulate --root <VAULT_ROOT>
+python -m localvault disk-clone-artifact-status --cache <PRIVATE_ARTIFACT_CACHE>
+python -m localvault disk-clone-artifacts-verify --cache <PRIVATE_ARTIFACT_CACHE> --gpg <ABSOLUTE_HOST_GPG> --gpgv <ABSOLUTE_HOST_GPGV>
 ```
 
 ## Fotos Por Takeout
@@ -115,6 +117,18 @@ O canal virtual usa somente diretorios temporarios e dispositivos sinteticos. Os
 AOMEI e DiskGenius permanecem alternativas historicas rejeitadas, nao recomendacoes. Nao houve inscricao real, selecao de disco, clone, formatacao, reparticionamento, `Set-Disk`, montagem, desmontagem, provider launch, tarefa destrutiva, reboot ou boot test.
 
 Fontes oficiais e aplicabilidade estao em [`docs/disk-clone-offline.md`](docs/disk-clone-offline.md).
+
+### Validacao estatica do artefato real
+
+O fluxo separado de artefato real baixa ou revalida somente o Clonezilla Live `3.3.3-15` amd64 fixado, verifica `CHECKSUMS.TXT` e sua assinatura DRBL com `54C0821A48715DAFD61BFCAF667857D045599AFD`, e confirma o ISO `clonezilla-live-3.3.3-15-amd64.iso` pelo SHA-256 `482518ea32af3b82ed15d09e2e7714806775deb62aeed81491e534f6cc6bbc47`. O cache privado fica fora do repositorio; o modo offline apenas revalida arquivos existentes.
+
+```powershell
+python -m localvault disk-clone-artifacts-verify --cache <PRIVATE_ARTIFACT_CACHE> --gpg <ABSOLUTE_HOST_GPG> --gpgv <ABSOLUTE_HOST_GPGV>
+python -m localvault disk-clone-artifact-status --cache <PRIVATE_ARTIFACT_CACHE>
+python -m localvault disk-clone-attestor-status --gpg <ABSOLUTE_HOST_GPG> --gnupg-home <PRIVATE_ATTESTOR_HOME> --public-keyring <PUBLIC_ATTESTOR_KEYRING>
+```
+
+A verificacao oficial do publicador e a assinatura local de extracao sao trust roots separados. A arvore real, quando extraida por ferramenta local explicitamente permitida, e inventariada sem seguir links para o host; `gpg`, `gpgv`, `sha256sum`, `lsblk`, `blkid`, `udevadm`, `findmnt` e `ocs-onthefly` sao apenas inspecionados e marcados `present_unexecuted`. Nenhum comando extrai executaveis para rodar, monta ISO, acessa disco/USB, cria VM, inicializa, reinicia ou executa clone. Validacao estatica nao prova bootabilidade, Secure Boot ou corretude de clone.
 
 ## Limites Seguros
 

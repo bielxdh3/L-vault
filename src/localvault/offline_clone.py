@@ -54,6 +54,13 @@ _PRIVATE_KEY = re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----", re.IGNORECASE)
 _SENSITIVE_IDENTIFIER = re.compile(r"\b(?:wwn|id[_ -]?serial|serial(?:[_ -]?(?:number|no|id))?)(?:\s*[:=]|\s+|-)[^\s,;]+", re.IGNORECASE)
 
 
+def _verifier_path_arg(value: str) -> str:
+    """Git-for-Windows gpgv expects MSYS paths for file arguments."""
+    if os.name == "nt" and re.fullmatch(r"[A-Za-z]:[\\/].*", value):
+        return f"/{value[0].lower()}/{value[2:].replace('\\', '/')}"
+    return value
+
+
 class OfflineCloneBlocked(RuntimeError):
     def __init__(self, reason: str, state: str = "offline_execution_disabled"):
         super().__init__(reason)
@@ -498,7 +505,7 @@ class ProductionOfflineSignatureVerifier:
             payload_path, signature_path = temp / "payload", temp / "signature"
             payload_path.write_bytes(payload)
             signature_path.write_bytes(signature)
-            argv = (*self.command_prefix, str(self.verifier_binary), *self.command_suffix, "--status-fd", "1", "--keyring", str(self.public_keyring), str(signature_path), str(payload_path))
+            argv = (*self.command_prefix, str(self.verifier_binary), *self.command_suffix, "--status-fd", "1", "--keyring", _verifier_path_arg(str(self.public_keyring)), _verifier_path_arg(str(signature_path)), _verifier_path_arg(str(payload_path)))
             env = {"LANG": "C", "LC_ALL": "C", "TZ": "UTC", "PATH": ""}
             try:
                 process = subprocess.Popen(argv, cwd=temp_root, env=env, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

@@ -33,13 +33,25 @@ from .disk_clone import (
     resolved_protected_path_conflicts,
 )
 from .disk_clone_ui import native_countdown, run_native_ui
-from .offline_clone import ProductionOfflineSignatureVerifier, simulate_offline_round_trip
+from .offline_clone import OfflineCloneBlocked, ProductionOfflineSignatureVerifier, simulate_offline_round_trip
+from .clonezilla_artifacts import (
+    acquire_official_bundle,
+    inspect_local_attestor,
+    provision_official_public_keyring,
+    GpgDetachedSigner,
+    TrustedClonezillaExtractor,
+    build_production_extraction_manifest,
+    write_official_artifact_record,
+    verify_official_bundle,
+)
 from .offline_runtime import (
     CLONEZILLA_SIGNER_FINGERPRINT,
+    CLONEZILLA_STABLE_AMD64_ISO_FILENAME,
     CLONEZILLA_STABLE_AMD64_ISO_SHA256,
     LocalExtractionAttestationVerifier,
     OfficialChecksumVerifier,
     OfflineRuntimeValidator,
+    REQUIRED_RUNTIME_TOOLS,
     RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC,
     RUNTIME_VALIDATION_PROFILE_SYNTHETIC_TEST,
     simulate_virtual_offline_round_trip,
@@ -445,6 +457,110 @@ def disk_clone_runtime_validate(
     console.print_json(json.dumps(report.payload(), ensure_ascii=False, default=str))
     if report.state == "offline_runtime_blocked":
         raise typer.Exit(1)
+
+
+def _artifact_cache_option() -> Path:
+    return typer.Option(Path.home() / ".localvault" / "clonezilla-artifacts", "--cache", help="Private cache outside the repository; output never prints this path.")
+
+
+@app.command("disk-clone-artifacts-verify")
+def disk_clone_artifacts_verify(
+    cache: Path = _artifact_cache_option(),
+    offline: bool = typer.Option(False, "--offline", help="Revalidate only already-cached artifacts; do not use the network."),
+    gpg: Path = typer.Option(..., "--gpg", help="Absolute host GPG executable used only for isolated public-key provisioning."),
+    gpgv: Path = typer.Option(..., "--gpgv", help="Absolute host gpgv executable used for the official detached signature."),
+):
+    """Acquire or revalidate the pinned public Clonezilla artifacts only."""
+    repository = Path(__file__).resolve().parents[2]
+    try:
+        bundle = acquire_official_bundle(cache, repository=repository, offline=offline)
+        keyring = bundle.public_key.parent / "drbl-clonezilla-public.gpg"
+        fingerprint, keyring_sha256 = provision_official_public_keyring(armored_key=bundle.public_key, destination=keyring, gpg_binary=gpg, repository=repository)
+        verified = verify_official_bundle(bundle, gpgv_binary=gpgv, public_keyring=keyring)
+        write_official_artifact_record(bundle, verified, keyring_sha256=keyring_sha256)
+    except OfflineCloneBlocked as exc:
+        console.print_json(json.dumps({"state": exc.state, "reason": exc.reason}, ensure_ascii=False))
+        raise typer.Exit(1)
+    console.print_json(json.dumps({
+        "state": "official_artifacts_verified",
+        "source_hosts": sorted({record.source_host for record in bundle.records}),
+        "retrieval_date": max(record.retrieval_date for record in bundle.records),
+        "artifacts": [record.payload() for record in bundle.records],
+        "iso_filename": bundle.iso.name,
+        "iso_sha256": verified.iso_sha256,
+        "checksum_manifest_sha256": verified.checksum_manifest_sha256,
+        "official_signer_fingerprint": fingerprint,
+        "official_keyring_sha256": keyring_sha256,
+        "offline": offline,
+    }, ensure_ascii=False))
+
+
+@app.command("disk-clone-artifact-status")
+def disk_clone_artifact_status(cache: Path = _artifact_cache_option()):
+    """Report read-only presence and size state for the pinned artifact cache."""
+    names = (CLONEZILLA_STABLE_AMD64_ISO_FILENAME, "CHECKSUMS.TXT", "CHECKSUMS.TXT.gpg", "drbl-clonezilla-public.asc", "drbl-clonezilla-public.gpg")
+    result = []
+    for name in names:
+        path = Path(cache) / name
+        safe = path.is_file() and not path.is_symlink()
+        result.append({"filename": name, "present": safe, "size": path.stat().st_size if safe else 0})
+    console.print_json(json.dumps({"state": "artifact_cache_status", "artifacts": result}, ensure_ascii=False))
+
+
+@app.command("disk-clone-attestor-status")
+def disk_clone_attestor_status(
+    gpg: Path = typer.Option(..., "--gpg", help="Absolute host GPG executable."),
+    gnupg_home: Path = typer.Option(..., "--gnupg-home", help="Private local attestor home; never printed."),
+    public_keyring: Optional[Path] = typer.Option(None, "--public-keyring", help="Read-only public verification keyring."),
+):
+    """Inspect local extraction-attestor readiness without printing secret locations or key material."""
+    try:
+        result = inspect_local_attestor(gpg_binary=gpg, gnupg_home=gnupg_home, public_keyring=public_keyring)
+    except OfflineCloneBlocked as exc:
+        console.print_json(json.dumps({"state": exc.state, "reason": exc.reason}, ensure_ascii=False))
+        raise typer.Exit(1)
+    result["state"] = "local_attestor_ready" if result["private_key_present"] and result["public_keyring_present"] else "local_attestation_provisioning_blocked"
+    console.print_json(json.dumps(result, ensure_ascii=False))
+    if result["state"] != "local_attestor_ready":
+        raise typer.Exit(1)
+
+
+@app.command("disk-clone-runtime-extract")
+def disk_clone_runtime_extract(
+    cache: Path = _artifact_cache_option(),
+    stage: Path = typer.Option(..., "--stage", help="Private empty extraction staging directory outside the repository."),
+    gpg: Path = typer.Option(..., "--gpg", help="Absolute host GPG executable."),
+    gpgv: Path = typer.Option(..., "--gpgv", help="Absolute host gpgv executable."),
+    iso_extractor: Path = typer.Option(..., "--iso-extractor", help="Absolute installed ISO extractor executable."),
+    iso_product: str = typer.Option(..., "--iso-product"),
+    iso_version: str = typer.Option(..., "--iso-version"),
+    rootfs_extractor: Path = typer.Option(..., "--rootfs-extractor", help="Absolute installed SquashFS extractor executable."),
+    rootfs_product: str = typer.Option(..., "--rootfs-product"),
+    rootfs_version: str = typer.Option(..., "--rootfs-version"),
+    local_gpg: Path = typer.Option(..., "--local-gpg", help="Absolute host GPG executable for the separate local attestor."),
+    local_gnupg_home: Path = typer.Option(..., "--local-gnupg-home", help="Private local attestor home; never printed."),
+    local_fingerprint: str = typer.Option(..., "--local-fingerprint", help="Full local public attestor fingerprint."),
+):
+    """Extract verified regular-file artifacts, attest the tree, and never execute extracted content."""
+    repository = Path(__file__).resolve().parents[2]
+    try:
+        bundle = acquire_official_bundle(cache, repository=repository, offline=True)
+        keyring = bundle.public_key.parent / "drbl-clonezilla-public.gpg"
+        provision_official_public_keyring(armored_key=bundle.public_key, destination=keyring, gpg_binary=gpg, repository=repository)
+        verified = verify_official_bundle(bundle, gpgv_binary=gpgv, public_keyring=keyring)
+        ensure_private_cache(stage, repository=repository)
+        products = TrustedClonezillaExtractor(iso_executable=iso_extractor, rootfs_executable=rootfs_extractor, iso_product=iso_product, iso_version=iso_version, rootfs_product=rootfs_product, rootfs_version=rootfs_version).extract(bundle.iso, stage)
+        attestation = build_production_extraction_manifest(iso_filename=bundle.iso.name, iso_sha256=verified.iso_sha256, checksum_manifest_sha256=verified.checksum_manifest_sha256, official_evidence=verified.evidence, extracted_root=stage / "root-tree", products=products)
+        signer = GpgDetachedSigner(gpg_binary=local_gpg, gnupg_home=local_gnupg_home, key_fingerprint=local_fingerprint)
+        manifest_path = stage / "extraction-manifest.json"
+        signature_path = stage / "extraction-manifest.sig"
+        from .utils import atomic_write_bytes
+        atomic_write_bytes(manifest_path, attestation.canonical_bytes())
+        atomic_write_bytes(signature_path, signer.sign(attestation.canonical_bytes()))
+    except OfflineCloneBlocked as exc:
+        console.print_json(json.dumps({"state": exc.state, "reason": exc.reason}, ensure_ascii=False))
+        raise typer.Exit(1)
+    console.print_json(json.dumps({"state": "production_extraction_attested", "iso_filename": bundle.iso.name, "iso_sha256": verified.iso_sha256, "rootfs_relative_path": products.rootfs_relative_path, "rootfs_sha256": products.rootfs_sha256, "inventory_schema": attestation.schema, "entry_count": attestation.entry_count, "total_regular_file_bytes": attestation.total_regular_file_bytes, "inventory_sha256": attestation.inventory_sha256, "required_tools": list(REQUIRED_RUNTIME_TOOLS)}, ensure_ascii=False))
 
 
 @app.command("disk-clone-run")
