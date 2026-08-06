@@ -17,6 +17,7 @@ import stat
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import posixpath
 from pathlib import Path
 from posixpath import normpath
 from typing import Any, Callable, Iterable
@@ -50,6 +51,7 @@ RUNTIME_MANIFEST_SCHEMA = 3
 RUNTIME_MANIFEST_FILE = "runtime-manifest.json"
 RUNTIME_MANIFEST_SIGNATURE = "runtime-manifest.sig"
 EXTRACTION_MANIFEST_SCHEMA = 2
+PRODUCTION_EXTRACTION_MANIFEST_SCHEMA = 3
 EXTRACTION_MANIFEST_FILE = "extraction-manifest.json"
 EXTRACTION_MANIFEST_SIGNATURE = "extraction-manifest.sig"
 RETURN_CHANNEL_SCHEMA = 1
@@ -138,6 +140,15 @@ def _safe_relative_path(value: Any) -> str:
     parts = text.split("/")
     if not parts or any(part in {"", ".", ".."} for part in parts):
         raise OfflineCloneBlocked("offline extraction manifest path escapes the extracted root", "offline_verification_failed")
+    return text
+
+
+def _safe_target(value: Any) -> str:
+    if value == "":
+        return ""
+    text = _safe_text(value, field="extraction manifest link target", max_length=1024)
+    if "\\" in text or "\x00" in text or text == ".":
+        raise OfflineCloneBlocked("offline extraction link target is invalid", "offline_verification_failed")
     return text
 
 
@@ -331,6 +342,24 @@ class RuntimeExtractionManifest:
     created_at: str
     production_extraction_completed: bool
     schema: int = EXTRACTION_MANIFEST_SCHEMA
+    rootfs_relative_path: str = ""
+    rootfs_sha256: str = ""
+    iso_extractor_product: str = ""
+    iso_extractor_version: str = ""
+    iso_extractor_sha256: str = ""
+    rootfs_extractor_product: str = ""
+    rootfs_extractor_version: str = ""
+    rootfs_extractor_sha256: str = ""
+    extraction_log_sha256: str = ""
+    entry_count: int = 0
+    total_regular_file_bytes: int = 0
+    required_tools_evidence_sha256: str = ""
+    official_checksum_manifest_sha256: str = ""
+    official_signer_fingerprint: str = ""
+    official_keyring_sha256: str = ""
+    vm_boot_completed: bool = False
+    physical_boot_completed: bool = False
+    clone_executed: bool = False
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -345,10 +374,28 @@ class RuntimeExtractionManifest:
             "files": [dict(entry) for entry in self.files],
             "created_at": self.created_at,
             "production_extraction_completed": self.production_extraction_completed,
+            "rootfs_relative_path": self.rootfs_relative_path,
+            "rootfs_sha256": self.rootfs_sha256,
+            "iso_extractor_product": self.iso_extractor_product,
+            "iso_extractor_version": self.iso_extractor_version,
+            "iso_extractor_sha256": self.iso_extractor_sha256,
+            "rootfs_extractor_product": self.rootfs_extractor_product,
+            "rootfs_extractor_version": self.rootfs_extractor_version,
+            "rootfs_extractor_sha256": self.rootfs_extractor_sha256,
+            "extraction_log_sha256": self.extraction_log_sha256,
+            "entry_count": self.entry_count,
+            "total_regular_file_bytes": self.total_regular_file_bytes,
+            "required_tools_evidence_sha256": self.required_tools_evidence_sha256,
+            "official_checksum_manifest_sha256": self.official_checksum_manifest_sha256,
+            "official_signer_fingerprint": self.official_signer_fingerprint,
+            "official_keyring_sha256": self.official_keyring_sha256,
+            "vm_boot_completed": self.vm_boot_completed,
+            "physical_boot_completed": self.physical_boot_completed,
+            "clone_executed": self.clone_executed,
         }
 
     def validate(self) -> None:
-        if self.schema != EXTRACTION_MANIFEST_SCHEMA:
+        if self.schema not in {EXTRACTION_MANIFEST_SCHEMA, PRODUCTION_EXTRACTION_MANIFEST_SCHEMA}:
             raise OfflineCloneBlocked("offline extraction manifest schema is invalid", "offline_verification_failed")
         _safe_filename(self.source_iso_filename, field="extraction source ISO filename")
         if not _HEX64.fullmatch(self.source_iso_sha256):
@@ -376,18 +423,43 @@ class RuntimeExtractionManifest:
             raise OfflineCloneBlocked("offline extraction creation timestamp must include a timezone", "offline_verification_failed")
         if not _HEX64.fullmatch(self.inventory_sha256):
             raise OfflineCloneBlocked("offline extraction inventory digest is invalid", "offline_verification_failed")
+        if self.schema == PRODUCTION_EXTRACTION_MANIFEST_SCHEMA:
+            if self.extraction_method != PRODUCTION_EXTRACTION_METHOD or not self.rootfs_relative_path or not _HEX64.fullmatch(self.rootfs_sha256):
+                raise OfflineCloneBlocked("production extraction rootfs binding is incomplete", "offline_verification_failed")
+            _safe_relative_path(self.rootfs_relative_path)
+            for value in (self.iso_extractor_product, self.iso_extractor_version, self.rootfs_extractor_product, self.rootfs_extractor_version):
+                _safe_text(value, field="extractor identity", max_length=256)
+            for value in (self.iso_extractor_sha256, self.rootfs_extractor_sha256, self.extraction_log_sha256, self.required_tools_evidence_sha256):
+                if not _HEX64.fullmatch(value):
+                    raise OfflineCloneBlocked("production extraction evidence digest is invalid", "offline_verification_failed")
+            if not _HEX64.fullmatch(self.official_checksum_manifest_sha256) or not _HEX_FINGERPRINT.fullmatch(self.official_signer_fingerprint) or not _HEX64.fullmatch(self.official_keyring_sha256):
+                raise OfflineCloneBlocked("production extraction official trust binding is incomplete", "offline_verification_failed")
+            if any(value is not False for value in (self.vm_boot_completed, self.physical_boot_completed, self.clone_executed)):
+                raise OfflineCloneBlocked("production extraction cannot claim boot or clone execution", "offline_execution_disabled")
+            if type(self.entry_count) is not int or self.entry_count < 1 or self.entry_count != len(self.files):
+                raise OfflineCloneBlocked("production extraction entry count is invalid", "offline_verification_failed")
+            if type(self.total_regular_file_bytes) is not int or self.total_regular_file_bytes < 0:
+                raise OfflineCloneBlocked("production extraction byte count is invalid", "offline_verification_failed")
+        else:
+            if self.schema == EXTRACTION_MANIFEST_SCHEMA and any((self.rootfs_relative_path, self.rootfs_sha256, self.iso_extractor_product, self.iso_extractor_version, self.iso_extractor_sha256, self.rootfs_extractor_product, self.rootfs_extractor_version, self.rootfs_extractor_sha256, self.extraction_log_sha256, self.required_tools_evidence_sha256, self.entry_count, self.total_regular_file_bytes, self.official_checksum_manifest_sha256, self.official_signer_fingerprint, self.official_keyring_sha256, self.vm_boot_completed, self.physical_boot_completed, self.clone_executed)):
+                raise OfflineCloneBlocked("legacy extraction manifest contains production-only evidence", "offline_verification_failed")
         previous = ""
         for entry in self.files:
-            if not isinstance(entry, dict) or set(entry) != {"path", "file_type", "size", "sha256", "executable"}:
+            expected_keys = {"path", "file_type", "size", "sha256", "executable"} if self.schema == EXTRACTION_MANIFEST_SCHEMA else {"path", "file_type", "size", "sha256", "executable", "target"}
+            if not isinstance(entry, dict) or set(entry) != expected_keys:
                 raise OfflineCloneBlocked("offline extraction file evidence is incomplete", "offline_verification_failed")
             path = _safe_relative_path(entry["path"])
             if path <= previous:
                 raise OfflineCloneBlocked("offline extraction file inventory is not canonically ordered", "offline_verification_failed")
             previous = path
-            if entry["file_type"] != "regular" or type(entry["size"]) is not int or not 0 <= entry["size"] <= _MAX_INVENTORY_FILE_BYTES:
+            if entry["file_type"] not in ({"regular"} if self.schema == EXTRACTION_MANIFEST_SCHEMA else {"regular", "directory", "symlink", "special"}) or type(entry["size"]) is not int or not 0 <= entry["size"] <= _MAX_INVENTORY_FILE_BYTES:
                 raise OfflineCloneBlocked("offline extraction file evidence is unsafe", "offline_verification_failed")
             if not _HEX64.fullmatch(entry["sha256"]) or type(entry["executable"]) is not bool:
                 raise OfflineCloneBlocked("offline extraction file evidence is invalid", "offline_verification_failed")
+            if self.schema == PRODUCTION_EXTRACTION_MANIFEST_SCHEMA:
+                _safe_target(entry["target"])
+                if entry["file_type"] != "symlink" and entry["target"] != "":
+                    raise OfflineCloneBlocked("offline extraction non-link target is invalid", "offline_verification_failed")
         if hashlib.sha256(canonical_json([dict(entry) for entry in self.files])).hexdigest() != self.inventory_sha256:
             raise OfflineCloneBlocked("offline extraction inventory digest does not match its files", "offline_verification_failed")
 
@@ -397,8 +469,10 @@ class RuntimeExtractionManifest:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "RuntimeExtractionManifest":
-        required = {"schema", "attestation_domain", "attestation_scheme", "source_iso_filename", "source_iso_sha256", "extraction_method", "extractor_policy_version", "inventory_sha256", "files", "created_at", "production_extraction_completed"}
-        if set(value) != required or not isinstance(value.get("files"), list):
+        legacy_required = {"schema", "attestation_domain", "attestation_scheme", "source_iso_filename", "source_iso_sha256", "extraction_method", "extractor_policy_version", "inventory_sha256", "files", "created_at", "production_extraction_completed"}
+        production_required = legacy_required | {"rootfs_relative_path", "rootfs_sha256", "iso_extractor_product", "iso_extractor_version", "iso_extractor_sha256", "rootfs_extractor_product", "rootfs_extractor_version", "rootfs_extractor_sha256", "extraction_log_sha256", "entry_count", "total_regular_file_bytes", "required_tools_evidence_sha256", "official_checksum_manifest_sha256", "official_signer_fingerprint", "official_keyring_sha256", "vm_boot_completed", "physical_boot_completed", "clone_executed"}
+        allowed = (legacy_required, production_required)
+        if set(value) not in allowed or not isinstance(value.get("files"), list):
             raise OfflineCloneBlocked("offline extraction manifest fields are invalid", "offline_verification_failed")
         manifest = cls(
             source_iso_filename=value["source_iso_filename"],
@@ -412,6 +486,24 @@ class RuntimeExtractionManifest:
             created_at=value["created_at"],
             production_extraction_completed=value["production_extraction_completed"],
             schema=value["schema"],
+            rootfs_relative_path=value.get("rootfs_relative_path", ""),
+            rootfs_sha256=value.get("rootfs_sha256", ""),
+            iso_extractor_product=value.get("iso_extractor_product", ""),
+            iso_extractor_version=value.get("iso_extractor_version", ""),
+            iso_extractor_sha256=value.get("iso_extractor_sha256", ""),
+            rootfs_extractor_product=value.get("rootfs_extractor_product", ""),
+            rootfs_extractor_version=value.get("rootfs_extractor_version", ""),
+            rootfs_extractor_sha256=value.get("rootfs_extractor_sha256", ""),
+            extraction_log_sha256=value.get("extraction_log_sha256", ""),
+            entry_count=value.get("entry_count", 0),
+            total_regular_file_bytes=value.get("total_regular_file_bytes", 0),
+            required_tools_evidence_sha256=value.get("required_tools_evidence_sha256", ""),
+            official_checksum_manifest_sha256=value.get("official_checksum_manifest_sha256", ""),
+            official_signer_fingerprint=value.get("official_signer_fingerprint", ""),
+            official_keyring_sha256=value.get("official_keyring_sha256", ""),
+            vm_boot_completed=value.get("vm_boot_completed", False),
+            physical_boot_completed=value.get("physical_boot_completed", False),
+            clone_executed=value.get("clone_executed", False),
         )
         manifest.validate()
         return manifest
@@ -476,7 +568,7 @@ class RuntimeArtifactEvidence:
             raise OfflineCloneBlocked("offline runtime local attestation scheme is invalid", "offline_verification_failed")
         if self.local_attestation_domain and self.local_attestation_domain != LOCAL_EXTRACTION_ATTESTATION_DOMAIN:
             raise OfflineCloneBlocked("offline runtime local attestation domain is invalid", "offline_verification_failed")
-        if self.extraction_manifest_schema not in {0, EXTRACTION_MANIFEST_SCHEMA}:
+        if self.extraction_manifest_schema not in {0, EXTRACTION_MANIFEST_SCHEMA, PRODUCTION_EXTRACTION_MANIFEST_SCHEMA}:
             raise OfflineCloneBlocked("offline runtime extraction manifest schema is invalid", "offline_verification_failed")
         if self.extraction_method and self.extraction_method not in _EXTRACTION_METHODS:
             raise OfflineCloneBlocked("offline runtime extraction method is invalid", "offline_verification_failed")
@@ -486,7 +578,9 @@ class RuntimeArtifactEvidence:
             raise OfflineCloneBlocked("offline runtime tool evidence has unexpected entries", "offline_verification_failed")
         for name in REQUIRED_RUNTIME_TOOLS:
             entry = self.required_tools.get(name)
-            if not isinstance(entry, dict) or set(entry) != {"present", "status", "path", "file_type", "size", "sha256", "executable"}:
+            legacy_tool_keys = {"present", "status", "path", "file_type", "size", "sha256", "executable"}
+            production_tool_keys = legacy_tool_keys | {"symlink_chain", "resolved_path", "duplicate_status"}
+            if not isinstance(entry, dict) or set(entry) not in (legacy_tool_keys, production_tool_keys):
                 raise OfflineCloneBlocked("offline runtime tool evidence is incomplete", "offline_verification_failed")
             if type(entry["present"]) is not bool or entry["status"] not in {"missing", "blocked", "present_unexecuted"} or type(entry["executable"]) is not bool:
                 raise OfflineCloneBlocked("offline runtime tool evidence is invalid", "offline_verification_failed")
@@ -497,6 +591,11 @@ class RuntimeArtifactEvidence:
                     raise OfflineCloneBlocked("offline runtime tool path is not a sanitized image path", "offline_verification_failed")
             if entry["sha256"] and not _HEX64.fullmatch(entry["sha256"]):
                 raise OfflineCloneBlocked("offline runtime tool digest is invalid", "offline_verification_failed")
+            if set(entry) == production_tool_keys:
+                if entry["duplicate_status"] != "unique" or not isinstance(entry["symlink_chain"], list) or not entry["symlink_chain"] or not all(isinstance(item, str) and item.startswith("/") and "\\" not in item for item in entry["symlink_chain"]):
+                    raise OfflineCloneBlocked("offline runtime tool symlink evidence is invalid", "offline_verification_failed")
+                if not isinstance(entry["resolved_path"], str) or not entry["resolved_path"].startswith("/") or "\\" in entry["resolved_path"]:
+                    raise OfflineCloneBlocked("offline runtime tool resolved path is invalid", "offline_verification_failed")
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "RuntimeArtifactEvidence":
@@ -618,11 +717,89 @@ class OfflineRuntimeValidator:
         return inventory, sorted(set(blockers))
 
     @staticmethod
+    def _scan_real_tree(root: Path) -> tuple[list[dict[str, Any]], list[str]]:
+        """Inventory a Linux image tree without following host-facing links."""
+        inventory: list[dict[str, Any]] = []
+        blockers: list[str] = []
+        seen_casefold: dict[str, str] = {}
+
+        def add(entry: dict[str, Any]) -> None:
+            path = entry["path"]
+            folded = path.casefold()
+            previous = seen_casefold.get(folded)
+            if previous is not None and previous != path:
+                blockers.append("case_collision_ambiguity")
+            elif path in {item["path"] for item in inventory}:
+                blockers.append("duplicate_canonical_path")
+            seen_casefold[folded] = path
+            inventory.append(entry)
+
+        def visit(directory: Path, prefix: str = "") -> None:
+            try:
+                entries = sorted(os.scandir(directory), key=lambda item: item.name.casefold())
+            except OSError:
+                blockers.append("extracted_tree_unreadable")
+                return
+            for item in entries:
+                relative = f"{prefix}/{item.name}" if prefix else item.name
+                if "\\" in relative or normpath(relative) != relative or any(part in {"", ".", ".."} for part in relative.split("/")):
+                    blockers.append("extracted_tree_path_invalid")
+                    continue
+                try:
+                    info = item.stat(follow_symlinks=False)
+                except OSError:
+                    blockers.append("extracted_tree_entry_unreadable")
+                    continue
+                if item.is_symlink():
+                    try:
+                        target = os.readlink(item.path)
+                    except OSError:
+                        blockers.append("extracted_tree_link_unreadable")
+                        continue
+                    add({"path": relative, "file_type": "symlink", "size": len(target.encode("utf-8", "surrogateescape")), "sha256": hashlib.sha256(target.encode("utf-8", "surrogateescape")).hexdigest(), "executable": False, "target": target})
+                elif getattr(info, "st_file_attributes", 0) & 0x400:
+                    blockers.append("reparse_point_present")
+                elif stat.S_ISDIR(info.st_mode):
+                    add({"path": relative, "file_type": "directory", "size": 0, "sha256": hashlib.sha256(b"").hexdigest(), "executable": False, "target": ""})
+                    visit(Path(item.path), relative)
+                elif stat.S_ISREG(info.st_mode):
+                    try:
+                        digest = sha256_file(Path(item.path))
+                    except OSError:
+                        blockers.append("extracted_tree_entry_unreadable")
+                        continue
+                    add({"path": relative, "file_type": "regular", "size": info.st_size, "sha256": digest, "executable": bool(info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)), "target": ""})
+                else:
+                    blockers.append("non_regular_tree_entry")
+                    add({"path": relative, "file_type": "special", "size": 0, "sha256": hashlib.sha256(b"").hexdigest(), "executable": False, "target": ""})
+
+        if root.is_symlink() or not root.is_dir():
+            return [], ["extracted_tree_missing"]
+        visit(root)
+        paths = {entry["path"] for entry in inventory}
+        for entry in inventory:
+            if entry["file_type"] != "symlink":
+                continue
+            target = entry["target"]
+            candidate = target.lstrip("/") if target.startswith("/") else posixpath.join(posixpath.dirname(entry["path"]), target)
+            candidate = normpath(candidate)
+            if candidate == ".." or candidate.startswith("../"):
+                blockers.append("symlink_escapes_image_root")
+            elif candidate not in paths:
+                if entry["path"] in {f"{directory}/{name}" for name in REQUIRED_RUNTIME_TOOLS for directory in ("bin", "sbin", "usr/bin", "usr/sbin")}:
+                    blockers.append(f"dangling_required_tool_link:{entry['path']}")
+            elif candidate == entry["path"]:
+                blockers.append("cyclic_required_tool_link")
+        inventory.sort(key=lambda entry: entry["path"])
+        return inventory, sorted(set(blockers))
+
+    @staticmethod
     def _check_tree(root: Path, extraction: RuntimeExtractionManifest | None) -> tuple[dict[str, dict[str, Any]], list[str]]:
         tools = {name: _missing_tool() for name in REQUIRED_RUNTIME_TOOLS}
         if root.is_symlink() or not root.is_dir():
             return tools, ["extracted_tree_missing"]
-        actual, blockers = OfflineRuntimeValidator._scan_tree(root)
+        real_schema = extraction is not None and extraction.schema == PRODUCTION_EXTRACTION_MANIFEST_SCHEMA
+        actual, blockers = OfflineRuntimeValidator._scan_real_tree(root) if real_schema else OfflineRuntimeValidator._scan_tree(root)
         actual_payload = [dict(entry) for entry in actual]
         if extraction is None:
             return tools, sorted(set((*blockers, "extracted_tree_binding_missing")))
@@ -638,7 +815,7 @@ class OfflineRuntimeValidator:
         if actual_digest != extraction.inventory_sha256:
             blockers.append("extracted_tree_inventory_digest_mismatch")
         for name in REQUIRED_RUNTIME_TOOLS:
-            candidates = [entry for entry in actual_payload if Path(entry["path"]).name.casefold() == name.casefold()]
+            candidates = [entry for entry in actual_payload if (entry["path"] in _TOOL_PATH_ALLOWLIST[name]) and entry["file_type"] in ({"regular", "symlink"} if real_schema else {"regular"})]
             acceptable = [entry for entry in candidates if entry["path"] in _TOOL_PATH_ALLOWLIST[name]]
             if any(entry not in acceptable for entry in candidates):
                 blockers.append(f"tool_path_not_allowlisted:{name}")
@@ -649,17 +826,37 @@ class OfflineRuntimeValidator:
                 blockers.append(f"ambiguous_tool:{name}")
                 continue
             entry = acceptable[0]
-            tool = {"present": True, "status": "present_unexecuted", "path": "/" + entry["path"], "file_type": entry["file_type"], "size": entry["size"], "sha256": entry["sha256"], "executable": entry["executable"]}
-            if entry["size"] == 0:
+            resolved = entry
+            chain = [entry["path"]]
+            visited = set(chain)
+            while real_schema and resolved["file_type"] == "symlink":
+                target = resolved["target"]
+                candidate_path = normpath(target.lstrip("/") if target.startswith("/") else posixpath.join(posixpath.dirname(resolved["path"]), target))
+                if candidate_path in visited:
+                    blockers.append(f"cyclic_tool_link:{name}")
+                    break
+                visited.add(candidate_path)
+                next_entry = next((item for item in actual_payload if item["path"] == candidate_path), None)
+                if next_entry is None:
+                    blockers.append(f"missing_tool_target:{name}")
+                    break
+                resolved = next_entry
+                chain.append(candidate_path)
+            tool = {"present": True, "status": "present_unexecuted", "path": "/" + entry["path"], "file_type": entry["file_type"], "size": resolved["size"], "sha256": resolved["sha256"], "executable": resolved["executable"]}
+            if real_schema:
+                tool.update({"symlink_chain": ["/" + value for value in chain], "resolved_path": "/" + resolved["path"], "duplicate_status": "unique"})
+            if resolved["size"] == 0:
                 blockers.append(f"empty_tool:{name}")
                 tool["status"] = "blocked"
-            if entry["size"] > _MAX_TOOL_BYTES:
+            if resolved["size"] > _MAX_TOOL_BYTES:
                 blockers.append(f"oversized_tool:{name}")
                 tool["status"] = "blocked"
-            if not entry["executable"]:
+            if not resolved["executable"]:
                 blockers.append(f"non_executable_tool:{name}")
                 tool["status"] = "blocked"
             tools[name] = tool
+        if real_schema and extraction.required_tools_evidence_sha256 != "0" * 64 and hashlib.sha256(canonical_json(tools)).hexdigest() != extraction.required_tools_evidence_sha256:
+            blockers.append("required_tools_evidence_digest_mismatch")
         return tools, sorted(set(blockers))
 
     @staticmethod
@@ -815,6 +1012,13 @@ class OfflineRuntimeValidator:
                     extraction = RuntimeExtractionManifest.from_dict(value)
                     if extraction.source_iso_filename != iso_name or extraction.source_iso_sha256 != iso_digest:
                         blockers.append("extracted_tree_source_iso_mismatch")
+                    if extraction.schema == PRODUCTION_EXTRACTION_MANIFEST_SCHEMA:
+                        if extraction.official_checksum_manifest_sha256 != checksum_digest:
+                            blockers.append("extracted_tree_checksum_manifest_mismatch")
+                        if official_evidence and extraction.official_signer_fingerprint != official_evidence.pinned_fingerprint:
+                            blockers.append("extracted_tree_official_signer_mismatch")
+                        if official_evidence and extraction.official_keyring_sha256 != official_evidence.keyring_sha256:
+                            blockers.append("extracted_tree_official_keyring_mismatch")
                     evidence["local_attestation_scheme"] = extraction.attestation_scheme
                     evidence["local_attestation_domain"] = extraction.attestation_domain
                     evidence["extraction_manifest_sha256"] = hashlib.sha256(raw).hexdigest()
