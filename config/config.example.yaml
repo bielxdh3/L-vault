@@ -4,6 +4,9 @@ viewer:
   port: 8787
   allow_lan: false
   page_size: 60
+  tls_enabled: false
+  tls_certfile: ''
+  tls_keyfile: ''
 gmail:
   api_enabled: false
   credentials_file: '<VAULT_ROOT>\config\google_oauth_client_secret.json'
@@ -19,7 +22,42 @@ source_sync:
 safety:
   minimum_free_gb: 20
   hash_algorithm: sha256
+  # true preserva as fontes; false habilita mover apos verificacao.
   never_delete_sources: true
+disk_clone:
+  enabled: false
+  provider: clonezilla_offline
+  interval_days: 30
+  schedule_time: '03:00'
+  window_start: '03:00'
+  window_end: '04:00'
+  countdown_seconds: 300
+  active_time_threshold_percent: 70
+  active_time_sample_seconds: 300
+  prestart_recheck_seconds: 20
+  require_unlocked_interactive_session: true
+  keep_target_offline: true
+  allow_automatic_retry_same_night: false
+  allow_real_provider_execution: false
+  real_execution_authorized: false
+  offline_runtime_validation: static_or_virtual_only
+  offline_runtime_tree_binding: signed_extraction_manifest_required
+  offline_runtime_tool_execution: disabled_static_inspection_only
+  offline_return_channel: temporary_directory_fixture_only
+  official_publisher_trust: pinned_clonezilla_drbl_only
+  local_extraction_attestation: required_separate_trust_root
+  local_attestation_fingerprint: ''
+  local_attestation_public_keyring: '<PRIVATE_LOCAL_ATTESTOR_PUBLIC_KEYRING>'
+  artifact_cache: '<PRIVATE_CLONEZILLA_ARTIFACT_CACHE>'
+  extraction_staging: '<PRIVATE_CLONEZILLA_EXTRACTION_STAGING>'
+  local_signing: unavailable_not_configured
+  real_extraction: disabled
+  static_inspection: only
+  real_execution: disabled
+  protected_paths: []
+# Optional independent replica destination. Leave unset to keep replica disabled.
+# replica:
+#   destination: D:\LocalVault-Replica
 automation:
   task_prefix: LocalVault
   execution_time_limit_hours: 8
@@ -47,3 +85,11 @@ automation:
       time: 04:00
       days:
       - Sunday
+    disk_clone:
+      enabled: true
+      name: Bootable Disk Clone
+      command: disk-clone-run
+      frequency: daily
+      time: '03:00'
+      days: []
+      start_when_available: false
