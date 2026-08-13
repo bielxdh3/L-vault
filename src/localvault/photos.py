@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Iterable
 
 from PIL import Image, ExifTags
 
@@ -17,10 +18,11 @@ PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".tif", ".tiff"
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v"}
 
 
-def ingest_photos_takeout(p: VaultPaths, report: RunReport, dry_run: bool = False) -> RunReport:
+def ingest_photos_takeout(p: VaultPaths, report: RunReport, dry_run: bool = False, zip_paths: Iterable[Path] | None = None) -> RunReport:
     extracted_root = p.manual_imports_inbox / "extracted_google_takeout"
     roots = []
-    for zip_path in sorted(p.google_takeout_inbox.glob("*.zip")):
+    selected_zips = sorted(zip_paths) if zip_paths is not None else sorted(p.google_takeout_inbox.glob("*.zip"))
+    for zip_path in selected_zips:
         try:
             if dry_run:
                 _dry_run_photos_zip(zip_path, report)

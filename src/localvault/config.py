@@ -15,7 +15,15 @@ DEFAULT_DOWNLOADS = str(Path.home() / "Downloads")
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "vault_root": str(DEFAULT_ROOT),
-    "viewer": {"host": "127.0.0.1", "port": 8787, "allow_lan": False, "page_size": 60},
+    "viewer": {
+        "host": "127.0.0.1",
+        "port": 8787,
+        "allow_lan": False,
+        "page_size": 60,
+        "tls_enabled": False,
+        "tls_certfile": "",
+        "tls_keyfile": "",
+    },
     "gmail": {
         "api_enabled": False,
         "credentials_file": str(DEFAULT_ROOT / "config" / "google_oauth_client_secret.json"),
@@ -29,6 +37,38 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "google_takeout_sources": [DEFAULT_DOWNLOADS],
     },
     "safety": {"minimum_free_gb": 20, "hash_algorithm": "sha256", "never_delete_sources": True},
+    "disk_clone": {
+        "enabled": False,
+        "provider": "clonezilla_offline",
+        "interval_days": 30,
+        "schedule_time": "03:00",
+        "window_start": "03:00",
+        "window_end": "04:00",
+        "countdown_seconds": 300,
+        "active_time_threshold_percent": 70,
+        "active_time_sample_seconds": 300,
+        "prestart_recheck_seconds": 20,
+        "require_unlocked_interactive_session": True,
+        "keep_target_offline": True,
+        "allow_automatic_retry_same_night": False,
+        "allow_real_provider_execution": False,
+        "real_execution_authorized": False,
+        "offline_runtime_validation": "static_or_virtual_only",
+        "offline_runtime_tree_binding": "signed_extraction_manifest_required",
+        "offline_runtime_tool_execution": "disabled_static_inspection_only",
+        "offline_return_channel": "temporary_directory_fixture_only",
+        "official_publisher_trust": "pinned_clonezilla_drbl_only",
+        "local_extraction_attestation": "required_separate_trust_root",
+        "local_attestation_fingerprint": "",
+        "local_attestation_public_keyring": "<PRIVATE_LOCAL_ATTESTOR_PUBLIC_KEYRING>",
+        "artifact_cache": "<PRIVATE_CLONEZILLA_ARTIFACT_CACHE>",
+        "extraction_staging": "<PRIVATE_CLONEZILLA_EXTRACTION_STAGING>",
+        "local_signing": "unavailable_not_configured",
+        "real_extraction": "disabled",
+        "static_inspection": "only",
+        "real_execution": "disabled",
+        "protected_paths": [],
+    },
     "automation": {
         "task_prefix": "LocalVault",
         "execution_time_limit_hours": 8,
@@ -36,6 +76,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "daily_backup": {"enabled": True, "name": "Daily Backup", "command": "daily-backup", "frequency": "daily", "time": "02:00", "days": []},
             "weekly_takeout": {"enabled": True, "name": "Weekly Takeout Import", "command": "auto-takeout", "frequency": "weekly", "time": "03:00", "days": ["Sunday"]},
             "verify_weekly": {"enabled": True, "name": "Verify Weekly", "command": "verify", "frequency": "weekly", "time": "04:00", "days": ["Sunday"]},
+            "disk_clone": {"enabled": True, "name": "Bootable Disk Clone", "command": "disk-clone-run", "frequency": "daily", "time": "03:00", "days": [], "start_when_available": False},
         },
     },
 }
@@ -86,11 +127,20 @@ def ensure_directories(root: Path = DEFAULT_ROOT) -> VaultPaths:
     return p
 
 
+def default_config(root: Path = DEFAULT_ROOT) -> dict[str, Any]:
+    config = deepcopy(DEFAULT_CONFIG)
+    root = Path(root)
+    config["vault_root"] = str(root)
+    config["gmail"]["credentials_file"] = str(root / "config" / "google_oauth_client_secret.json")
+    config["gmail"]["token_file"] = str(root / "config" / "gmail_token.json")
+    return config
+
+
 def write_example_config(root: Path = DEFAULT_ROOT) -> Path:
     p = paths(root)
     p.config.mkdir(parents=True, exist_ok=True)
     example = p.config / "config.example.yaml"
-    atomic_write_text(example, yaml.safe_dump(DEFAULT_CONFIG, sort_keys=False), encoding="utf-8")
+    atomic_write_text(example, yaml.safe_dump(default_config(root), sort_keys=False), encoding="utf-8")
     return example
 
 
@@ -106,8 +156,8 @@ def ensure_config(root: Path = DEFAULT_ROOT) -> dict[str, Any]:
 def load_config(root: Path = DEFAULT_ROOT) -> dict[str, Any]:
     config_file = paths(root).config / "config.yaml"
     if not config_file.exists():
-        return deepcopy(DEFAULT_CONFIG)
-    return _deep_merge(deepcopy(DEFAULT_CONFIG), yaml.safe_load(config_file.read_text(encoding="utf-8")) or {})
+        return default_config(root)
+    return _deep_merge(default_config(root), yaml.safe_load(config_file.read_text(encoding="utf-8")) or {})
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

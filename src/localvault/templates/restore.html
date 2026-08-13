@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block title %}Restaurar - LocalVault{% endblock %}
+{% block content %}
+<section class="page-head"><div><h1>Restaurar</h1><p class="muted">RestauraÃ§Ã£o assistida para um destino separado do cofre.</p></div></section>
+<section class="panel-block"><p class="status-line"><span class="status-dot status-ok"></span><strong>DisponÃ­vel pela CLI</strong></p><p>{{ indexed_count }} arquivo(s) indexado(s) podem ser selecionados por tipo e limite.</p><p class="muted">O painel nÃ£o copia, sobrescreve ou altera arquivos. Use <code>localvault restore-plan</code> para revisar e <code>localvault restore</code> para executar com destino explÃ­cito.</p><p>Conflito padrÃ£o: <strong>pular</strong>. Renomear ou sobrescrever exige opÃ§Ã£o explÃ­cita.</p></section>
+{% endblock %}
+
