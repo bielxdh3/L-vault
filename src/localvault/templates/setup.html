@@ -11,4 +11,3 @@
 </section>
 <section class="panel-block"><h2>Agendamento</h2><p class="muted">PrÃ©via somente-leitura; esta pÃ¡gina nÃ£o instala tarefas nem gera scripts.</p>{% if setup.tasks %}<ul class="status-list">{% for task in setup.tasks %}<li><strong>{{ task.name }}</strong><span>{{ task.frequency }} Ã s {{ task.time }}</span></li>{% endfor %}</ul>{% else %}<p class="empty-state">Nenhuma tarefa habilitada na configuraÃ§Ã£o.</p>{% endif %}<p><code>localvault setup --root &lt;raiz&gt;</code> configura a raiz sem instalar scheduler.</p></section>
 {% endblock %}
-

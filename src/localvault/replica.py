@@ -359,4 +359,3 @@ def _counts(items: list[ReplicaItem]) -> dict[str, int]:
         "failed": sum(item.status in {"error", "source_missing"} for item in items),
         "bytes": sum(item.size for item in items if item.status == "copied"),
     }
-

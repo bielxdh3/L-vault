@@ -38,4 +38,3 @@ def test_setup_template_is_utf8_and_exposes_safe_operational_states():
     assert "nÃ£o instala" in template
     assert "senha" in template.lower()
     assert "ConfiguraÃƒ" not in template
-

@@ -64,7 +64,6 @@ def test_restore_dry_run_has_no_destination_side_effect(tmp_path: Path):
     assert result.status == "dry_run"
     assert not destination.exists()
 
-
 def test_restore_conflicts_skip_rename_and_overwrite(tmp_path: Path):
     p, files = _prepared(tmp_path)
     destination = tmp_path / "restored"
@@ -125,4 +124,3 @@ def test_restore_plan_cli_is_json_and_does_not_write_destination(tmp_path: Path)
     assert payload["status"] == "planned"
     assert payload["counts"]["selected"] == 1
     assert not destination.exists()
-

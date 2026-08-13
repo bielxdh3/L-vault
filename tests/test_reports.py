@@ -18,4 +18,3 @@ def test_finish_run_persists_item_failures_as_warning(tmp_path: Path):
         row = conn.execute("SELECT status, failed_count FROM backup_runs WHERE id=?", (report.run_id,)).fetchone()
     assert dict(row) == {"status": "warning", "failed_count": 1}
     assert '"status": "warning"' in Path(report.report_path).read_text(encoding="utf-8")
-
