@@ -284,4 +284,3 @@ def _is_under(path: Path, root: Path) -> bool:
 
 def _paths_overlap(first: Path, second: Path) -> bool:
     return _is_under(first, second) or _is_under(second, first)
-

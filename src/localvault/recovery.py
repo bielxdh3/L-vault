@@ -99,4 +99,3 @@ def _restore_matches_index(p, destination: Path) -> bool:
         if not target.is_file() or target.stat().st_size != int(row["size"] or 0) or sha256_file(target) != row["sha256"]:
             return False
     return bool(rows)
-

@@ -95,4 +95,3 @@ def test_setup_scheduler_preview_does_not_install_or_generate_tasks(tmp_path: Pa
 
     assert result.exit_code == 0
     assert calls == []
-

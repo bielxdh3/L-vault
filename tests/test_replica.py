@@ -168,4 +168,3 @@ def _fixture(tmp_path: Path):
     with db.connect(p.db) as conn:
         db.upsert_file(conn, sha256=hashlib.sha256(b"one").hexdigest(), path=source, media_type="photo", size=3, source="synthetic")
     return p, source
-

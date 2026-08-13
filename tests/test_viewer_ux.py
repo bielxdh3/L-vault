@@ -48,7 +48,6 @@ def test_setup_restore_and_replica_pages_are_read_only_and_secret_safe(tmp_path:
     assert p.db.stat().st_mtime_ns == before
     assert list(p.logs.iterdir()) == []
 
-
 def test_empty_states_are_explicit_and_get_does_not_start_backup(tmp_path: Path):
     client, p = _client(tmp_path)
 
@@ -59,4 +58,3 @@ def test_empty_states_are_explicit_and_get_does_not_start_backup(tmp_path: Path)
 
     assert client.get("/dashboard/backup-now", follow_redirects=False).status_code == 303
     assert list(p.logs.iterdir()) == []
-
