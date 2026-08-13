@@ -7,8 +7,8 @@
   </div>
 </section>
 <form class="filter-panel">
-  <input name="q" value="{{ q }}" placeholder="Buscar assunto, trecho ou texto">
-  <input name="sender" value="{{ sender }}" placeholder="Remetente">
+  <input name="q" value="{{ q }}" placeholder="Buscar assunto, trecho ou texto" aria-label="Buscar e-mail">
+  <input name="sender" value="{{ sender }}" placeholder="Remetente" aria-label="Filtrar por remetente">
   <input name="date_from" value="{{ date_from }}" type="date" aria-label="Data inicial">
   <input name="date_to" value="{{ date_to }}" type="date" aria-label="Data final">
   <label class="check-filter"><input name="has_attachments" type="checkbox" value="true" {% if has_attachments %}checked{% endif %}> Com anexos</label>

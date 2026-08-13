@@ -4,13 +4,15 @@ import email
 import html
 import re
 import secrets
+import ssl
+import stat
 import time
 from email import policy
 from email.message import EmailMessage
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from jinja2 import pass_context
@@ -20,13 +22,59 @@ from . import db
 from .config import load_config, paths
 from .auth import SESSION_MAX_AGE, load_auth, verify_password
 from .control_panel import control_panel_data, start_background_command
+from .disk_clone import CloneService, DiskCloneBlocked, active_clone_run_id, create_control_request, disk_clone_dashboard_data, latest_clone_run_id, update_disk_clone_settings, validated_disk_clone_config
+from .disk_clone_ui import spawn_retry_worker
+from .replica import replica_status
+from .scheduler import merge_automation_config
 from .vault_index import cleanup_missing_index_entries, dashboard_data, delete_local_file_and_index, open_in_explorer, safe_vault_path
 
 PACKAGE_DIR = Path(__file__).parent
 
 
-def create_app(root: Path | None = None) -> FastAPI:
+class TLSConfigurationError(ValueError):
+    pass
+
+
+def validate_tls_files(certfile: Path | str | None, keyfile: Path | str | None) -> tuple[Path, Path]:
+    if not certfile or not keyfile:
+        raise TLSConfigurationError("TLS requires both a certificate and private key path.")
+    cert = _safe_tls_path(Path(certfile), "TLS certificate")
+    key = _safe_tls_path(Path(keyfile), "TLS private key")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    try:
+        context.load_cert_chain(certfile=str(cert), keyfile=str(key))
+    except (OSError, ssl.SSLError, ValueError) as exc:
+        raise TLSConfigurationError("TLS certificate/key material is invalid.") from exc
+    return cert, key
+
+
+def _safe_tls_path(path: Path, label: str) -> Path:
+    resolved = path.expanduser().resolve(strict=False)
+    try:
+        info = path.expanduser().lstat()
+    except OSError as exc:
+        raise TLSConfigurationError(f"{label} is missing or unreadable.") from exc
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & reparse) or not stat.S_ISREG(info.st_mode):
+        raise TLSConfigurationError(f"{label} must be a regular file.")
+    return resolved
+
+
+def _same_origin(request: Request, origin: str) -> bool:
+    from urllib.parse import urlsplit
+    parsed = urlsplit(origin)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    request_host = request.url.hostname
+    request_port = request.url.port or (443 if request.url.scheme == "https" else 80)
+    origin_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return parsed.scheme == request.url.scheme and parsed.hostname == request_host and origin_port == request_port
+
+
+def create_app(root: Path | None = None, https_enabled: bool | None = None) -> FastAPI:
     p = paths(root or Path(load_config()["vault_root"]))
+    viewer_config = load_config(p.root).get("viewer", {})
+    secure_session = bool(viewer_config.get("tls_enabled", False) if https_enabled is None else https_enabled)
     app = FastAPI(title="LocalVault Backup Manager")
     templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 
@@ -52,6 +100,9 @@ def create_app(root: Path | None = None) -> FastAPI:
             return RedirectResponse("/login", status_code=303)
         request.state.csrf_token = session.get("csrf_token", "")
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            origin = request.headers.get("origin")
+            if origin and not _same_origin(request, origin):
+                return PlainTextResponse("Origin check failed.", status_code=403)
             token = request.headers.get("x-csrf-token", "")
             if not token:
                 body = (await request.body()).decode("utf-8", "replace")
@@ -62,7 +113,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         return await call_next(request)
 
     initial_auth = load_auth(p.root)
-    app.add_middleware(SessionMiddleware, secret_key=(initial_auth or {}).get("session_secret", secrets.token_urlsafe(48)), max_age=SESSION_MAX_AGE, same_site="strict", https_only=False)
+    app.add_middleware(SessionMiddleware, secret_key=(initial_auth or {}).get("session_secret", secrets.token_urlsafe(48)), max_age=SESSION_MAX_AGE, same_site="strict", https_only=secure_session)
 
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request):
@@ -100,6 +151,57 @@ def create_app(root: Path | None = None) -> FastAPI:
         data = control_panel_data(p)
         data["request"] = request
         return templates.TemplateResponse(request, "control.html", data)
+
+    @app.get("/setup", response_class=HTMLResponse)
+    def setup_page(request: Request):
+        return templates.TemplateResponse(request, "setup.html", {"setup": _setup_page_data(p), "request": request})
+
+    @app.get("/restore", response_class=HTMLResponse)
+    def restore_page(request: Request):
+        with db.connect(p.db) as conn:
+            indexed_count = int(conn.execute("SELECT COUNT(*) FROM files").fetchone()[0])
+        return templates.TemplateResponse(
+            request,
+            "restore.html",
+            {"indexed_count": indexed_count, "request": request},
+        )
+
+    @app.get("/replica", response_class=HTMLResponse)
+    def replica_page(request: Request):
+        return templates.TemplateResponse(request, "replica.html", {"replica": replica_status(p), "request": request})
+
+    @app.get("/disk-clone", response_class=HTMLResponse)
+    def disk_clone_page(request: Request):
+        data = disk_clone_dashboard_data(p)
+        data["request"] = request
+        return templates.TemplateResponse(request, "disk_clone.html", data)
+
+    @app.get("/disk-clone/status")
+    def disk_clone_status():
+        return JSONResponse(disk_clone_dashboard_data(p))
+
+    @app.post("/disk-clone/action")
+    def disk_clone_action(action: str = Query(...), run_id: str | None = Query(None)):
+        try:
+            disk_clone_config = validated_disk_clone_config(p.root)
+            if action in {"preflight", "acknowledge", "retry"} and not disk_clone_config["enabled"]:
+                raise DiskCloneBlocked("A clonagem esta desativada por configuracao.", "blocked_configuration")
+            if action == "show" and run_id is None:
+                run_id = active_clone_run_id(p.db) or latest_clone_run_id(p.db)
+            request_id = create_control_request(p.db, action, run_id=run_id, actor="dashboard")
+            if action == "retry":
+                spawn_retry_worker(p.root, request_id)
+        except (DiskCloneBlocked, ValueError):
+            raise HTTPException(400)
+        return RedirectResponse("/disk-clone", status_code=303)
+
+    @app.post("/disk-clone/settings")
+    def disk_clone_settings(interval_days: int | None = Query(None), enabled: bool | None = Query(None)):
+        try:
+            update_disk_clone_settings(p.root, interval_days=interval_days, enabled=enabled)
+        except (DiskCloneBlocked, ValueError):
+            raise HTTPException(400)
+        return RedirectResponse("/disk-clone", status_code=303)
 
     @app.post("/control/run")
     def control_run(command: str = Query(...)):
@@ -333,6 +435,33 @@ def create_app(root: Path | None = None) -> FastAPI:
 
 def _count(conn, table: str) -> int:
     return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+def _setup_page_data(p) -> dict:
+    cfg = load_config(p.root)
+    viewer = cfg.get("viewer", {})
+    gmail = cfg.get("gmail", {})
+    sources = cfg.get("source_sync", {}).get("google_takeout_sources", [])
+    automation = merge_automation_config(cfg.get("automation", {}))
+    tasks = []
+    for key, task in automation.get("tasks", {}).items():
+        if task.get("enabled", True):
+            tasks.append({
+                "name": str(task.get("name", key)),
+                "frequency": str(task.get("frequency", "daily")),
+                "time": str(task.get("time", "03:00")),
+            })
+    return {
+        "auth_configured": bool(load_auth(p.root)),
+        "host": str(viewer.get("host", "127.0.0.1")),
+        "port": int(viewer.get("port", 8787)),
+        "tls_enabled": bool(viewer.get("tls_enabled", False)),
+        "allow_lan": bool(viewer.get("allow_lan", False)),
+        "gmail_api_enabled": bool(gmail.get("api_enabled", False)),
+        "takeout_source_count": len(sources),
+        "takeout_source_existing": sum(1 for value in sources if Path(str(value)).expanduser().is_dir()),
+        "tasks": tasks[:8],
+    }
 
 
 def _email_body(path: Path) -> dict[str, str]:

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import DEFAULT_CONFIG, VaultPaths, load_config
+from .disk_clone import validated_disk_clone_config
 from .utils import atomic_write_text
 
 
@@ -35,7 +36,11 @@ def merge_automation_config(override: dict[str, Any]) -> dict[str, Any]:
 
 
 def generate_schedule_files(p: VaultPaths) -> GeneratedScheduleFiles:
-    automation = merge_automation_config(load_config(p.root).get("automation", {}))
+    config = load_config(p.root)
+    automation = merge_automation_config(config.get("automation", {}))
+    disk_clone_enabled = validated_disk_clone_config(p.root)["enabled"]
+    if not disk_clone_enabled:
+        automation["tasks"].pop("disk_clone", None)
     runner = p.root / "run_scheduled_task.ps1"
     install = p.root / "schedule_tasks.ps1"
     remove = p.root / "unschedule_tasks.ps1"
@@ -83,10 +88,14 @@ try {{
 
 
 def _install_script(p: VaultPaths, automation: dict[str, Any]) -> str:
+    clone_task = DEFAULT_CONFIG["automation"]["tasks"].get("disk_clone", {})
+    clone_truth = f"# {clone_task.get('name', 'Bootable Disk Clone')}: {clone_task.get('time', '03:00')}; registered only when disk_clone.enabled=true"
     return f"""$ErrorActionPreference = "Stop"
 $VaultRoot = "{p.root}"
 $Runner = Join-Path $VaultRoot "run_scheduled_task.ps1"
 $ExecutionTimeLimit = New-TimeSpan -Hours {int(automation.get("execution_time_limit_hours", 8))}
+# Scheduler truth: clone registration is gated by disk_clone.enabled.
+{clone_truth}
 $Tasks = @(
 {_powershell_tasks(automation)}
 )
@@ -102,7 +111,11 @@ foreach ($Task in $Tasks) {{
   if (-not $Task.Enabled) {{ Write-Host "Skipping disabled task: $($Task.Name)"; continue }}
   $ActionArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$Runner`" -TaskName `"$($Task.FullName)`" -CommandArgs `"$($Task.Command)`""
   $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $ActionArgs
-  $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit $ExecutionTimeLimit
+  if ($Task.StartWhenAvailable) {{
+    $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit $ExecutionTimeLimit
+  }} else {{
+    $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit $ExecutionTimeLimit
+  }}
   $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
   Register-ScheduledTask -TaskName $Task.FullName -Action $Action -Trigger (New-LocalVaultTrigger $Task) -Settings $Settings -Principal $Principal -Description "LocalVault Backup Manager: $($Task.Command)" -Force | Out-Null
   Write-Host "Registered: $($Task.FullName)"
@@ -140,5 +153,6 @@ def _powershell_tasks(automation: dict[str, Any]) -> str:
         freq = str(task.get("frequency", "daily")).capitalize()
         time = str(task.get("time", "03:00"))
         days = ", ".join(f'"{d}"' for d in (task.get("days") or []))
-        lines.append(f'  @{{ Key="{key}"; FullName="{full}"; Name="{name}"; Command="{cmd}"; Frequency="{freq}"; Time="{time}"; Days=@({days}); Enabled={enabled} }}')
+        start_when_available = "$false" if task.get("start_when_available", True) is False or task.get("catch_up") is False else "$true"
+        lines.append(f'  @{{ Key="{key}"; FullName="{full}"; Name="{name}"; Command="{cmd}"; Frequency="{freq}"; Time="{time}"; Days=@({days}); Enabled={enabled}; StartWhenAvailable={start_when_available} }}')
     return ",\n".join(lines)
