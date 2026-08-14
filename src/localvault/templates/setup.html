@@ -1,0 +1,13 @@
+{% extends "base.html" %}{% block title %}ConfiguraÃ§Ã£o - LocalVault{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div><h1>ConfiguraÃ§Ã£o</h1><p class="muted">Estado seguro da configuraÃ§Ã£o local. AlteraÃ§Ãµes continuam sendo feitas pela CLI.</p></div>
+</section>
+<section class="status-grid" aria-label="Estado da configuraÃ§Ã£o">
+  <article><h2>Acesso do painel</h2><p class="status-line"><span class="status-dot {{ 'status-ok' if setup.auth_configured else 'status-attention' }}"></span><strong>{{ "Configurado" if setup.auth_configured else "ConfiguraÃ§Ã£o manual necessÃ¡ria" }}</strong></p><p class="muted">A senha nunca Ã© exibida.</p></article>
+  <article><h2>Rede</h2><p class="status-line"><span class="status-dot {{ 'status-ok' if setup.host in ['127.0.0.1', 'localhost'] else 'status-attention' }}"></span><strong>{{ setup.host }}:{{ setup.port }}</strong></p><p class="muted">{% if setup.host in ['127.0.0.1', 'localhost'] %}Loopback local em HTTP por padrÃ£o.{% elif setup.tls_enabled %}LAN com TLS indicado na configuraÃ§Ã£o; o CLI valida certificado e chave ao iniciar.{% else %}AtenÃ§Ã£o: exposiÃ§Ã£o nÃ£o-loopback sem TLS serÃ¡ recusada.{% endif %}</p></article>
+  <article><h2>Gmail</h2><p class="status-line"><span class="status-dot {{ 'status-ok' if setup.gmail_api_enabled else 'status-neutral' }}"></span><strong>{{ "API habilitada" if setup.gmail_api_enabled else "API desabilitada" }}</strong></p><p class="muted">AutorizaÃ§Ã£o, credencial e token permanecem manuais; conteÃºdo nÃ£o Ã© lido.</p></article>
+  <article><h2>Takeout</h2><p class="status-line"><span class="status-dot {{ 'status-ok' if setup.takeout_source_existing == setup.takeout_source_count and setup.takeout_source_count else 'status-neutral' }}"></span><strong>{{ setup.takeout_source_existing }}/{{ setup.takeout_source_count }} fonte(s) encontrada(s)</strong></p><p class="muted">O estado da pasta Ã© mostrado sem expor conteÃºdo.</p></article>
+</section>
+<section class="panel-block"><h2>Agendamento</h2><p class="muted">PrÃ©via somente-leitura; esta pÃ¡gina nÃ£o instala tarefas nem gera scripts.</p>{% if setup.tasks %}<ul class="status-list">{% for task in setup.tasks %}<li><strong>{{ task.name }}</strong><span>{{ task.frequency }} Ã s {{ task.time }}</span></li>{% endfor %}</ul>{% else %}<p class="empty-state">Nenhuma tarefa habilitada na configuraÃ§Ã£o.</p>{% endif %}<p><code>localvault setup --root &lt;raiz&gt;</code> configura a raiz sem instalar scheduler.</p></section>
+{% endblock %}

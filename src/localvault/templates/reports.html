@@ -1,5 +1,6 @@
-{% extends "base.html" %}{% block title %}Reports - LocalVault{% endblock %}
+{% extends "base.html" %}{% block title %}Relatórios - LocalVault{% endblock %}
 {% block content %}
-<h1>Reports</h1><table><tr><th>Started</th><th>Source</th><th>Mode</th><th>Status</th><th>Imported</th><th>Failed</th></tr>{% for row in runs %}<tr><td>{{ row.started_at }}</td><td>{{ row.source }}</td><td>{{ row.mode }}</td><td>{{ row.status }}</td><td>{{ row.imported_count }}</td><td>{{ row.failed_count }}</td></tr>{% endfor %}</table>
-<h2>Errors</h2><ul>{% for row in errors %}<li>{{ row.source }} · {{ row.item_path }} · {{ row.error }}</li>{% endfor %}</ul>
+<h1>Relatórios</h1><p class="muted">Histórico limitado de execuções e erros locais.</p>
+{% if runs %}<table><caption class="sr-only">Histórico de execuções</caption><tr><th scope="col">Início</th><th scope="col">Origem</th><th scope="col">Modo</th><th scope="col">Status</th><th scope="col">Importados</th><th scope="col">Falhas</th></tr>{% for row in runs %}<tr><td>{{ row.started_at }}</td><td>{{ row.source }}</td><td>{{ row.mode }}</td><td>{{ row.status }}</td><td>{{ row.imported_count }}</td><td>{{ row.failed_count }}</td></tr>{% endfor %}</table>{% else %}<p class="empty-state">Nenhuma execução registrada.</p><!-- Nenhuma execuÃ§Ã£o registrada -->{% endif %}
+<h2>Erros recentes</h2>{% if errors %}<ul>{% for row in errors %}<li>{{ row.source }} · {{ row.item_path }} · {{ row.error }}</li>{% endfor %}</ul>{% else %}<p class="empty-state">Nenhum erro recente registrado.</p>{% endif %}
 {% endblock %}

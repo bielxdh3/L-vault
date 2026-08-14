@@ -3,6 +3,7 @@ from __future__ import annotations
 import email
 import mailbox
 import zipfile
+from collections.abc import Iterable
 from email import policy
 from pathlib import Path
 
@@ -14,10 +15,11 @@ from .reports import RunReport
 from .utils import atomic_write_bytes, guess_mime, sha256_bytes, unique_path
 
 
-def ingest_gmail_takeout(p: VaultPaths, report: RunReport, dry_run: bool = False) -> RunReport:
+def ingest_gmail_takeout(p: VaultPaths, report: RunReport, dry_run: bool = False, zip_paths: Iterable[Path] | None = None) -> RunReport:
     roots = [x for x in p.google_takeout_inbox.iterdir() if x.is_dir()]
     extracted = p.manual_imports_inbox / "extracted_google_takeout"
-    for zip_path in sorted(p.google_takeout_inbox.glob("*.zip")):
+    selected_zips = sorted(zip_paths) if zip_paths is not None else sorted(p.google_takeout_inbox.glob("*.zip"))
+    for zip_path in selected_zips:
         try:
             if dry_run:
                 _dry_run_gmail_zip(p, zip_path, report)
@@ -46,7 +48,10 @@ def _dry_run_gmail_zip(p: VaultPaths, zip_path: Path, report: RunReport) -> None
 
 def _import_mbox(conn, p: VaultPaths, mbox_path: Path, report: RunReport, dry_run: bool) -> None:
     box = mailbox.mbox(mbox_path, factory=lambda f: email.message_from_binary_file(f, policy=policy.default))
-    _import_messages(conn, p, box, mbox_path, report, dry_run)
+    try:
+        _import_messages(conn, p, box, mbox_path, report, dry_run)
+    finally:
+        box.close()
 
 
 def _import_messages(conn, p: VaultPaths, messages, mbox_path: Path | None, report: RunReport, dry_run: bool) -> None:

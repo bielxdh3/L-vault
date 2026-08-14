@@ -14,9 +14,10 @@
   </form>
   {% endfor %}
 </section>
-<h2>Execucoes recentes</h2>
+<h2>Execuções recentes</h2>
+{% if not runs %}<p class="empty-state">Nenhuma execução registrada. As ações acima iniciam trabalhos locais com confirmação.</p><!-- Nenhuma execuÃ§Ã£o registrada -->{% endif %}
 <table>
-  <tr><th>Origem</th><th>Modo</th><th>Status</th><th>Inicio</th><th>Fim</th></tr>
+  <caption class="sr-only">Execuções recentes de backup</caption><tr><th scope="col">Origem</th><th scope="col">Modo</th><th scope="col">Status</th><th scope="col">Início</th><th scope="col">Fim</th></tr>
   {% for run in runs %}
   <tr>
     <td>{{ run.source }}</td>

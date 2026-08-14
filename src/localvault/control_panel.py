@@ -10,6 +10,7 @@ from typing import Any
 
 from . import db
 from .config import VaultPaths, load_config
+from .disk_clone import disk_clone_dashboard_data
 from .health import health_snapshot
 from .utils import atomic_write_text
 from .vault_index import dashboard_data
@@ -48,6 +49,7 @@ def control_panel_data(p: VaultPaths) -> dict[str, Any]:
         "errors": errors,
         "commands": ALLOWED_COMMANDS,
         "running_jobs": _running_jobs(p),
+        "disk_clone": disk_clone_dashboard_data(p),
     }
 
 
