@@ -7,9 +7,9 @@
   </div>
 </section>
 <form class="filter-panel media-filters">
-  <input name="q" value="{{ q }}" placeholder="Buscar por nome, data ou album">
-  <select name="media_type"><option value="">Todos os tipos</option><option value="photo" {% if media_type=="photo" %}selected{% endif %}>Fotos</option><option value="video" {% if media_type=="video" %}selected{% endif %}>Videos</option></select>
-  <input name="album" value="{{ album }}" list="album-list" placeholder="Album/pasta">
+  <input name="q" value="{{ q }}" placeholder="Buscar por nome, data ou álbum" aria-label="Buscar mídia">
+  <select name="media_type" aria-label="Tipo de mídia"><option value="">Todos os tipos</option><option value="photo" {% if media_type=="photo" %}selected{% endif %}>Fotos</option><option value="video" {% if media_type=="video" %}selected{% endif %}>Vídeos</option></select>
+  <input name="album" value="{{ album }}" list="album-list" placeholder="Álbum/pasta" aria-label="Filtrar por álbum">
   <datalist id="album-list">{% for value in albums %}<option value="{{ value }}">{% endfor %}</datalist>
   <input name="date_from" value="{{ date_from }}" type="date" aria-label="Data inicial">
   <input name="date_to" value="{{ date_to }}" type="date" aria-label="Data final">
@@ -31,6 +31,7 @@
   <button>Filtrar</button>
   <a class="soft-button" href="/fotos">Limpar</a>
 </form>
+{% if not rows %}<p class="empty-state">Nenhuma foto ou vídeo encontrado com esses filtros.</p>{% endif %}
 <section class="media-grid layout-{{ layout }}">
   {% for item in rows %}
   <article class="media-tile" id="item-{{ item.id }}">

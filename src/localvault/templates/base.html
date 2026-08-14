@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="pt-BR">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,14 +9,18 @@
 <body>
   <header>
     <a class="brand" href="/">LocalVault</a>
-    <nav>
+    <nav aria-label="NavegaÃ§Ã£o principal">
       <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">Dashboard</a>
-      <a href="/control" class="{{ 'active' if request.url.path == '/control' else '' }}">Controle</a>
+      <a href="/control" class="{{ 'active' if request.url.path == '/control' else '' }}">Saúde</a>
+      <a href="/disk-clone" class="{{ 'active' if request.url.path.startswith('/disk-clone') else '' }}">Clone do disco</a>
       <a href="/backups" class="{{ 'active' if request.url.path == '/backups' else '' }}">Backups</a>
       <a href="/gmail" class="{{ 'active' if request.url.path.startswith('/gmail') else '' }}">Gmail</a>
-      <a href="/fotos" class="{{ 'active' if request.url.path.startswith('/fotos') else '' }}">Fotos</a>
-      <a href="/reports" class="{{ 'active' if request.url.path == '/reports' else '' }}">Relatorios</a>
-      <form method="post" action="/logout" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Sair</button></form>
+      <a href="/fotos" class="{{ 'active' if request.url.path.startswith('/fotos') else '' }}">Fotos e vídeos</a>
+      <a href="/reports" aria-label="Relatorios" class="{{ 'active' if request.url.path == '/reports' else '' }}">Relatórios</a>
+      <a href="/setup" class="{{ 'active' if request.url.path == '/setup' else '' }}">Configuração</a>
+      <a href="/restore" class="{{ 'active' if request.url.path == '/restore' else '' }}">Restaurar</a>
+      <a href="/replica" class="{{ 'active' if request.url.path == '/replica' else '' }}">Réplica</a>
+      <form method="post" action="/logout" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" aria-label="Sair do painel">Sair</button></form>
     </nav>
   </header>
   <main class="page-enter">{% block content %}{% endblock %}</main>

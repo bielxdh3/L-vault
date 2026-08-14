@@ -1,11 +1,13 @@
 from pathlib import Path
+import ssl
+import pytest
 
 from fastapi.testclient import TestClient
 
 from localvault import db
 from localvault.auth import set_password
 from localvault.config import ensure_directories
-from localvault.viewer import _sanitize_email_html, create_app
+from localvault.viewer import TLSConfigurationError, _sanitize_email_html, create_app, validate_tls_files
 from localvault.cli import validate_viewer_exposure
 import typer
 
@@ -66,11 +68,50 @@ def test_sanitizer_allows_formatting_and_removes_active_and_remote_content():
 
 def test_network_binding_requires_loopback_or_lan_opt_in_and_authentication():
     validate_viewer_exposure("127.0.0.1", False, True)
-    for host, allow_lan, configured in (("0.0.0.0", False, True), ("0.0.0.0", True, False), ("127.0.0.1", False, False)):
+    for host, allow_lan, configured in (("0.0.0.0", False, True), ("0.0.0.0", True, False), ("0.0.0.0", True, True), ("127.0.0.1", False, False)):
         try:
             validate_viewer_exposure(host, allow_lan, configured)
         except typer.BadParameter:
             pass
         else:
             raise AssertionError("unsafe viewer configuration was accepted")
-    validate_viewer_exposure("0.0.0.0", True, True)
+
+
+def test_tls_files_require_regular_pair_and_validate_with_ssl_primitive(monkeypatch, tmp_path: Path):
+    cert = tmp_path / "synthetic-cert.pem"
+    key = tmp_path / "synthetic-key.pem"
+    cert.write_text("synthetic certificate", encoding="utf-8")
+    key.write_text("synthetic private key", encoding="utf-8")
+    calls = []
+
+    def load_cert_chain(_context, *, certfile, keyfile, password=None):
+        calls.append((certfile, keyfile))
+
+    monkeypatch.setattr(ssl.SSLContext, "load_cert_chain", load_cert_chain)
+    validate_viewer_exposure("0.0.0.0", True, True, True, cert, key)
+    assert calls == [(str(cert.resolve()), str(key.resolve()))]
+
+    with pytest.raises(typer.BadParameter):
+        validate_viewer_exposure("0.0.0.0", True, True, True, cert, None)
+
+
+def test_tls_missing_or_invalid_material_is_rejected(tmp_path: Path):
+    with pytest.raises(TLSConfigurationError):
+        validate_tls_files(tmp_path / "missing-cert.pem", tmp_path / "missing-key.pem")
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    cert.write_text("invalid", encoding="utf-8")
+    key.write_text("invalid", encoding="utf-8")
+    with pytest.raises(TLSConfigurationError):
+        validate_tls_files(cert, key)
+
+
+def test_session_cookie_secure_only_when_https_and_foreign_origin_is_rejected(tmp_path: Path):
+    client, p = _app(tmp_path)
+    plain_login = client.post("/login", data={"password": "correct horse battery"}, follow_redirects=False)
+    assert "; Secure" not in plain_login.headers["set-cookie"]
+
+    secure_client = TestClient(create_app(p.root, https_enabled=True), base_url="https://testserver")
+    secure_login = secure_client.post("/login", data={"password": "correct horse battery"}, follow_redirects=False)
+    assert "; secure" in secure_login.headers["set-cookie"].lower()
+    assert secure_client.post("/control/run?command=verify", headers={"origin": "http://evil.example"}).status_code == 403

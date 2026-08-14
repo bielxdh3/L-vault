@@ -47,7 +47,7 @@ def start_run(database: Path, report: RunReport) -> RunReport:
 
 def finish_run(database: Path, reports_dir: Path, report: RunReport, status: str = "ok") -> RunReport:
     report.finished_at = utc_now()
-    report.status = "warning" if status == "ok" and report.warnings else status
+    report.status = "warning" if status == "ok" and (report.warnings or report.failed_count) else status
     name = f"{report.started_at.replace(':','').replace('+','Z')}_{report.source}_{report.mode}.json"
     path = reports_dir / name
     report.report_path = str(path)

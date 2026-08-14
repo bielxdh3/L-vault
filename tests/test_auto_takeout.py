@@ -11,7 +11,7 @@ from localvault.config import ensure_directories
 from localvault.reports import RunReport
 
 
-def test_auto_takeout_detects_generic_named_takeout_zip_and_moves_to_inbox(tmp_path: Path):
+def test_auto_takeout_detects_generic_named_takeout_zip_and_preserves_source(tmp_path: Path):
     p, downloads = _prepared(tmp_path)
     archive = downloads / "archive.zip"
     _zip(archive, {"Takeout/Google Photos/photo.jpg": b"photo"})
@@ -19,7 +19,7 @@ def test_auto_takeout_detects_generic_named_takeout_zip_and_moves_to_inbox(tmp_p
     report = auto_takeout(p, RunReport(source="google_takeout", mode="auto"))
 
     assert report.imported_count >= 1
-    assert not archive.exists()
+    assert archive.exists()
     assert (p.google_takeout_inbox / "archive.zip").exists()
 
 
@@ -70,7 +70,7 @@ def test_auto_takeout_ignores_corrupt_zip(tmp_path: Path):
     assert broken.exists()
 
 
-def test_auto_takeout_moves_three_split_takeout_zips(tmp_path: Path):
+def test_auto_takeout_copies_three_split_takeout_zips_and_preserves_sources(tmp_path: Path):
     p, downloads = _prepared(tmp_path)
     for index in range(1, 4):
         _zip(downloads / f"takeout-{index:03}.zip", {
@@ -80,7 +80,7 @@ def test_auto_takeout_moves_three_split_takeout_zips(tmp_path: Path):
     report = auto_takeout(p, RunReport(source="google_takeout", mode="auto"))
 
     assert report.imported_count >= 3
-    assert not list(downloads.glob("takeout-*.zip"))
+    assert len(list(downloads.glob("takeout-*.zip"))) == 3
     assert sorted(path.name for path in p.google_takeout_inbox.glob("takeout-*.zip")) == [
         "takeout-001.zip",
         "takeout-002.zip",
@@ -117,6 +117,40 @@ def test_auto_takeout_calls_ingests_after_moving_valid_zip(monkeypatch, tmp_path
     assert calls == ["photos", "gmail"]
 
 
+def test_auto_takeout_moves_source_only_when_never_delete_sources_is_disabled(tmp_path: Path):
+    p, downloads = _prepared(tmp_path)
+    archive = downloads / "takeout.zip"
+    _zip(archive, {"Takeout/Google Photos/photo.jpg": b"photo"})
+    (p.config / "config.yaml").write_text(yaml.safe_dump({
+        "source_sync": {"google_takeout_sources": [str(downloads)]},
+        "safety": {"never_delete_sources": False},
+    }), encoding="utf-8")
+
+    auto_takeout(p, RunReport(source="google_takeout", mode="auto"))
+
+    assert not archive.exists()
+    assert (p.google_takeout_inbox / "takeout.zip").exists()
+
+
+def test_auto_takeout_passes_only_newly_moved_zips_to_ingests(monkeypatch, tmp_path: Path):
+    p, downloads = _prepared(tmp_path)
+    old_zip = p.google_takeout_inbox / "old.zip"
+    _zip(old_zip, {"Takeout/Google Photos/old.jpg": b"old"})
+    new_zip = downloads / "new.zip"
+    _zip(new_zip, {"Takeout/Google Photos/new.jpg": b"new"})
+    calls = []
+
+    def record(_p, _report, **kwargs):
+        calls.append(kwargs["zip_paths"])
+
+    monkeypatch.setattr("localvault.auto_takeout.ingest_photos_takeout", record)
+    monkeypatch.setattr("localvault.auto_takeout.ingest_gmail_takeout", record)
+
+    auto_takeout(p, RunReport(source="google_takeout", mode="auto"))
+
+    assert calls == [[p.google_takeout_inbox / "new.zip"], [p.google_takeout_inbox / "new.zip"]]
+
+
 def test_auto_takeout_does_not_import_if_any_move_fails(monkeypatch, tmp_path: Path):
     p, downloads = _prepared(tmp_path)
     first = downloads / "takeout-001.zip"
@@ -124,14 +158,14 @@ def test_auto_takeout_does_not_import_if_any_move_fails(monkeypatch, tmp_path: P
     _zip(first, {"Takeout/Google Photos/photo-1.jpg": b"photo-1"})
     _zip(second, {"Takeout/Google Photos/photo-2.jpg": b"photo-2"})
     calls = []
-    def flaky_move(src, dest, expected_sha256=None, dry_run=False):
+    def flaky_copy(src, dest, dry_run=False):
         if str(src).endswith("takeout-002.zip"):
             raise OSError("disk error")
+        dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(src.read_bytes())
-        src.unlink()
         return dest.stat().st_size
 
-    monkeypatch.setattr("localvault.auto_takeout.atomic_move_or_copy", flaky_move)
+    monkeypatch.setattr("localvault.auto_takeout.atomic_copy", flaky_copy)
     monkeypatch.setattr("localvault.auto_takeout.ingest_photos_takeout", lambda *args, **kwargs: calls.append("photos"))
     monkeypatch.setattr("localvault.auto_takeout.ingest_gmail_takeout", lambda *args, **kwargs: calls.append("gmail"))
 
@@ -149,10 +183,10 @@ def test_auto_takeout_does_not_remove_original_if_safe_move_fails(monkeypatch, t
     _zip(archive, {"Takeout/Google Photos/photo.jpg": b"photo"})
     calls = []
 
-    def fail_move(*args, **kwargs):
+    def fail_copy(*args, **kwargs):
         raise ValueError("verification failed")
 
-    monkeypatch.setattr("localvault.auto_takeout.atomic_move_or_copy", fail_move)
+    monkeypatch.setattr("localvault.auto_takeout.atomic_copy", fail_copy)
     monkeypatch.setattr("localvault.auto_takeout.ingest_photos_takeout", lambda *args, **kwargs: calls.append("photos"))
     monkeypatch.setattr("localvault.auto_takeout.ingest_gmail_takeout", lambda *args, **kwargs: calls.append("gmail"))
 

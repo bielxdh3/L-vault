@@ -43,8 +43,9 @@
 {% endif %}
 
 <h2>Arquivos recentes</h2>
+{% if not recent_files %}<p class="empty-state">Nenhum arquivo indexado ainda. Use uma ação de importação para começar.</p>{% endif %}
 <table>
-  <tr><th>Origem</th><th>Arquivo</th><th>Tamanho</th><th>Status</th><th>Acoes</th></tr>
+  <caption class="sr-only">Arquivos recentes indexados</caption><tr><th scope="col">Origem</th><th scope="col">Arquivo</th><th scope="col">Tamanho</th><th scope="col">Status</th><th scope="col">Ações</th></tr>
   {% for item in recent_files %}
   <tr>
     <td><span class="badge">{{ item.source }}</span></td>

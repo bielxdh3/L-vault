@@ -1,6 +1,7 @@
 {% extends "base.html" %}{% block title %}Controle - LocalVault{% endblock %}
 {% block content %}
 <h1>Painel de Controle</h1>
+<p class="muted">Saúde, configuração e ações locais. Ações que alteram dados usam POST e confirmação quando necessário.</p>
 
 <section class="health-panel {{ health.status }}">
   <div>
@@ -17,6 +18,46 @@
     {% endfor %}
   </div>
 </section>
+
+<section class="control-grid">
+  <article>
+    <h2>Capacidade e índice</h2>
+    <p>{{ health.metrics.filesystem.free_bytes }} bytes livres / {{ health.metrics.filesystem.total_bytes }} totais</p>
+    <p>{{ health.metrics.indexed.file_count }} indexado(s), {{ health.metrics.indexed.bytes }} bytes</p>
+    <p>{% if health.metrics.indexed.missing_count %}<span class="missing">{{ health.metrics.indexed.missing_count }} ausente(s)</span>{% else %}<span class="ok">Índice completo</span>{% endif %}</p>
+  </article>
+  <article>
+    <h2>Integridade</h2>
+    <p>Duplicatas: {{ health.metrics.duplicates.group_count }} grupo(s)</p>
+    <p>Erros recentes: {{ health.metrics.recent_import_error_count }}</p>
+    <p>Verificação completa: {% if health.metrics.last_successful_full_verification %}<span class="ok">{{ health.metrics.last_successful_full_verification.finished_at }}</span>{% else %}<span class="missing">Nunca verificada</span>{% endif %}</p>
+  </article>
+  <article>
+    <h2>Conteúdo e crescimento</h2>
+    <p>{{ health.metrics.content_counts.emails }} e-mail(s), {{ health.metrics.content_counts.attachments }} anexo(s)</p>
+    <p>{{ health.metrics.content_counts.photos }} foto(s), {{ health.metrics.content_counts.videos }} vídeo(s)</p>
+    <p>Crescimento recente: {% if health.metrics.recent_storage_growth.available %}{{ health.metrics.recent_storage_growth.bytes }} bytes{% else %}indisponível{% endif %}</p>
+  </article>
+  <article>
+    <h2>Execuções e segurança</h2>
+    <p>Parciais: {{ health.metrics.last_runs.partial.status if health.metrics.last_runs.partial else "nenhuma" }}; falhas: {{ health.metrics.last_runs.failed.status if health.metrics.last_runs.failed else "nenhuma" }}</p>
+    <p>Runs stale/interrompidos: {{ health.metrics.stale_interrupted_run_count }}</p>
+    <p>Temporários: {{ health.metrics.safe_temp.status }}; lock: {{ health.metrics.lock.status }}</p>
+  </article>
+  <article>
+    <h2>Operações separadas</h2>
+    <p><a href="/replica">Réplica</a>: {{ health.metrics.replica.status|replace('_', ' ') }}</p>
+    <p><a href="/restore">Restore</a>: disponível pela CLI</p><p>Clone: indisponível</p>
+  </article>
+</section>
+
+<h2>Origem dos arquivos indexados</h2>
+<table><caption class="sr-only">Origem dos arquivos indexados</caption>
+  <tr><th scope="col">Origem</th><th scope="col">Arquivos</th><th scope="col">Bytes</th></tr>
+  {% for source, item in health.metrics.source_breakdown.items() %}
+  <tr><td>{{ source }}</td><td>{{ item.count }}</td><td>{{ item.bytes }}</td></tr>
+  {% endfor %}
+</table>
 
 <section class="control-grid">
   <article>
@@ -48,6 +89,13 @@
     {% else %}
       <p><span class="ok">Indice limpo</span></p>
     {% endif %}
+  </article>
+
+  <article>
+    <h2>Clone do disco</h2>
+    <p><span class="badge">{{ disk_clone.current_state }}</span></p>
+    <p class="muted">{{ disk_clone.provider }} - {{ disk_clone.enrollment }}</p>
+    <a href="/disk-clone">Abrir Clone do disco</a>
   </article>
 
 </section>
