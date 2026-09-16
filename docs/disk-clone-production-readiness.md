@@ -57,4 +57,8 @@ The guarded production path is implemented and tested with synthetic devices, bu
 
 ## Safety invariant
 
-Until the integration above is complete, the repository must remain unable to perform a real destructive clone by default. A green simulation/static validation result must never be presented as evidence that a physical disk was cloned or boot-tested.
+The repository remains unable to perform a real destructive clone by default:
+the production runner requires a separately enabled runtime policy and a fresh
+signed one-shot job, while the application and CLI keep the boot handoff
+unconfigured. A green simulation/static validation result must never be
+presented as evidence that a physical disk was cloned or boot-tested.
