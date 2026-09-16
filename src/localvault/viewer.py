@@ -22,7 +22,23 @@ from . import db
 from .config import load_config, paths
 from .auth import SESSION_MAX_AGE, load_auth, verify_password
 from .control_panel import control_panel_data, start_background_command
-from .disk_clone import CloneService, DiskCloneBlocked, active_clone_run_id, create_control_request, disk_clone_dashboard_data, latest_clone_run_id, update_disk_clone_settings, validated_disk_clone_config
+from .disk_clone import (
+    CloneService,
+    DiskCloneBlocked,
+    FakeProtectedPathResolver,
+    WindowsDiskInventory,
+    WindowsProtectedPathResolver,
+    active_clone_run_id,
+    create_control_request,
+    disk_clone_dashboard_data,
+    enroll_disk_clone_selection,
+    latest_clone_run_id,
+    public_disk_candidates,
+    provider_for_config,
+    _source_paths,
+    update_disk_clone_settings,
+    validated_disk_clone_config,
+)
 from .disk_clone_ui import spawn_retry_worker
 from .replica import replica_status
 from .scheduler import merge_automation_config
@@ -71,11 +87,15 @@ def _same_origin(request: Request, origin: str) -> bool:
     return parsed.scheme == request.url.scheme and parsed.hostname == request_host and origin_port == request_port
 
 
-def create_app(root: Path | None = None, https_enabled: bool | None = None) -> FastAPI:
+def create_app(root: Path | None = None, https_enabled: bool | None = None, disk_inventory=None, protected_path_resolver=None) -> FastAPI:
     p = paths(root or Path(load_config()["vault_root"]))
     viewer_config = load_config(p.root).get("viewer", {})
     secure_session = bool(viewer_config.get("tls_enabled", False) if https_enabled is None else https_enabled)
     app = FastAPI(title="LocalVault Backup Manager")
+    # Tests and controlled runtimes inject a synthetic inventory. We do not
+    # enumerate host disks during ordinary page rendering.
+    app.state.disk_inventory = disk_inventory
+    app.state.protected_path_resolver = protected_path_resolver
     templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 
     @pass_context
@@ -173,8 +193,51 @@ def create_app(root: Path | None = None, https_enabled: bool | None = None) -> F
     @app.get("/disk-clone", response_class=HTMLResponse)
     def disk_clone_page(request: Request):
         data = disk_clone_dashboard_data(p)
+        data["disk_candidates"] = _safe_disk_candidates(app.state.disk_inventory)
         data["request"] = request
         return templates.TemplateResponse(request, "disk_clone.html", data)
+
+    @app.get("/disk-clone/candidates")
+    def disk_clone_candidates():
+        inventory = app.state.disk_inventory
+        if inventory is None:
+            # Explicit refresh is the only path that may use the production
+            # Windows collector; rendering the dashboard remains side-effect
+            # free. No collector is invoked by tests unless injected.
+            inventory = WindowsDiskInventory()
+        try:
+            return JSONResponse({"candidates": public_disk_candidates(inventory.list_disks())})
+        except DiskCloneBlocked as exc:
+            raise HTTPException(409, detail=exc.reason)
+
+    @app.post("/disk-clone/enroll")
+    async def disk_clone_enroll(request: Request):
+        from urllib.parse import parse_qs
+        values = parse_qs((await request.body()).decode("utf-8", "replace"))
+        try:
+            target_number = int((values.get("target_number") or [""])[-1])
+            confirmation = (values.get("confirmation") or [""])[-1]
+            inventory = app.state.disk_inventory if app.state.disk_inventory is not None else WindowsDiskInventory()
+            config = load_config(p.root).get("disk_clone", {})
+            resolver = app.state.protected_path_resolver
+            if resolver is None and app.state.disk_inventory is None:
+                resolver = WindowsProtectedPathResolver()
+            elif resolver is None:
+                disks = inventory.list_disks()
+                sources = [disk for disk in disks if disk.is_system or disk.is_boot]
+                if len(sources) == 1:
+                    resolver = FakeProtectedPathResolver({str(path): sources[0] for path in _source_paths(paths(p.root), load_config(p.root))})
+            enroll_disk_clone_selection(
+                p.root,
+                target_number=target_number,
+                confirmation=confirmation,
+                inventory=inventory,
+                provider=provider_for_config(config),
+                resolver=resolver,
+            )
+        except (ValueError, DiskCloneBlocked) as exc:
+            raise HTTPException(400, detail=getattr(exc, "reason", "invalid enrollment"))
+        return RedirectResponse("/disk-clone", status_code=303)
 
     @app.get("/disk-clone/status")
     def disk_clone_status():
@@ -196,7 +259,16 @@ def create_app(root: Path | None = None, https_enabled: bool | None = None) -> F
         return RedirectResponse("/disk-clone", status_code=303)
 
     @app.post("/disk-clone/settings")
-    def disk_clone_settings(interval_days: int | None = Query(None), enabled: bool | None = Query(None)):
+    async def disk_clone_settings(request: Request, interval_days: int | None = Query(None), enabled: bool | None = Query(None)):
+        from urllib.parse import parse_qs
+        values = parse_qs((await request.body()).decode("utf-8", "replace"))
+        if "interval_days" in values:
+            try:
+                interval_days = int(values["interval_days"][-1])
+            except ValueError:
+                raise HTTPException(400)
+        if "enabled" in values:
+            enabled = values["enabled"][-1].strip().casefold() in {"1", "true", "yes", "on", "sim"}
         try:
             update_disk_clone_settings(p.root, interval_days=interval_days, enabled=enabled)
         except (DiskCloneBlocked, ValueError):
@@ -462,6 +534,17 @@ def _setup_page_data(p) -> dict:
         "takeout_source_existing": sum(1 for value in sources if Path(str(value)).expanduser().is_dir()),
         "tasks": tasks[:8],
     }
+
+
+def _safe_disk_candidates(inventory) -> list[dict]:
+    if inventory is None:
+        return []
+    try:
+        return public_disk_candidates(inventory.list_disks())
+    except Exception:
+        # The dashboard remains renderable when the optional read-only refresh
+        # is unavailable; the explicit candidates endpoint reports 409.
+        return []
 
 
 def _email_body(path: Path) -> dict[str, str]:

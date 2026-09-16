@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
 from localvault.offline_clone import OfflineCloneBlocked
-from localvault.offline_linux_inventory import parse_lsblk_json
+from localvault.offline_linux_inventory import LinuxOfflineInventoryCollector, parse_lsblk_json
 
 
 def _payload():
@@ -103,3 +104,40 @@ def test_invalid_json_and_invalid_device_node_fail_closed():
     value["blockdevices"][0]["path"] = "../../dev/sda"
     with pytest.raises(OfflineCloneBlocked, match="invalid device node"):
         parse_lsblk_json(json.dumps(value))
+
+
+def test_collector_uses_exact_read_only_argv_and_fixture_runner():
+    calls = []
+
+    def runner(argv, *, timeout):
+        calls.append((argv, timeout))
+        return subprocess.CompletedProcess(argv, 0, _payload().encode("utf-8"), b"")
+
+    devices = LinuxOfflineInventoryCollector(runner=runner).collect(live_root_nodes=("/dev/nvme0n1",), protected_nodes=("/dev/nvme0n1",))
+    assert devices[0].live_root is True
+    assert devices[0].protected is True
+    assert calls and calls[0][0][:4] == ["/usr/bin/lsblk", "--json", "--bytes", "--output"]
+    assert "ID-SERIAL" in calls[0][0][-1]
+    assert calls[0][1] == 10.0
+
+
+def test_collector_bounds_timeout_and_output():
+    def timeout_runner(argv, *, timeout):
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    with pytest.raises(OfflineCloneBlocked, match="timed out"):
+        LinuxOfflineInventoryCollector(runner=timeout_runner).collect()
+
+    def oversized_runner(argv, *, timeout):
+        return subprocess.CompletedProcess(argv, 0, b"x" * 1025, b"")
+
+    with pytest.raises(OfflineCloneBlocked, match="oversized"):
+        LinuxOfflineInventoryCollector(runner=oversized_runner, max_output_bytes=1024).collect()
+
+
+def test_collector_uses_independent_classification_evidence():
+    collector = LinuxOfflineInventoryCollector(
+        runner=lambda argv, timeout: subprocess.CompletedProcess(argv, 0, _payload().encode(), b""),
+        classifier=lambda: {"live_root_nodes": ["/dev/nvme0n1"], "boot_medium_nodes": [], "protected_nodes": []},
+    )
+    assert collector.collect()[0].live_root is True

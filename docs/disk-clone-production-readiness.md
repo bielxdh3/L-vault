@@ -36,30 +36,24 @@ The dedicated Disk Clone screen now explains that it is a **physical full-disk r
 - no `dd` fallback;
 - test-double runner that never spawns a subprocess;
 - final argv hash includes the absolute executable path;
-- no process creation unless the signed job authorizes real execution and fresh resolution exists.
+- no process creation unless the signed job authorizes real execution, runtime readiness is trusted, replay is claimed, and fresh resolution exists;
+- post-run inventory, structural verification, target-offline confirmation, and a signed production result are mandatory.
 
-The module deliberately does **not** bypass the current `OfflineJob.validate()` blocker. At the time of this draft, the signed-job model still rejects `real_execution_authorized=True` with `offline_execution_disabled`. That blocker must be removed only as part of an explicit signed one-shot authorization change, with tampering/replay tests.
+`real_execution_authorized=true` is now accepted only as a signed, expiring, nonce-bound job capability. Persistent configuration remains default-off and cannot grant standing destructive consent. The executor claims replay immediately before process creation and the trusted `ProductionOfflineRunner` verifies the job signature, inventories before and after execution, and publishes a signed result only after terminal checks.
 
-### Read-only Linux inventory parser
+### Read-only Linux inventory collector
 
-`src/localvault/offline_linux_inventory.py` adds a pure parser for deterministic `lsblk --json --bytes` style fixtures. It normalizes top-level physical-disk evidence into `OfflineBlockDevice` without touching the host. Runtime live-root, boot-medium, and protected-device classification still needs independent trusted evidence before a destructive operation.
+`src/localvault/offline_linux_inventory.py` keeps the pure parser and adds `LinuxOfflineInventoryCollector`: a bounded `shell=False` call to an exact `/.../lsblk` path, with normalized identity/geometry/partition/mount/removable/read-only evidence. Runtime live-root, boot-medium, and protected-device classification is supplied independently and remains a required gate.
 
-## Remaining integration before production use
+## Remaining human/runtime validation before a real clone
 
-The feature is **not ready for a real clone yet**. The remaining production integration must be completed and tested locally/offline without weakening existing safety rules:
+The guarded production path is implemented and tested with synthetic devices, but this checkout is **not evidence that a physical clone is ready or has occurred**. The remaining validation is deliberately outside this mission:
 
-1. widen the signed `OfflineJob` contract so one specific expiring, nonce-bound job may carry `real_execution_authorized=true`;
-2. keep global capability default-off and avoid persistent one-click destructive consent;
-3. bind that authorization to source identity, target identity, engine, release, expiry, nonce, and policy under the existing signature/replay model;
-4. integrate the production executor into the trusted Clonezilla Live runtime;
-5. add a bounded read-only Linux collector around the pure inventory parser using exact allowlisted binaries from the verified runtime;
-6. independently classify live root, boot medium, mounted/read-only/protected devices;
-7. perform fresh post-run inventory and structural verification;
-8. confirm target-offline state before publishing success;
-9. publish and consume the signed production result through the existing return channel;
-10. keep `boot_tested=false` until a human actually boots the cloned disk;
-11. add the normal source/target enrollment/configuration UI using injected fake inventories in tests;
-12. run the full repository suite and a real browser smoke test before marking this PR ready.
+1. provision and independently attest the pinned Clonezilla Live image and required tools;
+2. configure the dedicated exchange medium and manually boot the owner-approved offline runtime;
+3. perform any real clone only after a human reviews the exact signed job and physical source/target labels;
+4. inspect the signed result and structural evidence on Windows;
+5. keep `boot_tested=false` until a human actually boots the cloned disk.
 
 ## Safety invariant
 

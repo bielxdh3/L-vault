@@ -38,6 +38,35 @@
   </article>
 </section>
 
+<section class="panel-block" aria-labelledby="enrollment-heading">
+  <div class="page-head compact-head">
+    <div>
+      <h2 id="enrollment-heading">Inscrição de origem e destino</h2>
+      <p class="muted">Atualize a lista antes de escolher. O número é apenas momentâneo; a confirmação usa identidade persistente e capacidade exata.</p>
+    </div>
+    <a class="soft-button" href="/disk-clone/candidates">Atualizar discos</a>
+  </div>
+  {% if disk_candidates %}
+  <form method="post" action="/disk-clone/enroll" class="filter-panel">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Destino
+      <select name="target_number" required>
+        <option value="">Selecione um disco</option>
+        {% for disk in disk_candidates %}
+        <option value="{{ disk.number }}"{% if disk.is_system %} disabled{% endif %}>{{ disk.label }} · {{ disk.bus_type }} · {{ disk.partition_style }}{% if disk.is_system %} · sistema atual{% endif %}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Confirmação exata do destino
+      <input name="confirmation" autocomplete="off" placeholder="APAGAR modelo capacidade ****1234" required>
+    </label>
+    <button type="submit">Confirmar inscrição</button>
+  </form>
+  {% else %}
+  <p class="empty-state">Nenhum candidato foi carregado. Use “Atualizar discos” em um runtime Windows autorizado ou injete uma lista sintética nos testes.</p>
+  {% endif %}
+</section>
+
 <section class="panel-block">
   <h2>Estado da cadeia offline</h2>
   <p><strong>Preparação Windows:</strong> {{ windows_preparation_provider }}</p>
@@ -88,6 +117,8 @@
 <h2>Configuração segura</h2>
 <form class="filter-panel" method="post" action="/disk-clone/settings">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="enabled" value="false">
+  <label class="checkbox-label"><input type="checkbox" name="enabled" value="true"{% if enabled %} checked{% endif %}> Habilitar agendamento</label>
   <label>Intervalo (1–3650 dias)
     <input type="number" min="1" max="3650" name="interval_days" value="{{ interval_days }}">
   </label>

@@ -1922,6 +1922,79 @@ def update_disk_clone_settings(root: Path, *, interval_days: int | None = None, 
     return section
 
 
+def public_disk_candidates(disks: Iterable[DiskIdentity]) -> list[dict[str, Any]]:
+    """Return UI-safe candidate data; stable identifiers are never exposed."""
+    result = []
+    for disk in disks:
+        result.append({
+            "number": disk.number,
+            "label": disk.masked_label,
+            "model": disk.model or "disco desconhecido",
+            "capacity_bytes": disk.size_bytes,
+            "bus_type": disk.bus_type or "desconhecido",
+            "partition_style": disk.partition_style or "desconhecido",
+            "identity_strength": disk.identity_strength(),
+            "is_system": bool(disk.is_system or disk.is_boot),
+            "online": disk.online,
+            "read_only": disk.read_only,
+            "mounted": bool(disk.mount_points) or any(part.mount_point for part in disk.partitions),
+        })
+    return result
+
+
+def enroll_disk_clone_selection(
+    root: Path,
+    *,
+    target_number: int,
+    confirmation: str,
+    inventory: DiskInventory,
+    provider: CloneProvider | None = None,
+    resolver: ProtectedPathResolver | None = None,
+    store: EnrollmentStore | None = None,
+) -> Enrollment:
+    """Validate and persist one explicit source/target enrollment.
+
+    This helper is intentionally side-effect free apart from the signed
+    enrollment manifest. It never brings a disk online or starts a provider.
+    """
+    cfg = validate_disk_clone_config(load_config(root).get("disk_clone", {}))
+    selected_provider = provider or provider_for_config(cfg)
+    discovery = selected_provider.discover()
+    capabilities = selected_provider.validate_capabilities()
+    if not capabilities.supported:
+        raise DiskCloneBlocked(capabilities.blocker or discovery.detail, "blocked_provider")
+    disks = list(inventory.list_disks())
+    sources = [disk for disk in disks if disk.is_system or disk.is_boot]
+    if len(sources) != 1:
+        raise DiskCloneBlocked("Nao foi possivel identificar exatamente um disco de sistema atual.", "blocked_identity")
+    source = sources[0]
+    target = next((disk for disk in disks if disk.number == int(target_number)), None)
+    if target is None or target.number == source.number:
+        raise DiskCloneBlocked("O destino deve ser outro disco fisico.", "blocked_identity")
+    if any((target.is_system, target.is_boot, target.is_pagefile, target.is_crash_dump)):
+        raise DiskCloneBlocked("O destino selecionado e um disco critico.", "blocked_identity")
+    if source.identity_strength() != "strong" or target.identity_strength() != "strong":
+        raise DiskCloneBlocked("A identidade persistente da origem ou destino e fraca.", "blocked_identity")
+    if target.size_bytes < source.size_bytes:
+        raise DiskCloneBlocked("O destino e menor que a origem.", "blocked_size")
+    if confirmation != target.confirmation_phrase():
+        raise DiskCloneBlocked("Confirmacao destrutiva incorreta.", "blocked_identity")
+    protected_paths = _source_paths(paths(root), load_config(root))
+    if resolver is None:
+        # A production caller must provide an identity-aware resolver. Tests may
+        # inject FakeProtectedPathResolver explicitly.
+        if protected_paths:
+            raise DiskCloneBlocked("Dados protegidos nao puderam ser resolvidos com seguranca.", "blocked_protected_path")
+    else:
+        try:
+            conflicts, _ = resolved_protected_path_conflicts(target, protected_paths, resolver, inventory=disks)
+        except Exception as exc:
+            raise DiskCloneBlocked("Dados protegidos nao puderam ser resolvidos com seguranca.", "blocked_protected_path") from exc
+        if conflicts:
+            raise DiskCloneBlocked("O destino contem ou mapeia dados protegidos do L-vault.", "blocked_protected_path")
+    return (store or EnrollmentStore(root)).save(source, target, discovery.name, "disk_intelligent")
+
+
 def disk_clone_dashboard_data(p: VaultPaths) -> dict[str, Any]:
     try:
         service = CloneService(p)

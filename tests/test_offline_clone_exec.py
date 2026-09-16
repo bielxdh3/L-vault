@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -8,6 +8,7 @@ from localvault.offline_clone import (
     FakeOfflineInventory,
     OfflineBlockDevice,
     OfflineCloneBlocked,
+    ReplayStore,
     build_offline_job,
     resolve_offline_devices,
 )
@@ -81,6 +82,11 @@ def test_non_allowlisted_executable_is_rejected_before_process_creation():
         render_absolute_clonezilla_plan(job, resolution, "/bin/dd")
 
 
+def test_executor_policy_rejects_noncanonical_clonezilla_path():
+    with pytest.raises(OfflineCloneBlocked, match="not allowlisted"):
+        ProductionExecutionPolicy(enabled=True, executable_path="/opt/ocs-onthefly").validate()
+
+
 def test_executor_does_not_run_without_job_scoped_real_authorization():
     job, resolution = _job_and_resolution()
     recorder = RecordingCloneProcessRunner()
@@ -106,3 +112,39 @@ def test_test_double_is_blocked_by_production_policy_unless_explicitly_allowed()
     with pytest.raises(OfflineCloneBlocked):
         executor.execute(job, resolution)
     assert recorder.calls == []
+
+
+def test_authorized_executor_claims_nonce_once_immediately_before_runner(tmp_path):
+    source = _disk("/dev/sda", "source")
+    target = _disk("/dev/sdb", "target", size=1200)
+    job = build_offline_job(source, target, now=NOW, nonce="nonce-production-0002", real_execution_authorized=True)
+    resolution = resolve_offline_devices(job, FakeOfflineInventory((source, target)))
+    recorder = RecordingCloneProcessRunner()
+    executor = ProductionOfflineCloneExecutor(
+        ProductionExecutionPolicy(enabled=True, allow_test_double=True, runtime_ready=True),
+        recorder,
+        replay_store=ReplayStore(tmp_path / "replay.json"),
+    )
+    outcome = executor.execute(job, resolution, now=NOW + timedelta(minutes=1))
+    assert outcome.exit_status == 0
+    assert len(recorder.calls) == 1
+    with pytest.raises(OfflineCloneBlocked, match="already consumed"):
+        executor.execute(job, resolution, now=NOW + timedelta(minutes=1))
+    assert len(recorder.calls) == 1
+
+
+def test_authorized_executor_requires_runtime_readiness_before_replay_or_runner(tmp_path):
+    source = _disk("/dev/sda", "source")
+    target = _disk("/dev/sdb", "target", size=1200)
+    job = build_offline_job(source, target, now=NOW, nonce="nonce-production-0003", real_execution_authorized=True)
+    resolution = resolve_offline_devices(job, FakeOfflineInventory((source, target)))
+    recorder = RecordingCloneProcessRunner()
+    executor = ProductionOfflineCloneExecutor(
+        ProductionExecutionPolicy(enabled=True, allow_test_double=True),
+        recorder,
+        replay_store=ReplayStore(tmp_path / "replay.json"),
+    )
+    with pytest.raises(OfflineCloneBlocked, match="runtime is not ready"):
+        executor.execute(job, resolution, now=NOW)
+    assert recorder.calls == []
+    assert not (tmp_path / "replay.json").exists()
