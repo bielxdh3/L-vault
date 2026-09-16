@@ -565,6 +565,8 @@ class ReplayStore:
         self.state_path = Path(state_path)
 
     def claim(self, nonce: str) -> None:
+        if self.state_path.is_symlink():
+            raise OfflineCloneBlocked("replay state path is unsafe", "offline_verification_failed")
         lock = BackupLock(self.state_path.with_name(self.state_path.name + ".lock"), stale_after=timedelta(minutes=10))
         with lock:
             try:
