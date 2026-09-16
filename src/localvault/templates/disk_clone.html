@@ -1,34 +1,119 @@
-{% extends "base.html" %}{% block title %}Clone do disco - LocalVault{% endblock %}
+{% extends "base.html" %}{% block title %}Clone físico do disco - LocalVault{% endblock %}
 {% block content %}
 <section class="page-head">
-  <div><h1>Clone offline do disco</h1><p class="muted">O Windows prepara um job para Clonezilla Live; a execucao real ainda nao esta habilitada.</p></div>
+  <div>
+    <h1>Clone físico do disco</h1>
+    <p class="muted">Cópia completa para recuperação do disco de sistema, separada da réplica de arquivos.</p>
+  </div>
   <span class="badge">{{ "ATIVADO" if enabled else "DESATIVADO" }}</span>
 </section>
 
-<section class="notice"><div><strong>Nenhum software pago e necessario.</strong><span>Clonezilla Live e Partclone sao as bases open-source em avaliacao. Esta tela nao reinicia, nao altera boot e nao escreve em discos.</span></div></section>
-
-<section class="control-grid">
-  <article><h2>Arquitetura</h2><p><strong>{{ windows_preparation_provider }}</strong></p><p class="muted">Motor offline: {{ offline_engine }} {{ offline_engine_version }}<br>{{ provider_blocker or "preparacao Windows separada do motor offline" }}</p></article>
-  <article><h2>Inscricao</h2><p>{{ enrollment }}</p><p class="muted">Origem: {{ source }}<br>Destino: {{ target }}</p></article>
-  <article><h2>Agendamento local</h2><p>Intervalo: <strong>{{ interval_days }} dia(s)</strong></p><p class="muted">Proximo vencimento UTC: {{ next_due_at }}<br>Janela local: {{ window_start }}-{{ window_end }}, sem catch-up diurno.</p></article>
-  <article><h2>Estado atual</h2><p><span class="badge">{{ current_state_label }}</span></p><p class="muted">Runtime offline: {{ offline_runtime_state }}<br>{{ offline_runtime_reason }}<br>Boot offline: {{ "configurado" if offline_handoff.configured else "nao configurado" }}<br>Boot test: {{ boot_test }}<br>Execucao real: desativada</p></article>
+<section class="notice">
+  <div>
+    <strong>Limite de segurança atual</strong>
+    <span>Preflight e simulação são não destrutivos. Um clone físico real só pode existir após autorização explícita, revalidação offline da origem/destino e runtime Clonezilla confiável.</span>
+  </div>
 </section>
 
-<h2>Acoes seguras</h2>
+<section class="control-grid">
+  <article>
+    <h2>Origem</h2>
+    <p><strong>{{ source or "Não inscrita" }}</strong></p>
+    <p class="muted">Disco de sistema. Nunca é escolhido apenas por letra, número efêmero ou capacidade.</p>
+  </article>
+  <article>
+    <h2>Destino</h2>
+    <p><strong>{{ target or "Não inscrito" }}</strong></p>
+    <p class="muted">Quando um clone real for autorizado, este disco será sobrescrito. A identidade é revalidada antes da execução.</p>
+  </article>
+  <article>
+    <h2>Prontidão</h2>
+    <p><span class="badge">{{ current_state_label }}</span></p>
+    <p class="muted">Runtime offline: {{ offline_runtime_state }}<br>{{ offline_runtime_reason }}</p>
+  </article>
+  <article>
+    <h2>Agendamento</h2>
+    <p><strong>{{ interval_days }} dia(s)</strong></p>
+    <p class="muted">Próximo vencimento UTC: {{ next_due_at }}<br>Janela local: {{ window_start }}–{{ window_end }}.</p>
+  </article>
+</section>
+
+<section class="panel-block">
+  <h2>Estado da cadeia offline</h2>
+  <p><strong>Preparação Windows:</strong> {{ windows_preparation_provider }}</p>
+  <p><strong>Motor offline:</strong> {{ offline_engine }} {{ offline_engine_version }}</p>
+  <p><strong>Inscrição:</strong> {{ enrollment }}</p>
+  <p><strong>Handoff de boot:</strong> {{ "configurado" if offline_handoff.configured else "não configurado" }}</p>
+  <p><strong>Boot test:</strong> {{ boot_test }}</p>
+  {% if provider_blocker %}<p class="muted">{{ provider_blocker }}</p>{% endif %}
+</section>
+
+<h2>Ações seguras</h2>
 <section class="quick-actions">
-  <form method="post" action="/disk-clone/action?action=preflight"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Verificar prontidao</button></form>
-  <form method="post" action="/disk-clone/action?action=simulate"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit">Simular round trip fake</button></form>
+  <form method="post" action="/disk-clone/action?action=preflight">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit">Verificar prontidão</button>
+  </form>
+  <form method="post" action="/disk-clone/action?action=simulate">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit">Simular fluxo completo</button>
+  </form>
 </section>
+<p class="muted">Essas ações não executam Clonezilla contra um disco real.</p>
 
 <section class="control-grid">
-  <article><h2>Progresso</h2>{% if progress %}<p><span class="badge">{{ progress.progress_type }}</span> {{ progress.percent if progress.percent is not none else "indisponivel" }}{% if progress.percent is not none %}%{% endif %}</p><p class="muted">Fase: {{ progress.phase or "desconhecida" }}<br>Bytes: {{ progress.copied_bytes or "indisponivel" }}<br>Velocidade: {{ progress.speed_bytes or "indisponivel" }}<br>ETA: {{ progress.eta_seconds or "indisponivel" }}</p>{% else %}<p class="muted">Nenhum sinal de progresso persistido.</p>{% endif %}</article>
-  <article><h2>Atividade</h2><p class="muted">Amostras e media sao registradas por tentativa; atividade alta deixa o clone devido sem retry automatico.</p></article>
-  <article><h2>Verificacao</h2><p class="muted">O runner offline deve resolver novamente a identidade persistente e retornar um pacote assinado. O boot permanece nao testado manualmente.</p></article>
-  <article><h2>Bloqueios atuais</h2><p class="muted">{{ offline_handoff.blockers | join(" ") }}</p></article>
+  <article>
+    <h2>Progresso</h2>
+    {% if progress %}
+      <p><span class="badge">{{ progress.progress_type }}</span> {{ progress.percent if progress.percent is not none else "indisponível" }}{% if progress.percent is not none %}%{% endif %}</p>
+      <p class="muted">Fase: {{ progress.phase or "desconhecida" }}<br>Bytes: {{ progress.copied_bytes or "indisponível" }}<br>Velocidade: {{ progress.speed_bytes or "indisponível" }}<br>ETA: {{ progress.eta_seconds or "indisponível" }}</p>
+    {% else %}
+      <p class="muted">Nenhum sinal de progresso persistido.</p>
+    {% endif %}
+  </article>
+  <article>
+    <h2>Verificação</h2>
+    <p class="muted">Sucesso exige resultado assinado e verificação estrutural. Isso não equivale a um boot test.</p>
+  </article>
+  <article>
+    <h2>Destino offline</h2>
+    <p class="muted">A política atual exige que o destino volte ao estado offline após uma conclusão válida.</p>
+  </article>
+  <article>
+    <h2>Bloqueios</h2>
+    <p class="muted">{{ offline_handoff.blockers | join(" ") if offline_handoff.blockers else "Nenhum bloqueio de handoff informado." }}</p>
+  </article>
 </section>
 
-<form class="filter-panel" method="post" action="/disk-clone/settings"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label>Intervalo (1-3650 dias) <input type="number" min="1" max="3650" name="interval_days" value="{{ interval_days }}"></label><button type="submit">Salvar intervalo</button></form>
+<h2>Configuração segura</h2>
+<form class="filter-panel" method="post" action="/disk-clone/settings">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <label>Intervalo (1–3650 dias)
+    <input type="number" min="1" max="3650" name="interval_days" value="{{ interval_days }}">
+  </label>
+  <button type="submit">Salvar intervalo</button>
+</form>
+<p class="muted">A inscrição de origem/destino continua exigindo identidade persistente forte. Nenhuma seleção por número efêmero vira autorização destrutiva por si só.</p>
 
-<h2>Historico recente</h2>
-{% if recent_runs %}<table><tr><th>Run</th><th>Estado</th><th>Inicio</th><th>Fim</th><th>Destino offline</th><th>Verificacao</th><th>Motivo</th></tr>{% for run in recent_runs %}<tr><td>{{ run.run_id }}</td><td><span class="badge">{{ run.state }}</span></td><td>{{ run.started_at }}</td><td>{{ run.finished_at or "-" }}</td><td>{{ run.target_offline_result or "-" }}</td><td>{{ run.verification_status or "-" }}</td><td>{{ run.reason or "" }}{% if run.cleanup_failure_reason %}<br><strong>Limpeza:</strong> {{ run.cleanup_failure_reason }}{% endif %}</td></tr>{% endfor %}</table>{% else %}<p>Nenhuma execucao registrada.</p>{% endif %}
+<h2>Histórico recente</h2>
+{% if recent_runs %}
+<div style="overflow:auto" role="region" aria-label="Histórico do clone" tabindex="0">
+<table>
+  <tr><th>Run</th><th>Estado</th><th>Início</th><th>Fim</th><th>Destino offline</th><th>Verificação</th><th>Motivo</th></tr>
+  {% for run in recent_runs %}
+  <tr>
+    <td>{{ run.run_id }}</td>
+    <td><span class="badge">{{ run.state }}</span></td>
+    <td>{{ run.started_at }}</td>
+    <td>{{ run.finished_at or "-" }}</td>
+    <td>{{ run.target_offline_result or "-" }}</td>
+    <td>{{ run.verification_status or "-" }}</td>
+    <td>{{ run.reason or "" }}{% if run.cleanup_failure_reason %}<br><strong>Limpeza:</strong> {{ run.cleanup_failure_reason }}{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% else %}
+<p class="empty-state">Nenhuma execução registrada.</p>
+{% endif %}
 {% endblock %}
