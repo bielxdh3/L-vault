@@ -1,5 +1,30 @@
-{% extends "base.html" %}{% block title %}RÃ©plica - LocalVault{% endblock %}
+{% extends "base.html" %}{% block title %}Réplica de arquivos - LocalVault{% endblock %}
 {% block content %}
-<section class="page-head"><div><h1>RÃ©plica</h1><p class="muted">CÃ³pia independente e nÃ£o destrutiva, com destino explÃ­cito.</p></div></section>
-<section class="panel-block"><p class="status-line"><span class="status-dot {{ 'status-ok' if replica.status in ['completed', 'dry_run'] else 'status-attention' }}"></span><strong>{% if replica.status == "not_configured" %}NÃ£o configurada{% elif replica.status == "unavailable" %}Destino configurado, manifesto indisponÃ­vel{% elif replica.status == "completed" %}ConcluÃ­da{% elif replica.status == "dry_run" %}PrÃ©via concluÃ­da{% else %}{{ replica.status|replace('_', ' ')|capitalize }}{% endif %}</strong></p><p class="muted">{{ "Nenhum destino de rÃ©plica foi configurado." if replica.status == "not_configured" else "O estado Ã© derivado apenas do manifesto; seu conteÃºdo nÃ£o Ã© exibido." }}</p><p><code>localvault replica-plan --destination &lt;pasta&gt;</code> revisa a operaÃ§Ã£o; a execuÃ§Ã£o exige destino separado e lock de backup.</p></section>
+<section class="page-head">
+  <div>
+    <h1>Réplica de arquivos</h1>
+    <p class="muted">Cópia independente e não destrutiva dos arquivos do cofre para outra pasta ou volume.</p>
+  </div>
+</section>
+
+<section class="notice">
+  <div>
+    <strong>Isto não é um clone bootável do disco.</strong>
+    <span>Para uma cópia física completa do disco de sistema, use <a href="/disk-clone">Clone do disco</a>.</span>
+  </div>
+</section>
+
+<section class="panel-block">
+  <p class="status-line">
+    <span class="status-dot {{ 'status-ok' if replica.status in ['completed', 'dry_run'] else 'status-attention' }}"></span>
+    <strong>{% if replica.status == "not_configured" %}Não configurada{% elif replica.status == "unavailable" %}Destino configurado, manifesto indisponível{% elif replica.status == "completed" %}Concluída{% elif replica.status == "dry_run" %}Prévia concluída{% else %}{{ replica.status|replace('_', ' ')|capitalize }}{% endif %}</strong>
+  </p>
+  <p class="muted">{{ "Nenhum destino de réplica de arquivos foi configurado." if replica.status == "not_configured" else "O estado é derivado apenas do manifesto; seu conteúdo não é exibido." }}</p>
+</section>
+
+<details class="panel-block">
+  <summary><strong>Opção avançada pela CLI</strong></summary>
+  <p class="muted">A CLI é útil para diagnóstico/administração; ela não configura o clone físico.</p>
+  <p><code>python -m localvault replica-plan --root &lt;VAULT_ROOT&gt; --destination &lt;PASTA&gt;</code></p>
+</details>
 {% endblock %}
