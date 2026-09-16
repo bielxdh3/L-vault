@@ -3,13 +3,8 @@
 This module is deliberately fail-closed. Importing it never touches storage and
 constructing a runner never starts Clonezilla. Real execution requires an
 explicitly enabled policy, a signed job whose contract permits real execution,
-a fresh strong source/target resolution, and a non-test subprocess runner.
-
-The current repository still rejects ``real_execution_authorized=True`` inside
-``OfflineJob.validate()``. That is intentional for this draft: this module
-provides the production boundary and tests without silently weakening the
-existing signed-job contract. The remaining integration must widen that
-contract explicitly and preserve signature/replay protections.
+a fresh strong source/target resolution, a trusted runtime readiness signal,
+replay claim, and a non-test subprocess runner.
 """
 
 from __future__ import annotations
@@ -21,6 +16,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Protocol
 
 from .offline_clone import (
@@ -30,7 +26,11 @@ from .offline_clone import (
     OfflineJob,
     OfflineResolution,
     canonical_json,
+    ReplayStore,
 )
+
+
+TRUSTED_CLONEZILLA_EXECUTABLE_PATH = "/usr/sbin/ocs-onthefly"
 
 
 @dataclass(frozen=True)
@@ -64,19 +64,22 @@ class ProductionExecutionPolicy:
     timeout_seconds: int = 12 * 60 * 60
     max_captured_output_bytes: int = 1024 * 1024
     allow_test_double: bool = False
+    runtime_ready: bool = False
 
     def validate(self) -> None:
-        if not self.enabled:
+        if type(self.enabled) is not bool or not self.enabled:
             raise OfflineCloneBlocked(
                 "production offline execution is not armed",
                 "offline_execution_disabled",
             )
-        executable = Path(self.executable_path)
-        if not executable.is_absolute() or executable.name != "ocs-onthefly" or ".." in executable.parts:
+        executable = _validated_executable_path(self.executable_path)
+        if executable is None or str(executable) != TRUSTED_CLONEZILLA_EXECUTABLE_PATH:
             raise OfflineCloneBlocked(
                 "production Clonezilla executable is not allowlisted",
                 "offline_execution_disabled",
             )
+        if type(self.allow_test_double) is not bool or type(self.runtime_ready) is not bool:
+            raise OfflineCloneBlocked("production execution policy flags are invalid", "offline_execution_disabled")
         if not 1 <= int(self.timeout_seconds) <= 24 * 60 * 60:
             raise OfflineCloneBlocked(
                 "production clone timeout is outside policy",
@@ -222,6 +225,15 @@ def _verify_real_executable(path: Path) -> None:
         )
 
 
+def _validated_executable_path(value: str) -> PurePosixPath | None:
+    """Validate a Clonezilla Live path without applying host-Windows rules."""
+    text = str(value or "")
+    candidate = PurePosixPath(text)
+    if not text.startswith("/") or candidate.name != "ocs-onthefly" or ".." in candidate.parts or str(candidate) != TRUSTED_CLONEZILLA_EXECUTABLE_PATH:
+        return None
+    return candidate
+
+
 def render_absolute_clonezilla_plan(
     job: OfflineJob,
     resolution: OfflineResolution,
@@ -234,8 +246,8 @@ def render_absolute_clonezilla_plan(
     the exact final argv. No shell command string is produced.
     """
 
-    executable = Path(executable_path)
-    if not executable.is_absolute() or executable.name != "ocs-onthefly" or ".." in executable.parts:
+    executable = _validated_executable_path(executable_path)
+    if executable is None:
         raise OfflineCloneBlocked(
             "Clonezilla executable path is not allowlisted",
             "offline_execution_disabled",
@@ -254,17 +266,25 @@ def render_absolute_clonezilla_plan(
 class ProductionOfflineCloneExecutor:
     """Small, fail-closed boundary around the real process runner.
 
-    This draft intentionally stops before process creation while the signed job
-    model rejects ``real_execution_authorized=True``. Once that contract is
-    widened and covered by signature/replay tests, this class can be integrated
-    into the trusted offline runtime without changing its safety shape.
+    The executor does not discover devices or infer readiness. Those facts must
+    be supplied by the trusted offline runtime immediately before this call.
     """
 
-    def __init__(self, policy: ProductionExecutionPolicy, runner: CloneProcessRunner):
+    def __init__(
+        self,
+        policy: ProductionExecutionPolicy,
+        runner: CloneProcessRunner,
+        *,
+        replay_store: ReplayStore | None = None,
+        runtime_ready: bool | None = None,
+    ):
         self.policy = policy
         self.runner = runner
+        self.replay_store = replay_store
+        self.runtime_ready = runtime_ready
+        self.last_plan: ClonezillaCommandPlan | None = None
 
-    def execute(self, job: OfflineJob, resolution: OfflineResolution) -> ProcessOutcome:
+    def execute(self, job: OfflineJob, resolution: OfflineResolution, *, now=None) -> ProcessOutcome:
         self.policy.validate()
         job.validate()
         if not job.real_execution_authorized:
@@ -272,11 +292,32 @@ class ProductionOfflineCloneExecutor:
                 "signed offline job does not authorize real execution",
                 "offline_execution_disabled",
             )
+        if self.runtime_ready is not True and self.policy.runtime_ready is not True:
+            raise OfflineCloneBlocked(
+                "trusted offline runtime is not ready",
+                "offline_execution_disabled",
+            )
+        if now is not None:
+            from datetime import datetime, timezone
+            current = now if isinstance(now, datetime) else datetime.fromisoformat(str(now).replace("Z", "+00:00"))
+            if current.tzinfo is None or current.astimezone(timezone.utc) > datetime.fromisoformat(job.expires_at.replace("Z", "+00:00")):
+                raise OfflineCloneBlocked("offline job is expired", "offline_job_expired")
         if not resolution.ok or not resolution.source_node or not resolution.target_node:
             raise OfflineCloneBlocked(
                 "fresh offline source/target resolution is required",
                 "offline_identity_blocked",
             )
+        if resolution.identity_strength != "strong" or resolution.source is None or resolution.target is None:
+            raise OfflineCloneBlocked("fresh strong offline source/target resolution is required", "offline_identity_blocked")
+        source, target = resolution.source, resolution.target
+        if source.fingerprint != job.source_fingerprint or target.fingerprint != job.target_fingerprint:
+            raise OfflineCloneBlocked("offline source or target identity/geometry drifted", "offline_identity_blocked")
+        if source.node == target.node or source.fingerprint == target.fingerprint:
+            raise OfflineCloneBlocked("offline source and target identity are equal", "offline_identity_blocked")
+        if target.size_bytes < source.size_bytes or target.mounted or target.read_only:
+            raise OfflineCloneBlocked("offline target geometry or state is unsafe", "offline_identity_blocked")
+        if source.live_root or target.live_root or source.boot_medium or target.boot_medium or source.protected or target.protected or source.protected_ambiguous or target.protected_ambiguous:
+            raise OfflineCloneBlocked("offline protected-device guard failed", "offline_identity_blocked")
         if self.runner.is_test_double and not self.policy.allow_test_double:
             raise OfflineCloneBlocked(
                 "test-double runner is forbidden by production policy",
@@ -286,6 +327,12 @@ class ProductionOfflineCloneExecutor:
             _verify_real_executable(Path(self.policy.executable_path))
 
         plan = render_absolute_clonezilla_plan(job, resolution, self.policy.executable_path)
+        self.last_plan = plan
+        if self.replay_store is None:
+            raise OfflineCloneBlocked("offline job replay claim is unavailable", "offline_verification_failed")
+        # Claim only after every pre-start guard and immediately before the
+        # process boundary. A duplicate nonce can therefore never spawn twice.
+        self.replay_store.claim(job.nonce)
         env = {
             "LANG": "C",
             "LC_ALL": "C",

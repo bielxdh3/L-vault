@@ -1,12 +1,12 @@
 # L-vault offline clone architecture
 
-Status: validated offline contract with static artifact inspection and disposable virtual return-channel tests. Real offline execution, boot handoff, media setup, and disk mutation remain disabled.
+Status: validated guarded contract with static artifact inspection, disposable virtual return-channel tests, and synthetic production-runner tests. Real offline execution remains default-off; no boot handoff, media setup, or disk mutation occurred in this checkout.
 
 ## Decision
 
 L-vault uses a two-stage boundary:
 
-1. Windows performs due/window/session/protected-path checks and, in a future authorized phase, writes a signed job package to its normal runtime area.
+1. Windows performs due/window/session/protected-path checks and, only after an explicit owner action, writes a newly signed, expiring one-shot job package to its normal runtime area.
 2. Clonezilla Live boots manually from a dedicated USB, verifies the package, inventories Linux block devices, resolves enrolled fingerprints to fresh device nodes, and only then renders the engine argv.
 
 The USB path is intentionally manual and not configured by this repository. It avoids permanent boot-order changes and makes the return to Windows a human action. No BCD, UEFI NVRAM, BootNext, recovery partition, PXE configuration, USB device, or reboot is touched here.
@@ -15,7 +15,7 @@ The implementation keeps the private signing key outside the package. Official p
 
 ## Identity and package safety
 
-The job contains hashed persistent evidence, exact capacity and sector geometry, normalized model/transport/partition-style fingerprints, policy names, protected-device exclusions, expiry, a one-time nonce, and `real_execution_authorized=false`. Raw serials, WWNs, udev IDs, and device nodes are not serialized into the job or result display.
+The job contains hashed persistent evidence, exact capacity and sector geometry, normalized model/transport/partition-style/partition-role fingerprints, policy names, protected-device exclusions, expiry, a one-time nonce, and `real_execution_authorized=false` by default. An explicitly authorized job carries `real_execution_authorized=true` only for that single signed lifetime. Raw serials, WWNs, udev IDs, and device nodes are not serialized into the job or result display.
 
 The Linux resolver requires exactly one strong source and one strong target match. It rejects duplicates, weak USB bridge identity, changed identity or geometry, mounted devices, the live root, the Clonezilla boot medium, protected ambiguity, read-only targets, undersized targets, partition-style changes, source/target equality, invalid device nodes, and stale/replayed jobs. The current device node is a runtime selector only.
 
@@ -23,7 +23,7 @@ Results contain the job ID, engine/version, timestamps, masked labels, command h
 
 Signed transport integrity is only the first boundary. Result consumption also requires the already verified `OfflineJob`, the trusted rendered command plan (or its trusted lowercase SHA-256 `argv_hash`), the detached verifier, and a deterministic current time when testing. Semantic validation then binds the result to the job schema, engine release, masked labels, command hash, timestamps, allowlisted phase/outcome, safe error text, and `boot_tested=false`; a valid signer cannot authorize inconsistent fields.
 
-The fake path uses only `fake_engine_rendered_only` and returns `offline_simulation_completed`. It does not claim a clone or structural verification and is accepted only by the explicit simulation consumer. A future production result must use the terminal `clone_completed_structurally_verified` phase, `confirmed_offline`, exit status zero, and `structurally_verified=true`; only that bound result can become `offline_clone_structurally_verified`. A production consumer never treats the fake phase as clone evidence. Structural verification still does not mean bootability: manual boot testing remains a separate, unperformed human gate.
+The fake path uses only `fake_engine_rendered_only` and returns `offline_simulation_completed`. It does not claim a clone or structural verification and is accepted only by the explicit simulation consumer. A production result uses the terminal `clone_completed_structurally_verified` phase only after exit status zero, fresh post-run resolution, structural verification, and `confirmed_offline`; only that bound result can become `offline_clone_structurally_verified`. A production consumer never treats the fake phase as clone evidence. Structural verification still does not mean bootability: manual boot testing remains a separate, unperformed human gate.
 
 ## Clonezilla contract examined
 
