@@ -1973,6 +1973,8 @@ def enroll_disk_clone_selection(
         raise DiskCloneBlocked("O destino deve ser outro disco fisico.", "blocked_identity")
     if any((target.is_system, target.is_boot, target.is_pagefile, target.is_crash_dump)):
         raise DiskCloneBlocked("O destino selecionado e um disco critico.", "blocked_identity")
+    if target.read_only or target.mount_points or any(part.mount_point for part in target.partitions):
+        raise DiskCloneBlocked("O destino precisa estar desmontado e gravavel.", "blocked_identity")
     if source.identity_strength() != "strong" or target.identity_strength() != "strong":
         raise DiskCloneBlocked("A identidade persistente da origem ou destino e fraca.", "blocked_identity")
     if target.size_bytes < source.size_bytes:
