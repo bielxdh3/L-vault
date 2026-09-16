@@ -58,6 +58,34 @@ ocs-onthefly -f <fresh-source-node> -d <fresh-target-node> -k0 -j2 -r -iefi -p t
 
 `VirtualReturnChannel` is a temporary-directory fixture for the future dedicated FAT exchange volume. Its durable states are `pending -> running -> result -> consumed`, with `failed` as a terminal fail-closed state. Result and binding manifests are signed, atomically published, nonce/job-bound, bounded, replay-resistant across restart, and recovered as failed after partial publication. `VirtualOfflineRunner` accepts only the structural `VirtualSimulationPolicy`; it resolves synthetic devices, renders argv, and publishes a fake result without an engine subprocess. A production consumer rejects that fake result.
 
+## Manual boot handoff contract
+
+The handoff remains owner-gated and manual. Its package contract is
+`OfflineJobStore.create` (`manifest.json` plus `manifest.sig`); a future owner-approved
+Windows preparation adapter must place only that package on the dedicated
+exchange medium. The owner verifies the pinned Clonezilla artifact and the job
+signature in Clonezilla Live, then starts the offline runtime with the package,
+a `ProductionOfflineRunner`, and `LinuxOfflineInventoryCollector`. The runner
+receives the detached signature, requires the independent
+live-root/boot-medium/protected-device evidence, and keeps the channel in
+`pending` until it has entered `running`.
+
+Immediately before the allowlisted `ocs-onthefly` process boundary, the
+production executor claims the job nonce. It then publishes `result.json`,
+`result.sig`, and the signed channel binding only after the post-run inventory,
+structural verification, and target-offline checks complete. A Windows-side
+consumer validates that package with `VirtualReturnChannel.consume` (or the
+equivalent `consume_offline_result`/`OfflineResultStore` path) using the
+production profile, the verified job, and the exact command hash; only a
+verified result can transition the channel to `consumed`. The owner then
+manually removes the exchange medium and selects Windows in the firmware boot
+menu. No BCD, UEFI, BootNext, or automatic reboot is performed by L-vault.
+
+The dedicated exchange implementation, Clonezilla Live provisioning, runtime
+startup, and physical return-to-Windows step are not configured in this
+checkout. They remain human/runtime validation work, as do Secure Boot,
+physical boot, and any real clone.
+
 The safe command is:
 
 ```powershell

@@ -1315,7 +1315,7 @@ class VirtualSimulationPolicy:
 
 
 class VirtualOfflineRunner:
-    """The only runner type in this phase; it can publish simulation results only."""
+    """Simulation-only runner; it can publish render-only results."""
 
     def __init__(self, channel: VirtualReturnChannel, signer: Any, verifier: Any, *, policy: VirtualSimulationPolicy):
         if type(policy) is not VirtualSimulationPolicy or policy.real_engine_available:
