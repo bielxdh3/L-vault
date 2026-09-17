@@ -312,6 +312,8 @@ def _wsl_root_spec(root: Path) -> tuple[str, str] | None:
     if not match:
         return None
     suffix = match.group(2).replace("\\", "/") or "/"
+    if any(part in {".", ".."} for part in suffix.split("/")):
+        return None
     if not suffix.startswith("/"):
         suffix = "/" + suffix
     return match.group(1), posixpath.normpath(suffix)
