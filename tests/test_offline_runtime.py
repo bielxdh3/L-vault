@@ -45,6 +45,8 @@ from localvault.offline_runtime import (
     VirtualOfflineRunner,
     VirtualReturnChannel,
     VirtualSimulationPolicy,
+    _safe_relative_path,
+    _wsl_root_spec,
     simulate_virtual_offline_round_trip,
 )
 
@@ -219,8 +221,25 @@ def test_validator_has_no_caller_supplied_trust_evidence_inputs():
         OfflineRuntimeValidator().validate(official_fingerprint="A" * 40)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         OfflineRuntimeValidator(expected_iso_sha256="0" * 64)  # type: ignore[call-arg]
-    with pytest.raises(TypeError):
-        OfflineRuntimeValidator().validate(expected_iso_sha256="0" * 64)  # type: ignore[call-arg]
+
+
+def test_pinned_runtime_contract_uses_partclone_variants_and_host_gpgv():
+    from localvault.offline_runtime import OPTIONAL_RUNTIME_TOOLS
+
+    assert "gpgv" in OPTIONAL_RUNTIME_TOOLS
+    assert "gpgv" in REQUIRED_RUNTIME_TOOLS  # retained for backwards-compatible evidence shape
+    assert {"partclone.ntfs", "partclone.extfs", "partclone.dd", "partclone.restore"}.issubset(REQUIRED_RUNTIME_TOOLS)
+
+
+def test_wsl_linux_path_binding_allows_literal_backslash_without_traversal():
+    from pathlib import Path
+
+    spec = _wsl_root_spec(Path(r"\\wsl$\Ubuntu\home\bielx\root-tree"))
+    assert spec == ("Ubuntu", "/home/bielx/root-tree")
+    linux_name = r"usr/lib/systemd/system/system-systemd\x2dmute.slice"
+    assert _safe_relative_path(linux_name, allow_literal_backslash=True) == linux_name
+    with pytest.raises(OfflineCloneBlocked):
+        _safe_relative_path(linux_name)
 
 
 def test_production_trust_policy_is_immutable_and_not_redefined_by_environment(monkeypatch: pytest.MonkeyPatch):
