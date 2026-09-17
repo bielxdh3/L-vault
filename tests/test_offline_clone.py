@@ -123,6 +123,22 @@ def test_default_execution_is_false_and_non_allowlisted_engine_is_blocked(tmp_pa
         store.load(job.job_id, verifier, now=NOW)
 
 
+def test_explicit_real_authorization_is_signed_and_one_shot(tmp_path):
+    source, target = _disk("/dev/sda", "source"), _disk("/dev/sdb", "target", size=1200)
+    job = build_offline_job(source, target, now=NOW, nonce="nonce-authorized-0001", real_execution_authorized=True)
+    store = OfflineJobStore(tmp_path / "jobs")
+    signer, verifier = FakeDetachedSigner(), FakeDetachedVerifier()
+    store.create(job, signer)
+    assert store.load(job.job_id, verifier, now=NOW, consume=False).real_execution_authorized is True
+    manifest = store.root / job.job_id / "manifest.json"
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["real_execution_authorized"] = False
+    raw = canonical_json(value)
+    manifest.write_bytes(raw)
+    (store.root / job.job_id / "manifest.sig").write_bytes(signer.sign(raw))
+    assert store.load(job.job_id, verifier, now=NOW, consume=False).real_execution_authorized is False
+
+
 def test_device_names_can_change_without_changing_resolution(tmp_path):
     job, *_ = _job(tmp_path)
     result = _resolved(job, _disk("/dev/nvme1n1", "source"), _disk("/dev/sdc", "target", size=1200))
@@ -184,6 +200,15 @@ def test_changed_identity_geometry_and_final_reinventory_block(tmp_path):
     sector_result = _resolved(job, _disk("/dev/sda", "source"), sector)
     assert not sector_result.ok
     assert "sector" in (sector_result.reason + " " + " ".join(sector_result.rejections))
+
+
+def test_partition_role_drift_is_bound_by_signed_job(tmp_path):
+    job, *_ = _job(tmp_path)
+    changed_source = _disk("/dev/sda", "source")
+    changed_source = replace(changed_source, partition_roles=("efi", "linux"))
+    result = _resolved(job, changed_source, _disk("/dev/sdb", "target", size=1200))
+    assert not result.ok
+    assert "partition_roles" in " ".join(result.rejections)
 
 
 def test_protected_ambiguity_and_source_target_same_node_block(tmp_path):

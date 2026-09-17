@@ -1,9 +1,9 @@
 """Non-destructive Clonezilla runtime contracts and disposable-channel fixtures.
 
-This module owns the phase boundary between Windows preparation and a future
-Clonezilla Live session.  It can inspect files and synthetic inventory only;
-there is deliberately no production runner capable of invoking a clone
-engine, mounting media, or opening a block device.
+This module owns the phase boundary between Windows preparation and a guarded
+Clonezilla Live session.  Static validation and synthetic fixtures remain the
+default; the production runner requires an explicitly signed one-shot job and
+fresh injected inventory before it can cross the process boundary.
 """
 
 from __future__ import annotations
@@ -35,6 +35,9 @@ from .offline_clone import (
     OfflineCloneBlocked,
     OfflineJob,
     OfflineResult,
+    OFFLINE_RESULT_PRODUCTION_FAILURE_PHASE,
+    OFFLINE_RESULT_PRODUCTION_SUCCESS_PHASE,
+    OFFLINE_RESULT_MAX_RUNTIME,
     OfflineResultStore,
     ProductionOfflineSignatureVerifier,
     SignatureVerificationEvidence,
@@ -43,8 +46,10 @@ from .offline_clone import (
     build_offline_job,
     canonical_json,
     resolve_offline_devices,
+    _sanitize_error,
 )
 from .utils import atomic_write_bytes, sha256_file
+from .offline_clone_exec import normalize_process_return_code
 
 
 RUNTIME_MANIFEST_SCHEMA = 3
@@ -1138,7 +1143,12 @@ class VirtualReturnChannel:
     def _check_binding(self, job: OfflineJob, meta: dict[str, Any]) -> None:
         if meta["job_id"] != job.job_id or meta["nonce_hash"] != hashlib.sha256(job.nonce.encode()).hexdigest():
             raise OfflineCloneBlocked("offline return-channel job or nonce does not match", "offline_return_channel_failed")
-        if meta["state"] != "consumed" and datetime.fromisoformat(meta["expires_at"].replace("Z", "+00:00")) < datetime.now(timezone.utc):
+        if meta["expires_at"] != job.expires_at:
+            raise OfflineCloneBlocked("offline return-channel authorization binding is invalid", "offline_return_channel_failed")
+        # Expiry gates the transition into a run. Once the signed one-shot has
+        # entered ``running``, bounded execution and result semantics govern
+        # publication/consumption even when the clone finishes later.
+        if meta["state"] == "pending" and datetime.fromisoformat(meta["expires_at"].replace("Z", "+00:00")) < datetime.now(timezone.utc):
             raise OfflineCloneBlocked("offline return-channel package is stale", "offline_return_channel_failed")
 
     def initialize(self, job: OfflineJob) -> ReturnChannelStatus:
@@ -1312,7 +1322,7 @@ class VirtualSimulationPolicy:
 
 
 class VirtualOfflineRunner:
-    """The only runner type in this phase; it can publish simulation results only."""
+    """Simulation-only runner; it can publish render-only results."""
 
     def __init__(self, channel: VirtualReturnChannel, signer: Any, verifier: Any, *, policy: VirtualSimulationPolicy):
         if type(policy) is not VirtualSimulationPolicy or policy.real_engine_available:
@@ -1334,6 +1344,164 @@ class VirtualOfflineRunner:
         result = build_fake_result(job, plan, resolution.source, resolution.target, now=now)
         channel_status = self.channel.publish_result(job, result, self.signer)
         return {"state": "offline_return_channel_ready", "channel_state": channel_status.state, "command_executed": False, "displayed_argv": list(plan.displayed_argv), "argv_hash": plan.argv_hash, "boot_tested": False}
+
+
+class ProductionOfflineRunner:
+    """Trusted offline orchestration with mandatory post-run verification.
+
+    The inventory provider and target-offline callback are injected so tests can
+    use synthetic devices. The default application does not construct this
+    runner until a validated Clonezilla runtime and signed job are available.
+    """
+
+    def __init__(
+        self,
+        executor: Any,
+        channel: VirtualReturnChannel,
+        signer: Any,
+        verifier: Any,
+        *,
+        inventory_provider: Callable[[], Iterable[OfflineBlockDevice]],
+        structural_verifier: Callable[[OfflineBlockDevice, OfflineBlockDevice], bool],
+        target_offline_checker: Callable[[OfflineBlockDevice], bool],
+        clock: Callable[[], datetime] | None = None,
+    ):
+        self.executor = executor
+        self.channel = channel
+        self.signer = signer
+        self.verifier = verifier
+        self.inventory_provider = inventory_provider
+        self.structural_verifier = structural_verifier
+        self.target_offline_checker = target_offline_checker
+        self.clock = clock
+
+    def _clock_now(self, override: datetime | None = None) -> datetime:
+        value = override if override is not None else (self.clock() if self.clock is not None else datetime.now(timezone.utc))
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            raise OfflineCloneBlocked("offline runtime clock must return a timezone-aware datetime", "offline_verification_failed")
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _error(value: Any) -> str:
+        # Keep result errors bounded and free of runtime device identifiers.
+        return _sanitize_error(str(value or ""))
+
+    def run(
+        self,
+        job: OfflineJob,
+        *,
+        now: datetime | None = None,
+        job_signature: bytes | None = None,
+        live_root_nodes: Iterable[str] = (),
+        boot_medium_nodes: Iterable[str] = (),
+        protected_nodes: Iterable[str] = (),
+    ) -> dict[str, Any]:
+        job.validate()
+        if not job.real_execution_authorized:
+            raise OfflineCloneBlocked("signed offline job does not authorize real execution", "offline_execution_disabled")
+        if not isinstance(job_signature, (bytes, bytearray)) or not job_signature:
+            raise OfflineCloneBlocked("verified signed offline job is required", "offline_verification_failed")
+        try:
+            verified = bool(self.verifier.verify(job.canonical_bytes(), bytes(job_signature)))
+        except Exception as exc:
+            raise OfflineCloneBlocked("offline job signature verification failed", "offline_verification_failed") from exc
+        if not verified:
+            raise OfflineCloneBlocked("offline job signature verification failed", "offline_verification_failed")
+        observed = self._clock_now(now) if now is not None else None
+        if observed is not None and (observed < datetime.fromisoformat(job.created_at.replace("Z", "+00:00")) or observed > datetime.fromisoformat(job.expires_at.replace("Z", "+00:00"))):
+            raise OfflineCloneBlocked("offline job is expired", "offline_job_expired")
+        self.channel.initialize(job)
+        self.channel.mark_running(job)
+        try:
+            before = tuple(self.inventory_provider())
+            resolution = resolve_offline_devices(
+                job,
+                FakeOfflineInventory(before),
+                live_root_nodes=live_root_nodes,
+                boot_medium_nodes=boot_medium_nodes,
+                protected_nodes=protected_nodes,
+            )
+            if not resolution.ok:
+                self.channel.transition(job, "failed", resolution.reason)
+                return {"state": "offline_runtime_blocked", "reason": resolution.reason, "command_executed": False}
+            started_dt = self._clock_now(None) if self.clock is not None else self._clock_now(now)
+            created_dt = datetime.fromisoformat(job.created_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+            expires_dt = datetime.fromisoformat(job.expires_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+            if started_dt < created_dt or started_dt > expires_dt:
+                raise OfflineCloneBlocked("offline job is expired", "offline_job_expired")
+            try:
+                outcome = self.executor.execute(job, resolution, now=started_dt)
+            except OfflineCloneBlocked as exc:
+                self.channel.transition(job, "failed", exc.reason)
+                return {"state": exc.state, "reason": exc.reason, "command_executed": False}
+            post_error = ""
+            try:
+                after = tuple(self.inventory_provider())
+                post = resolve_offline_devices(
+                    job,
+                    FakeOfflineInventory(after),
+                    live_root_nodes=live_root_nodes,
+                    boot_medium_nodes=boot_medium_nodes,
+                    protected_nodes=protected_nodes,
+                )
+            except Exception as exc:
+                post = None
+                post_error = self._error(exc)
+            try:
+                structurally_verified = bool(
+                    outcome.exit_status == 0
+                    and post is not None
+                    and post.ok
+                    and post.source is not None
+                    and post.target is not None
+                    and self.structural_verifier(post.source, post.target)
+                )
+            except Exception as exc:
+                structurally_verified = False
+                post_error = post_error or self._error(exc)
+            try:
+                target_offline = "confirmed_offline" if post is not None and post.target is not None and self.target_offline_checker(post.target) else "unknown"
+            except Exception as exc:
+                target_offline = "unknown"
+                post_error = post_error or self._error(exc)
+            ended_dt = self._clock_now(None)
+            if ended_dt < started_dt:
+                raise OfflineCloneBlocked("offline result end time precedes start time", "offline_verification_failed")
+            if ended_dt - started_dt > OFFLINE_RESULT_MAX_RUNTIME:
+                raise OfflineCloneBlocked("offline result runtime exceeds the semantic maximum", "offline_verification_failed")
+            exit_status = normalize_process_return_code(outcome.exit_status, timed_out=outcome.timed_out)
+            success = exit_status == 0 and structurally_verified and target_offline == "confirmed_offline"
+            result_exit_status = exit_status if exit_status else (0 if success else 1)
+            plan = getattr(self.executor, "last_plan", None)
+            if plan is None:
+                raise OfflineCloneBlocked("trusted command plan is unavailable", "offline_verification_failed")
+            started = started_dt.isoformat(timespec="seconds")
+            ended = ended_dt.isoformat(timespec="seconds")
+            log_hash = outcome.log_hash or hashlib.sha256(outcome.stdout + outcome.stderr).hexdigest()
+            error = "" if success else self._error(post_error or "post-run inventory, structural verification, or target-offline confirmation failed")
+            result = OfflineResult(
+                job_id=job.job_id,
+                engine=job.approved_engine,
+                engine_version=job.expected_engine_release,
+                started_at=started,
+                ended_at=ended,
+                source_label=job.source_label,
+                target_label=job.target_label,
+                command_hash=plan.argv_hash,
+                exit_status=result_exit_status,
+                phase=OFFLINE_RESULT_PRODUCTION_SUCCESS_PHASE if success else OFFLINE_RESULT_PRODUCTION_FAILURE_PHASE,
+                structurally_verified=structurally_verified,
+                target_offline=target_offline,
+                log_hash=log_hash,
+                sanitized_error=error,
+                boot_tested=False,
+            )
+            status = self.channel.publish_result(job, result, self.signer)
+            return {"state": status.state, "command_executed": True, "argv_hash": plan.argv_hash, "boot_tested": False, "structurally_verified": structurally_verified, "target_offline": target_offline, "exit_status": exit_status, "started_at": started, "ended_at": ended}
+        except BaseException:
+            if self.channel.status().state == "running":
+                self.channel.transition(job, "failed", "offline execution failed before a signed result")
+            raise
 
 
 def simulate_virtual_offline_round_trip(root: Path) -> dict[str, Any]:
