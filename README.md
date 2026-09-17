@@ -23,21 +23,21 @@ O L-Vault transforma exportações espalhadas, e-mails e arquivos de mídia em u
 
 ```text
       ┌──────────────────────┐       ┌────────────────────────┐
-      │ Gmail API oficial   │       │ Google Takeout         │
-      │ backup incremental  │       │ ZIPs de fotos e vídeos │
+      │ Gmail API oficial    │       │ Google Takeout         │
+      │ backup incremental   │       │ ZIPs de fotos e vídeos │
       └──────────┬───────────┘       └───────────┬────────────┘
                  │                               │
                  └──────────────┬────────────────┘
                                 │
                       ┌─────────▼──────────┐
-                      │ Caixa de entrada  │
-                      │ sync de fontes    │
+                      │ Caixa de entrada   │
+                      │ sync de fontes     │
                       └─────────┬──────────┘
                                 │
                       ┌─────────▼──────────┐
-                      │ Processamento     │
-                      │ ingestão · hash   │
-                      │ dedupe · reparo   │
+                      │ Processamento      │
+                      │ ingestão · hash    │
+                      │ dedupe · reparo    │
                       └──────┬───────┬─────┘
                              │       │
                   arquivos   │       │ metadados
@@ -51,9 +51,9 @@ O L-Vault transforma exportações espalhadas, e-mails e arquivos de mídia em u
                              └───┬───┘
                                  │
                        ┌─────────▼──────────┐
-                       │ Painel local      │
-                       │ busca · leitura   │
-                       │ relatórios · ações│
+                       │ Painel local       │
+                       │ busca · leitura    │
+                       │ relatórios · ações │
                        └────────────────────┘
 ```
 
