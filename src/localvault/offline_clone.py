@@ -41,6 +41,9 @@ OFFLINE_RESULT_PHASES = frozenset({OFFLINE_RESULT_FAKE_PHASE, OFFLINE_RESULT_PRO
 OFFLINE_RESULT_TARGET_OFFLINE_VALUES = frozenset({"not_changed_in_simulation", "confirmed_offline", "unknown"})
 OFFLINE_RESULT_MAX_FUTURE_SKEW = timedelta(minutes=5)
 OFFLINE_RESULT_MAX_JOB_SKEW = timedelta(minutes=5)
+# Authorization controls when a run may start; this independently bounds the
+# elapsed runtime represented by a signed result.
+OFFLINE_RESULT_MAX_RUNTIME = timedelta(hours=24)
 JOB_MANIFEST = "manifest.json"
 JOB_SIGNATURE = "manifest.sig"
 RESULT_MANIFEST = "result.json"
@@ -884,8 +887,10 @@ class OfflineResult:
             raise OfflineCloneBlocked("offline result end time precedes start time", "offline_verification_failed")
         created = _utc(job.created_at)
         expires = _utc(job.expires_at)
-        if started < created - OFFLINE_RESULT_MAX_JOB_SKEW or ended > expires + OFFLINE_RESULT_MAX_JOB_SKEW:
-            raise OfflineCloneBlocked("offline result timestamps fall outside the verified job lifetime", "offline_verification_failed")
+        if started < created or started > expires:
+            raise OfflineCloneBlocked("offline result start time falls outside the verified job authorization lifetime", "offline_verification_failed")
+        if ended - started > OFFLINE_RESULT_MAX_RUNTIME:
+            raise OfflineCloneBlocked("offline result runtime exceeds the semantic maximum", "offline_verification_failed")
         current = _strict_utc(now or datetime.now(timezone.utc), "consumption")
         if started > current + OFFLINE_RESULT_MAX_FUTURE_SKEW or ended > current + OFFLINE_RESULT_MAX_FUTURE_SKEW:
             raise OfflineCloneBlocked("offline result timestamp is unreasonably far in the future", "offline_verification_failed")
