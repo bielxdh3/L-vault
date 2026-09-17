@@ -44,9 +44,31 @@
       <h2 id="enrollment-heading">Inscrição de origem e destino</h2>
       <p class="muted">Atualize a lista antes de escolher. O número é apenas momentâneo; a confirmação usa identidade persistente e capacidade exata.</p>
     </div>
-    <a class="soft-button" href="/disk-clone/candidates">Atualizar discos</a>
+    <a class="soft-button" href="/disk-clone?refresh=1">Atualizar discos</a>
   </div>
+  {% if disk_refresh_error %}
+  <div class="notice" role="alert">
+    <strong>Atualização indisponível</strong>
+    <span>{{ disk_refresh_error }} <a href="/disk-clone?refresh=1">Tentar novamente</a></span>
+  </div>
+  {% endif %}
   {% if disk_candidates %}
+  <div style="overflow:auto" role="region" aria-label="Discos encontrados" tabindex="0">
+  <table>
+    <caption class="sr-only">Discos encontrados para inscrição</caption>
+    <tr><th>Função</th><th>Identidade exibida</th><th>Capacidade aproximada</th><th>Transporte</th><th>Partições</th><th>Estado</th></tr>
+    {% for disk in disk_candidates %}
+    <tr>
+      <td>{% if disk.is_system %}<strong>Origem · sistema atual</strong>{% else %}Destino possível{% endif %}</td>
+      <td>{{ disk.label }}</td>
+      <td>{{ disk.capacity_label }}</td>
+      <td>{{ disk.bus_type }}</td>
+      <td>{{ disk.partition_style }}</td>
+      <td>{{ "online" if disk.online else "offline" }} · {{ "somente leitura" if disk.read_only else "gravável" }} · {{ "montado" if disk.mounted else "desmontado" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
   <form method="post" action="/disk-clone/enroll" class="filter-panel">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label>Destino
@@ -63,7 +85,7 @@
     <button type="submit">Confirmar inscrição</button>
   </form>
   {% else %}
-  <p class="empty-state">Nenhum candidato foi carregado. Use “Atualizar discos” em um runtime Windows autorizado ou injete uma lista sintética nos testes.</p>
+  <p class="empty-state">Nenhum candidato foi carregado. Use “Atualizar discos” para solicitar uma leitura somente leitura do inventário.</p>
   {% endif %}
 </section>
 

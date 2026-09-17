@@ -20,6 +20,15 @@ from .offline_clone import OfflineBlockDevice, OfflineCloneBlocked
 
 
 TRUSTED_LSBLK_PATH = "/usr/bin/lsblk"
+# These are the portable util-linux columns supported by the pinned Clonezilla
+# Live contract. udev-style ``ID-*`` properties are intentionally not passed
+# to lsblk; USB bridge identity therefore remains weak unless separately
+# supplied by a future explicitly allowlisted read-only source.
+LSBLK_OUTPUT_COLUMNS = (
+    "PATH", "NAME", "TYPE", "MODEL", "SERIAL", "WWN", "TRAN", "SIZE",
+    "LOG-SEC", "PHY-SEC", "PTTYPE", "RM", "RO", "MOUNTPOINTS", "FSTYPE",
+    "LABEL", "PARTTYPE",
+)
 
 
 EFI_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
@@ -109,11 +118,11 @@ def parse_lsblk_json(
             OfflineBlockDevice(
                 node=node,
                 model=_text(row.get("model")),
-                serial=_text(row.get("serial") or row.get("id-serial-short")),
-                wwn=_text(row.get("wwn") or row.get("id-wwn")),
-                id_serial=_text(row.get("id-serial")),
-                id_serial_short=_text(row.get("id-serial-short")),
-                usb_bridge_id=_text(row.get("usb_bridge_id") or row.get("id-path")) if _text(row.get("tran")).casefold() == "usb" else "",
+                serial=_text(row.get("serial")),
+                wwn=_text(row.get("wwn")),
+                # Bridge identity is not a portable lsblk column. A separate
+                # trusted source must populate it; otherwise USB stays weak.
+                usb_bridge_id=_text(row.get("usb_bridge_id")) if _text(row.get("tran")).casefold() == "usb" else "",
                 transport=_text(row.get("tran")),
                 size_bytes=_integer(row.get("size")),
                 logical_sector_size=_integer(row.get("log-sec"), 512),
@@ -204,7 +213,7 @@ class LinuxOfflineInventoryCollector:
             "--json",
             "--bytes",
             "--output",
-            "PATH,NAME,TYPE,MODEL,SERIAL,WWN,TRAN,SIZE,LOG-SEC,PHY-SEC,PTTYPE,RM,RO,MOUNTPOINTS,FSTYPE,LABEL,PARTTYPE,ID-SERIAL,ID-SERIAL-SHORT,ID-WWN,ID-PATH",
+            ",".join(LSBLK_OUTPUT_COLUMNS),
         ]
         try:
             result = self.runner(argv, timeout=self.timeout_seconds)

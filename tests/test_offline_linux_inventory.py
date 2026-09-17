@@ -96,6 +96,19 @@ def test_read_only_and_removable_flags_are_preserved():
     assert disk.removable is True
 
 
+def test_usb_without_separate_stable_bridge_identity_remains_weak():
+    value = json.loads(_payload())
+    value["blockdevices"][0]["tran"] = "usb"
+    value["blockdevices"][0].pop("wwn")
+    disk = parse_lsblk_json(json.dumps(value))[0]
+    assert disk.identity_strength == "weak"
+
+
+def test_missing_required_inventory_capability_fails_closed():
+    with pytest.raises(OfflineCloneBlocked, match="no blockdevices"):
+        parse_lsblk_json(json.dumps({"blockdevices": {}}))
+
+
 def test_invalid_json_and_invalid_device_node_fail_closed():
     with pytest.raises(OfflineCloneBlocked, match="JSON is invalid"):
         parse_lsblk_json("{")
@@ -117,7 +130,8 @@ def test_collector_uses_exact_read_only_argv_and_fixture_runner():
     assert devices[0].live_root is True
     assert devices[0].protected is True
     assert calls and calls[0][0][:4] == ["/usr/bin/lsblk", "--json", "--bytes", "--output"]
-    assert "ID-SERIAL" in calls[0][0][-1]
+    assert calls[0][0][-1] == "PATH,NAME,TYPE,MODEL,SERIAL,WWN,TRAN,SIZE,LOG-SEC,PHY-SEC,PTTYPE,RM,RO,MOUNTPOINTS,FSTYPE,LABEL,PARTTYPE"
+    assert "ID-SERIAL" not in calls[0][0][-1]
     assert calls[0][1] == 10.0
 
 
@@ -133,6 +147,12 @@ def test_collector_bounds_timeout_and_output():
 
     with pytest.raises(OfflineCloneBlocked, match="oversized"):
         LinuxOfflineInventoryCollector(runner=oversized_runner, max_output_bytes=1024).collect()
+
+    def failing_runner(argv, *, timeout):
+        return subprocess.CompletedProcess(argv, 7, b"{}", b"failure")
+
+    with pytest.raises(OfflineCloneBlocked, match="returned an error"):
+        LinuxOfflineInventoryCollector(runner=failing_runner).collect()
 
 
 def test_collector_uses_independent_classification_evidence():

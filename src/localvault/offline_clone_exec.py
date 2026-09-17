@@ -15,6 +15,7 @@ import stat
 import subprocess
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Protocol
@@ -31,6 +32,18 @@ from .offline_clone import (
 
 
 TRUSTED_CLONEZILLA_EXECUTABLE_PATH = "/usr/sbin/ocs-onthefly"
+
+
+def normalize_process_return_code(exit_status: int, *, timed_out: bool = False) -> int:
+    """Normalize subprocess status without turning signals into success."""
+    if timed_out:
+        return 124
+    status = int(exit_status)
+    if status == 0:
+        return 0
+    if status < 0:
+        return max(1, min(255, 128 + abs(status)))
+    return max(1, min(255, status))
 
 
 @dataclass(frozen=True)
@@ -192,9 +205,7 @@ class BoundedSubprocessCloneRunner:
         for reader in readers:
             reader.join(timeout=10)
 
-        if timed_out:
-            exit_status = 124
-        exit_status = max(0, min(255, int(exit_status)))
+        exit_status = normalize_process_return_code(exit_status, timed_out=timed_out)
         return ProcessOutcome(
             exit_status=exit_status,
             stdout=bytes(stdout),
@@ -297,11 +308,14 @@ class ProductionOfflineCloneExecutor:
                 "trusted offline runtime is not ready",
                 "offline_execution_disabled",
             )
-        if now is not None:
-            from datetime import datetime, timezone
-            current = now if isinstance(now, datetime) else datetime.fromisoformat(str(now).replace("Z", "+00:00"))
-            if current.tzinfo is None or current.astimezone(timezone.utc) > datetime.fromisoformat(job.expires_at.replace("Z", "+00:00")):
-                raise OfflineCloneBlocked("offline job is expired", "offline_job_expired")
+        current = now if isinstance(now, datetime) else datetime.fromisoformat(str(now).replace("Z", "+00:00")) if now is not None else datetime.now(timezone.utc)
+        if current.tzinfo is None or current.utcoffset() is None:
+            raise OfflineCloneBlocked("offline execution time must include a timezone", "offline_verification_failed")
+        current = current.astimezone(timezone.utc)
+        created = datetime.fromisoformat(job.created_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+        expires = datetime.fromisoformat(job.expires_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+        if current < created or current > expires:
+            raise OfflineCloneBlocked("offline job is expired", "offline_job_expired")
         if not resolution.ok or not resolution.source_node or not resolution.target_node:
             raise OfflineCloneBlocked(
                 "fresh offline source/target resolution is required",

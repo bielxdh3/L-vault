@@ -45,6 +45,8 @@ The dedicated Disk Clone screen now explains that it is a **physical full-disk r
 
 `src/localvault/offline_linux_inventory.py` keeps the pure parser and adds `LinuxOfflineInventoryCollector`: a bounded `shell=False` call to an exact `/.../lsblk` path, with normalized identity/geometry/partition/mount/removable/read-only evidence. Runtime live-root, boot-medium, and protected-device classification is supplied independently and remains a required gate.
 
+The owner-facing `/disk-clone` page stays side-effect free until the explicit `?refresh=1` action. That read-only refresh renders masked, human-readable source/target candidates in the same page; the JSON candidates route remains diagnostic only. No target is preselected and enrollment still requires the exact confirmation phrase.
+
 ## Remaining human/runtime validation before a real clone
 
 The guarded production path is implemented and tested with synthetic devices, but this checkout is **not evidence that a physical clone is ready or has occurred**. The remaining validation is deliberately outside this mission:

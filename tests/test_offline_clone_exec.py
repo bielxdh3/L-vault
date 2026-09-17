@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -13,14 +14,42 @@ from localvault.offline_clone import (
     resolve_offline_devices,
 )
 from localvault.offline_clone_exec import (
+    BoundedSubprocessCloneRunner,
     ProductionExecutionPolicy,
     ProductionOfflineCloneExecutor,
     RecordingCloneProcessRunner,
+    normalize_process_return_code,
     render_absolute_clonezilla_plan,
 )
 
 
 NOW = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(0, 0), (1, 1), (9, 9), (255, 255), (300, 255), (-9, 137), (-15, 143)],
+)
+def test_process_return_code_normalization_never_turns_signal_into_success(raw, expected):
+    assert normalize_process_return_code(raw) == expected
+    assert normalize_process_return_code(raw, timed_out=True) == 124
+
+
+def test_bounded_subprocess_runner_maps_signal_termination(monkeypatch):
+    class FakeProcess:
+        stdout = io.BytesIO()
+        stderr = io.BytesIO()
+
+        def wait(self, timeout=None):
+            return -9
+
+    monkeypatch.setattr("localvault.offline_clone_exec.subprocess.Popen", lambda *args, **kwargs: FakeProcess())
+    outcome = BoundedSubprocessCloneRunner().run(
+        (r"C:\synthetic\ocs-onthefly.exe",),
+        timeout_seconds=1,
+        env={},
+    )
+    assert outcome.exit_status == 137
 
 
 def _disk(node: str, serial: str, *, size: int = 1000) -> OfflineBlockDevice:

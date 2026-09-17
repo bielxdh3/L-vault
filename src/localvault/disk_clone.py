@@ -1924,6 +1924,17 @@ def update_disk_clone_settings(root: Path, *, interval_days: int | None = None, 
 
 def public_disk_candidates(disks: Iterable[DiskIdentity]) -> list[dict[str, Any]]:
     """Return UI-safe candidate data; stable identifiers are never exposed."""
+    def capacity_label(size_bytes: int) -> str:
+        size = max(0, int(size_bytes))
+        units = ("B", "KiB", "MiB", "GiB", "TiB")
+        value = float(size)
+        unit = units[0]
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                break
+            value /= 1024
+        return "capacidade desconhecida" if size <= 0 else f"~{value:.1f} {unit}"
+
     result = []
     for disk in disks:
         result.append({
@@ -1931,6 +1942,7 @@ def public_disk_candidates(disks: Iterable[DiskIdentity]) -> list[dict[str, Any]
             "label": disk.masked_label,
             "model": disk.model or "disco desconhecido",
             "capacity_bytes": disk.size_bytes,
+            "capacity_label": capacity_label(disk.size_bytes),
             "bus_type": disk.bus_type or "desconhecido",
             "partition_style": disk.partition_style or "desconhecido",
             "identity_strength": disk.identity_strength(),

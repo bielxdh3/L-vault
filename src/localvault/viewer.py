@@ -193,7 +193,23 @@ def create_app(root: Path | None = None, https_enabled: bool | None = None, disk
     @app.get("/disk-clone", response_class=HTMLResponse)
     def disk_clone_page(request: Request):
         data = disk_clone_dashboard_data(p)
-        data["disk_candidates"] = _safe_disk_candidates(app.state.disk_inventory)
+        refresh_requested = request.query_params.get("refresh") == "1"
+        refresh_error = ""
+        if refresh_requested:
+            inventory = app.state.disk_inventory
+            if inventory is None:
+                inventory = WindowsDiskInventory()
+            try:
+                data["disk_candidates"] = public_disk_candidates(inventory.list_disks())
+            except Exception:
+                data["disk_candidates"] = []
+                refresh_error = "A atualização de discos não está disponível neste runtime. Tente novamente ou use um runtime Windows autorizado."
+        else:
+            # The ordinary page is entirely side-effect free. Even an
+            # injected inventory is read only after the owner requests refresh.
+            data["disk_candidates"] = []
+        data["disk_refresh_error"] = refresh_error
+        data["disk_refresh_requested"] = refresh_requested
         data["request"] = request
         return templates.TemplateResponse(request, "disk_clone.html", data)
 

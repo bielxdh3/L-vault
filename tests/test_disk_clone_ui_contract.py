@@ -32,3 +32,13 @@ def test_clone_ui_never_claims_bootability_from_structural_verification():
     html = TEMPLATE.read_text(encoding="utf-8")
     assert "verificação estrutural" in html
     assert "não equivale a um boot test" in html.casefold()
+
+
+def test_clone_ui_refreshes_candidates_in_place_and_exposes_safe_state_fields():
+    html = TEMPLATE.read_text(encoding="utf-8")
+    assert 'href="/disk-clone?refresh=1"' in html
+    assert "Capacidade aproximada" in html
+    assert "online" in html
+    assert "somente leitura" in html
+    assert "montado" in html
+    assert "Origem · sistema atual" in html
