@@ -126,6 +126,25 @@ def test_real_inventory_preserves_safe_absolute_symlink_and_rejects_escape(tmp_p
     assert "symlink_escapes_image_root" in blockers
 
 
+def test_real_inventory_preserves_linux_case_hardlink_and_special_metadata(tmp_path: Path):
+    if os.name == "nt":
+        pytest.skip("Linux filesystem-object fixtures require a POSIX host")
+    root = tmp_path / "tree"
+    (root / "usr" / "bin").mkdir(parents=True)
+    (root / "usr" / "bin" / "CaseTool").write_bytes(b"same")
+    (root / "usr" / "bin" / "casetool").write_bytes(b"same")
+    (root / "usr" / "bin" / "hardlink").hardlink_to(root / "usr" / "bin" / "CaseTool")
+    os.mkfifo(root / "fifo")
+    inventory, blockers = OfflineRuntimeValidator._scan_real_tree(root)
+    assert "case_collision_ambiguity" not in blockers
+    assert "non_regular_tree_entry" not in blockers
+    by_path = {entry["path"]: entry for entry in inventory}
+    assert by_path["fifo"]["file_type"] == "special"
+    assert by_path["fifo"]["special_type"] == "fifo"
+    assert by_path["usr/bin/hardlink"]["hardlink_to"] == "usr/bin/CaseTool"
+    assert by_path["usr/bin/CaseTool"]["mode"] & 0o111 == 0
+
+
 def test_production_attestation_binds_real_inventory_and_tool_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root = tmp_path / "root"
     _tools_tree(root)

@@ -639,7 +639,7 @@ def disk_clone_runtime_validate(
         official_verifier = OfficialChecksumVerifier(ProductionOfflineSignatureVerifier(official_verifier_binary, official_public_keyring, CLONEZILLA_SIGNER_FINGERPRINT))
     local_fingerprint = str(config.get("local_attestation_fingerprint", ""))
     if local_attestation_verifier_binary is not None and local_attestation_public_keyring is not None and local_fingerprint:
-        local_attestation_verifier = LocalExtractionAttestationVerifier(ProductionOfflineSignatureVerifier(local_attestation_verifier_binary, local_attestation_public_keyring, local_fingerprint))
+        local_attestation_verifier = LocalExtractionAttestationVerifier(ProductionOfflineSignatureVerifier(local_attestation_verifier_binary, local_attestation_public_keyring, local_fingerprint, max_payload_bytes=64 * 1024 * 1024))
     validator = OfflineRuntimeValidator() if profile == RUNTIME_VALIDATION_PROFILE_PRODUCTION_STATIC else OfflineRuntimeValidator.synthetic_test(CLONEZILLA_STABLE_AMD64_ISO_SHA256)
     report = validator.validate(
         iso_path=iso,
@@ -650,6 +650,7 @@ def disk_clone_runtime_validate(
         local_attestation_verifier=local_attestation_verifier,
         extraction_manifest_path=extraction_manifest,
         extraction_manifest_signature=_read_signature_file(extraction_signature),
+        provenance="official Clonezilla/DRBL artifact cache",
     )
     console.print_json(json.dumps(report.payload(), ensure_ascii=False, default=str))
     if report.state == "offline_runtime_blocked":

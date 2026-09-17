@@ -1,7 +1,9 @@
 """Bounded, non-booted Clonezilla artifact provisioning and extraction helpers.
 
-Only regular files and ordinary directories are handled here.  The module has
-no disk, mount, VM, boot, or Clonezilla-runtime execution path.
+Artifact acquisition and extraction are read-only preparation steps.  The
+runtime inventory preserves Linux links, hardlinks, metadata, and special
+objects without creating host device nodes.  The module has no disk, mount,
+VM, boot, or Clonezilla-runtime execution path.
 """
 
 from __future__ import annotations
@@ -381,7 +383,7 @@ class GpgDetachedSigner:
         self.key_fingerprint = fingerprint
 
     def sign(self, payload: bytes) -> bytes:
-        if not isinstance(payload, bytes) or len(payload) > 8 * 1024 * 1024:
+        if not isinstance(payload, bytes) or len(payload) > 64 * 1024 * 1024:
             raise OfflineCloneBlocked("local attestation payload is invalid or oversized", "local_attestation_provisioning_blocked")
         with tempfile.TemporaryDirectory(prefix="localvault-attestation-sign-") as temporary:
             root = Path(temporary)
