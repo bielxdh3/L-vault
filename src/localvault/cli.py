@@ -37,6 +37,7 @@ from .disk_clone import (
 )
 from .disk_clone_ui import native_countdown, run_native_ui
 from .offline_clone import OfflineCloneBlocked, ProductionOfflineSignatureVerifier, simulate_offline_round_trip
+from .offline_preparation import ProductionPreparationAdapter
 from .clonezilla_artifacts import (
     acquire_official_bundle,
     inspect_local_attestor,
@@ -655,6 +656,18 @@ def disk_clone_runtime_validate(
     console.print_json(json.dumps(report.payload(), ensure_ascii=False, default=str))
     if report.state == "offline_runtime_blocked":
         raise typer.Exit(1)
+
+
+@app.command("disk-clone-prepare")
+def disk_clone_prepare(root: Path = root_option()):
+    """Prepare one signed offline job; never starts Clonezilla or mutates disks."""
+    prepare(root)
+    try:
+        result = ProductionPreparationAdapter.from_root(root).prepare()
+    except OfflineCloneBlocked as exc:
+        console.print_json(json.dumps({"state": exc.state, "reason": exc.reason}, ensure_ascii=False))
+        raise typer.Exit(1)
+    console.print_json(json.dumps(result, ensure_ascii=False, default=str))
 
 
 def _artifact_cache_option() -> Path:

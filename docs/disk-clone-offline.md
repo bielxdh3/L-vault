@@ -83,10 +83,16 @@ verified result can transition the channel to `consumed`. The owner then
 manually removes the exchange medium and selects Windows in the firmware boot
 menu. No BCD, UEFI, BootNext, or automatic reboot is performed by L-vault.
 
-The dedicated exchange implementation, Clonezilla Live provisioning, runtime
-startup, and physical return-to-Windows step are not configured in this
-checkout. They remain human/runtime validation work, as do Secure Boot,
-physical boot, and any real clone.
+`ProductionPreparationAdapter` now provides the Windows-side production handoff
+without crossing the clone boundary. It requires an explicit local
+configuration (outside Git) with persistent source/target/exclusion enrollments,
+the verified static-runtime report, a dedicated job-signing key home, and a
+read-only public keyring. `disk-clone-prepare` writes one signed, expiring job
+and initializes the nonce-bound return channel under that configured exchange
+root; it never writes a disk, reboots, or executes Clonezilla. The private key
+is never copied to the exchange package. Clonezilla Live startup, result signing
+inside the trusted runtime, and physical return-to-Windows remain manual steps,
+as do Secure Boot, physical boot, and any real clone.
 
 The safe command is:
 
