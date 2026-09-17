@@ -1,12 +1,12 @@
 # L-vault offline clone architecture
 
-Status: validated offline contract with static artifact inspection and disposable virtual return-channel tests. Real offline execution, boot handoff, media setup, and disk mutation remain disabled.
+Status: validated guarded contract with static artifact inspection, disposable virtual return-channel tests, and synthetic production-runner tests. Real offline execution remains default-off; no boot handoff, media setup, or disk mutation occurred in this checkout.
 
 ## Decision
 
 L-vault uses a two-stage boundary:
 
-1. Windows performs due/window/session/protected-path checks and, in a future authorized phase, writes a signed job package to its normal runtime area.
+1. Windows performs due/window/session/protected-path checks and, only after an explicit owner action, writes a newly signed, expiring one-shot job package to its normal runtime area.
 2. Clonezilla Live boots manually from a dedicated USB, verifies the package, inventories Linux block devices, resolves enrolled fingerprints to fresh device nodes, and only then renders the engine argv.
 
 The USB path is intentionally manual and not configured by this repository. It avoids permanent boot-order changes and makes the return to Windows a human action. No BCD, UEFI NVRAM, BootNext, recovery partition, PXE configuration, USB device, or reboot is touched here.
@@ -15,15 +15,17 @@ The implementation keeps the private signing key outside the package. Official p
 
 ## Identity and package safety
 
-The job contains hashed persistent evidence, exact capacity and sector geometry, normalized model/transport/partition-style fingerprints, policy names, protected-device exclusions, expiry, a one-time nonce, and `real_execution_authorized=false`. Raw serials, WWNs, udev IDs, and device nodes are not serialized into the job or result display.
+The job contains hashed persistent evidence, exact capacity and sector geometry, normalized model/transport/partition-style/partition-role fingerprints, policy names, protected-device exclusions, expiry, a one-time nonce, and `real_execution_authorized=false` by default. An explicitly authorized job carries `real_execution_authorized=true` only for that single signed lifetime. Raw serials, WWNs, udev IDs, and device nodes are not serialized into the job or result display.
 
-The Linux resolver requires exactly one strong source and one strong target match. It rejects duplicates, weak USB bridge identity, changed identity or geometry, mounted devices, the live root, the Clonezilla boot medium, protected ambiguity, read-only targets, undersized targets, partition-style changes, source/target equality, invalid device nodes, and stale/replayed jobs. The current device node is a runtime selector only.
+The Linux resolver requires exactly one strong source and one strong target match. It rejects duplicates, weak USB bridge identity, changed identity or geometry, mounted devices, the live root, the Clonezilla boot medium, protected ambiguity, read-only targets, undersized targets, partition-style changes, source/target equality, invalid device nodes, and stale/replayed jobs. The current device node is a runtime selector only. `LinuxOfflineInventoryCollector` requests only the standard `PATH,NAME,TYPE,MODEL,SERIAL,WWN,TRAN,SIZE,LOG-SEC,PHY-SEC,PTTYPE,RM,RO,MOUNTPOINTS,FSTYPE,LABEL,PARTTYPE` columns supported by the pinned util-linux contract; it does not pass udev-style `ID-*` names to `lsblk`. Native SATA/NVMe media need two independent persistent values (normally `SERIAL` plus `WWN`); USB media without separately validated bridge evidence remain weak and blocked.
 
 Results contain the job ID, engine/version, timestamps, masked labels, command hash, exit status, phase, structural verification, target-offline outcome, bounded sanitized error, log hash, and `boot_tested=false`. A result with a mismatched job ID, bad signature, or tampered canonical JSON is rejected.
 
+The signed job expiry is a start-authorization deadline: the trusted runner must establish `created_at <= actual_start <= expires_at` immediately before claiming the nonce and creating the engine process. A run that started legitimately may finish after `expires_at`, but its signed result must record the true timezone-aware start/end and stay within the independent 24-hour semantic runtime bound. A second start or replay remains rejected.
+
 Signed transport integrity is only the first boundary. Result consumption also requires the already verified `OfflineJob`, the trusted rendered command plan (or its trusted lowercase SHA-256 `argv_hash`), the detached verifier, and a deterministic current time when testing. Semantic validation then binds the result to the job schema, engine release, masked labels, command hash, timestamps, allowlisted phase/outcome, safe error text, and `boot_tested=false`; a valid signer cannot authorize inconsistent fields.
 
-The fake path uses only `fake_engine_rendered_only` and returns `offline_simulation_completed`. It does not claim a clone or structural verification and is accepted only by the explicit simulation consumer. A future production result must use the terminal `clone_completed_structurally_verified` phase, `confirmed_offline`, exit status zero, and `structurally_verified=true`; only that bound result can become `offline_clone_structurally_verified`. A production consumer never treats the fake phase as clone evidence. Structural verification still does not mean bootability: manual boot testing remains a separate, unperformed human gate.
+The fake path uses only `fake_engine_rendered_only` and returns `offline_simulation_completed`. It does not claim a clone or structural verification and is accepted only by the explicit simulation consumer. A production result uses the terminal `clone_completed_structurally_verified` phase only after exit status zero, fresh post-run resolution, structural verification, and `confirmed_offline`; only that bound result can become `offline_clone_structurally_verified`. A production consumer never treats the fake phase as clone evidence. Structural verification still does not mean bootability: manual boot testing remains a separate, unperformed human gate.
 
 ## Clonezilla contract examined
 
@@ -57,6 +59,34 @@ ocs-onthefly -f <fresh-source-node> -d <fresh-target-node> -k0 -j2 -r -iefi -p t
 `OfflineRuntimeValidator` only reads a caller-supplied ISO, official checksum manifest, local signed extraction attestation, and extracted tree. A directory containing files with the right names is never enough: the attestation must use the fixed `localvault.clonezilla.extraction-attestation.v1` domain, canonical signed payload, exact ISO filename/digest, and complete inventory match. `synthetic_test` is selected only through its explicit test-only factory and can return only `offline_runtime_synthetic_validation_passed`; the production validator has no digest-override parameter and rejects synthetic methods, fake verifiers, and fixture-only overrides. Required tools must be exactly one regular, non-empty, bounded, executable candidate at an allowlisted image path; they are reported as `present_unexecuted` and are never executed. Symlinks, special files, overlays, traversal, duplicate candidates, altered digests, stale signatures, and unrelated trees block the state. If any production input is missing or fails binding, the honest state remains `offline_runtime_blocked`; no VM boot occurred.
 
 `VirtualReturnChannel` is a temporary-directory fixture for the future dedicated FAT exchange volume. Its durable states are `pending -> running -> result -> consumed`, with `failed` as a terminal fail-closed state. Result and binding manifests are signed, atomically published, nonce/job-bound, bounded, replay-resistant across restart, and recovered as failed after partial publication. `VirtualOfflineRunner` accepts only the structural `VirtualSimulationPolicy`; it resolves synthetic devices, renders argv, and publishes a fake result without an engine subprocess. A production consumer rejects that fake result.
+
+## Manual boot handoff contract
+
+The handoff remains owner-gated and manual. Its package contract is
+`OfflineJobStore.create` (`manifest.json` plus `manifest.sig`); a future owner-approved
+Windows preparation adapter must place only that package on the dedicated
+exchange medium. The owner verifies the pinned Clonezilla artifact and the job
+signature in Clonezilla Live, then starts the offline runtime with the package,
+a `ProductionOfflineRunner`, and `LinuxOfflineInventoryCollector`. The runner
+receives the detached signature, requires the independent
+live-root/boot-medium/protected-device evidence, and keeps the channel in
+`pending` until it has entered `running`.
+
+Immediately before the allowlisted `ocs-onthefly` process boundary, the
+production executor claims the job nonce. It then publishes `result.json`,
+`result.sig`, and the signed channel binding only after the post-run inventory,
+structural verification, and target-offline checks complete. A Windows-side
+consumer validates that package with `VirtualReturnChannel.consume` (or the
+equivalent `consume_offline_result`/`OfflineResultStore` path) using the
+production profile, the verified job, and the exact command hash; only a
+verified result can transition the channel to `consumed`. The owner then
+manually removes the exchange medium and selects Windows in the firmware boot
+menu. No BCD, UEFI, BootNext, or automatic reboot is performed by L-vault.
+
+The dedicated exchange implementation, Clonezilla Live provisioning, runtime
+startup, and physical return-to-Windows step are not configured in this
+checkout. They remain human/runtime validation work, as do Secure Boot,
+physical boot, and any real clone.
 
 The safe command is:
 

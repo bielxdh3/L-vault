@@ -20,7 +20,7 @@ import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Protocol
 
 from .locks import BackupLock
@@ -41,6 +41,9 @@ OFFLINE_RESULT_PHASES = frozenset({OFFLINE_RESULT_FAKE_PHASE, OFFLINE_RESULT_PRO
 OFFLINE_RESULT_TARGET_OFFLINE_VALUES = frozenset({"not_changed_in_simulation", "confirmed_offline", "unknown"})
 OFFLINE_RESULT_MAX_FUTURE_SKEW = timedelta(minutes=5)
 OFFLINE_RESULT_MAX_JOB_SKEW = timedelta(minutes=5)
+# Authorization controls when a run may start; this independently bounds the
+# elapsed runtime represented by a signed result.
+OFFLINE_RESULT_MAX_RUNTIME = timedelta(hours=24)
 JOB_MANIFEST = "manifest.json"
 JOB_SIGNATURE = "manifest.sig"
 RESULT_MANIFEST = "result.json"
@@ -241,6 +244,7 @@ class OfflineBlockDevice:
             "physical_sector_size": self.physical_sector_size,
             "transport": _normal(self.transport),
             "partition_style": _normal(self.partition_style),
+            "partition_roles": sorted({_normal(role) for role in self.partition_roles if _normal(role)}),
         }
 
     @property
@@ -290,8 +294,12 @@ class OfflineJob:
             raise OfflineCloneBlocked("offline engine or clone mode is not allowlisted", "offline_execution_disabled")
         if self.expected_engine_release != OFFLINE_ENGINE_VERSION:
             raise OfflineCloneBlocked("offline engine release is not allowlisted", "offline_execution_disabled")
-        if self.real_execution_authorized:
-            raise OfflineCloneBlocked("real offline execution is disabled in this phase", "offline_execution_disabled")
+        # ``real_execution_authorized`` is a signed, job-scoped capability.  It
+        # is intentionally not a configuration setting: the nonce and expiry
+        # below make every authorized job one-shot and time bounded.  The
+        # global execution policy is enforced by the offline executor.
+        if type(self.real_execution_authorized) is not bool:
+            raise OfflineCloneBlocked("offline execution authorization flag is invalid", "offline_verification_failed")
         _validate_user_visible_text("source label", self.source_label, label=True, max_length=160)
         _validate_user_visible_text("target label", self.target_label, label=True, max_length=160)
         if min(self.source_capacity_bytes, self.target_capacity_bytes, len(self.required_partition_roles)) <= 0:
@@ -302,6 +310,9 @@ class OfflineJob:
             raise OfflineCloneBlocked("offline identity policy does not match its fingerprint", "offline_verification_failed")
         if self.source_partition_style.casefold() != str(self.source_fingerprint.get("partition_style") or "").casefold() or self.target_partition_style.casefold() != str(self.target_fingerprint.get("partition_style") or "").casefold():
             raise OfflineCloneBlocked("offline partition policy does not match its fingerprint", "offline_verification_failed")
+        expected_roles = tuple(sorted({_normal(role) for role in self.required_partition_roles if _normal(role)}))
+        if expected_roles != tuple(self.source_fingerprint.get("partition_roles") or ()):
+            raise OfflineCloneBlocked("offline partition-role policy does not match its fingerprint", "offline_verification_failed")
         required_exclusions = {"mounted", "live_root", "boot_medium", "removable_ambiguity", "protected_device", "read_only_target"}
         if not required_exclusions.issubset(set(self.protected_device_exclusions)):
             raise OfflineCloneBlocked("offline protected-device exclusions are incomplete", "offline_verification_failed")
@@ -342,13 +353,22 @@ class OfflineJob:
             source_label=str(value.get("source_label") or ""),
             target_label=str(value.get("target_label") or ""),
             schema=int(value.get("schema") or 0),
-            real_execution_authorized=bool(value.get("real_execution_authorized")),
+            real_execution_authorized=value.get("real_execution_authorized", False),
         )
         job.validate()
         return job
 
 
-def build_offline_job(source: OfflineBlockDevice, target: OfflineBlockDevice, *, now: datetime | None = None, ttl: timedelta = timedelta(minutes=15), job_id: str | None = None, nonce: str | None = None) -> OfflineJob:
+def build_offline_job(
+    source: OfflineBlockDevice,
+    target: OfflineBlockDevice,
+    *,
+    now: datetime | None = None,
+    ttl: timedelta = timedelta(minutes=15),
+    job_id: str | None = None,
+    nonce: str | None = None,
+    real_execution_authorized: bool = False,
+) -> OfflineJob:
     if source.identity_strength != "strong" or target.identity_strength != "strong":
         raise OfflineCloneBlocked("source and target require strong persistent identity", "offline_identity_blocked")
     if source.size_bytes <= 0 or target.size_bytes < source.size_bytes:
@@ -357,6 +377,10 @@ def build_offline_job(source: OfflineBlockDevice, target: OfflineBlockDevice, *,
         raise OfflineCloneBlocked("offline source and target identity are equal", "offline_identity_blocked")
     if not source.partition_style or source.partition_style.casefold() != target.partition_style.casefold():
         raise OfflineCloneBlocked("source and target partition styles do not match", "offline_identity_blocked")
+    if type(real_execution_authorized) is not bool:
+        raise OfflineCloneBlocked("offline execution authorization flag is invalid", "offline_verification_failed")
+    if ttl <= timedelta(0) or ttl > timedelta(hours=24):
+        raise OfflineCloneBlocked("offline job lifetime is outside the one-shot policy", "offline_verification_failed")
     created = now or datetime.now(timezone.utc)
     job = OfflineJob(
         job_id=job_id or uuid.uuid4().hex,
@@ -370,10 +394,11 @@ def build_offline_job(source: OfflineBlockDevice, target: OfflineBlockDevice, *,
         target_capacity_bytes=target.size_bytes,
         source_partition_style=source.partition_style.casefold(),
         target_partition_style=target.partition_style.casefold(),
-        required_partition_roles=tuple(sorted(set(source.partition_roles))),
+        required_partition_roles=tuple(sorted({_normal(role) for role in source.partition_roles if _normal(role)})),
         source_label=source.masked_label,
         target_label=target.masked_label,
         nonce=nonce or secrets.token_hex(16),
+        real_execution_authorized=real_execution_authorized,
     )
     job.validate()
     return job
@@ -543,6 +568,8 @@ class ReplayStore:
         self.state_path = Path(state_path)
 
     def claim(self, nonce: str) -> None:
+        if self.state_path.is_symlink():
+            raise OfflineCloneBlocked("replay state path is unsafe", "offline_verification_failed")
         lock = BackupLock(self.state_path.with_name(self.state_path.name + ".lock"), stale_after=timedelta(minutes=10))
         with lock:
             try:
@@ -626,10 +653,15 @@ class FakeOfflineInventory:
 
 
 class LinuxBlockInventory:
-    """Future collector seam. Host Linux commands are intentionally absent."""
+    """Read-only Linux inventory facade used by the trusted offline runner."""
+
+    def __init__(self, collector: Any | None = None):
+        self.collector = collector
 
     def list_devices(self) -> list[OfflineBlockDevice]:
-        raise OfflineCloneBlocked("Linux inventory collection is reserved for the future offline runner")
+        if self.collector is None:
+            raise OfflineCloneBlocked("Linux inventory collection is reserved for the future offline runner")
+        return list(self.collector.collect())
 
 
 @dataclass(frozen=True)
@@ -652,7 +684,7 @@ def _fingerprint_match(device: OfflineBlockDevice, expected: dict[str, Any], pol
     if role == "target" and device.size_bytes < source_capacity:
         return False, "target is smaller than source"
     actual = device.fingerprint
-    for key in ("model", "size_bytes", "logical_sector_size", "physical_sector_size", "transport", "partition_style"):
+    for key in ("model", "size_bytes", "logical_sector_size", "physical_sector_size", "transport", "partition_style", "partition_roles"):
         if actual.get(key) != expected.get(key):
             return False, f"{role} {key} mismatch"
     expected_ids = expected.get("ids") or {}
@@ -832,8 +864,15 @@ class OfflineResult:
         if self.source_label != job.source_label or self.target_label != job.target_label:
             raise OfflineCloneBlocked("offline result labels do not match the verified job", "offline_verification_failed")
         if command_plan is not None:
-            if command_plan.executable or command_plan.batch:
+            if command_plan.batch:
                 raise OfflineCloneBlocked("offline result command plan is not a safe non-executable plan", "offline_execution_disabled")
+            if command_plan.executable:
+                if profile != OFFLINE_RESULT_PROFILE_PRODUCTION:
+                    raise OfflineCloneBlocked("simulation cannot consume an executable command plan", "offline_execution_disabled")
+                argv = tuple(getattr(command_plan, "argv", ()) or ())
+                executable = PurePosixPath(str(argv[0])) if argv else PurePosixPath("")
+                if not argv or str(argv[0]) != "/usr/sbin/ocs-onthefly" or executable.name != "ocs-onthefly" or ".." in executable.parts:
+                    raise OfflineCloneBlocked("offline result command plan executable is not allowlisted", "offline_execution_disabled")
             if expected_command_hash is not None and expected_command_hash != command_plan.argv_hash:
                 raise OfflineCloneBlocked("trusted command hash and command plan differ", "offline_verification_failed")
             expected_command_hash = command_plan.argv_hash
@@ -848,8 +887,10 @@ class OfflineResult:
             raise OfflineCloneBlocked("offline result end time precedes start time", "offline_verification_failed")
         created = _utc(job.created_at)
         expires = _utc(job.expires_at)
-        if started < created - OFFLINE_RESULT_MAX_JOB_SKEW or ended > expires + OFFLINE_RESULT_MAX_JOB_SKEW:
-            raise OfflineCloneBlocked("offline result timestamps fall outside the verified job lifetime", "offline_verification_failed")
+        if started < created or started > expires:
+            raise OfflineCloneBlocked("offline result start time falls outside the verified job authorization lifetime", "offline_verification_failed")
+        if ended - started > OFFLINE_RESULT_MAX_RUNTIME:
+            raise OfflineCloneBlocked("offline result runtime exceeds the semantic maximum", "offline_verification_failed")
         current = _strict_utc(now or datetime.now(timezone.utc), "consumption")
         if started > current + OFFLINE_RESULT_MAX_FUTURE_SKEW or ended > current + OFFLINE_RESULT_MAX_FUTURE_SKEW:
             raise OfflineCloneBlocked("offline result timestamp is unreasonably far in the future", "offline_verification_failed")
