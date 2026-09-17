@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import io
+import hashlib
+import os
+import subprocess
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -50,6 +53,67 @@ def test_bounded_subprocess_runner_maps_signal_termination(monkeypatch):
         env={},
     )
     assert outcome.exit_status == 137
+
+
+def test_bounded_subprocess_runner_isolates_process_group(monkeypatch):
+    captured = {}
+
+    class FakeProcess:
+        stdout = io.BytesIO(b"out")
+        stderr = io.BytesIO(b"err")
+        pid = 1234
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(*args, **kwargs):
+        captured.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr("localvault.offline_clone_exec.subprocess.Popen", fake_popen)
+    outcome = BoundedSubprocessCloneRunner().run(
+        (r"C:\synthetic\ocs-onthefly.exe",),
+        timeout_seconds=1,
+        env={},
+    )
+    assert outcome.exit_status == 0
+    if os.name == "nt":
+        assert "creationflags" in captured
+    else:
+        assert captured["start_new_session"] is True
+    expected = hashlib.sha256(
+        b"stdout\0" + hashlib.sha256(b"out").digest() + b"stderr\0" + hashlib.sha256(b"err").digest()
+    ).hexdigest()
+    assert outcome.log_hash == expected
+
+
+def test_bounded_subprocess_runner_terminates_process_group_on_timeout(monkeypatch):
+    class FakeProcess:
+        stdout = io.BytesIO()
+        stderr = io.BytesIO()
+        pid = 1234
+
+        def __init__(self):
+            self.waits = 0
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("synthetic", timeout)
+            return 0
+
+    process = FakeProcess()
+    terminated = []
+    monkeypatch.setattr("localvault.offline_clone_exec.subprocess.Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(BoundedSubprocessCloneRunner, "_terminate_process_group", staticmethod(lambda p: terminated.append(p)))
+    outcome = BoundedSubprocessCloneRunner().run(
+        (r"C:\synthetic\ocs-onthefly.exe",),
+        timeout_seconds=1,
+        env={},
+    )
+    assert outcome.timed_out is True
+    assert outcome.exit_status == 124
+    assert terminated == [process]
 
 
 def _disk(node: str, serial: str, *, size: int = 1000) -> OfflineBlockDevice:
@@ -177,3 +241,28 @@ def test_authorized_executor_requires_runtime_readiness_before_replay_or_runner(
         executor.execute(job, resolution, now=NOW)
     assert recorder.calls == []
     assert not (tmp_path / "replay.json").exists()
+
+
+def test_authorized_executor_rechecks_expiry_before_process_spawn(tmp_path):
+    source = _disk("/dev/sda", "source")
+    target = _disk("/dev/sdb", "target", size=1200)
+    job = build_offline_job(
+        source,
+        target,
+        now=NOW,
+        ttl=timedelta(minutes=1),
+        nonce="nonce-production-expiry-race",
+        real_execution_authorized=True,
+    )
+    resolution = resolve_offline_devices(job, FakeOfflineInventory((source, target)))
+    recorder = RecordingCloneProcessRunner()
+    ticks = iter((NOW + timedelta(seconds=30), NOW + timedelta(minutes=2)))
+    executor = ProductionOfflineCloneExecutor(
+        ProductionExecutionPolicy(enabled=True, allow_test_double=True, runtime_ready=True),
+        recorder,
+        replay_store=ReplayStore(tmp_path / "replay.json"),
+        clock=lambda: next(ticks),
+    )
+    with pytest.raises(OfflineCloneBlocked, match="expired"):
+        executor.execute(job, resolution, now=NOW + timedelta(seconds=30))
+    assert recorder.calls == []
