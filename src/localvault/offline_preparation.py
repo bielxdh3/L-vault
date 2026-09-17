@@ -335,6 +335,8 @@ class ProductionPreparationAdapter:
         created = now or self.clock()
         source_offline, target_offline = _offline_device(source), _offline_device(target)
         job = build_offline_job(source_offline, target_offline, now=created, ttl=ttl, real_execution_authorized=True)
+        if not self.config.replay_state.exists():
+            atomic_write_text(self.config.replay_state, json.dumps({"schema": 1, "used_nonce_hashes": []}, separators=(",", ":")), encoding="utf-8")
         channel = VirtualReturnChannel(self.config.exchange_root / "return-channel")
         channel_status = channel.initialize(job)
         store = OfflineJobStore(self.config.jobs_root)
