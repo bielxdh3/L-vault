@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -70,6 +71,9 @@ RETURN_TRANSITIONS = {
     "failed": frozenset(),
     "consumed": frozenset(),
 }
+# ``gpgv`` is retained in the evidence shape for backwards-compatible reports,
+# but it is an optional host-side verifier (not a Live-rootfs requirement).
+# The pinned image uses the explicit host gpgv contract for DRBL signatures.
 REQUIRED_RUNTIME_TOOLS = (
     "gpg",
     "gpgv",
@@ -79,7 +83,15 @@ REQUIRED_RUNTIME_TOOLS = (
     "udevadm",
     "findmnt",
     "ocs-onthefly",
+    "partclone.ntfs",
+    "partclone.extfs",
+    "partclone.dd",
+    "partclone.chkimg",
+    "partclone.info",
+    "partclone.fstype",
+    "partclone.restore",
 )
+OPTIONAL_RUNTIME_TOOLS = frozenset({"gpgv"})
 CLONEZILLA_SIGNER_FINGERPRINT = "54C0821A48715DAFD61BFCAF667857D045599AFD"
 CLONEZILLA_STABLE_AMD64_ISO_FILENAME = "clonezilla-live-3.3.3-15-amd64.iso"
 CLONEZILLA_STABLE_AMD64_ISO_SHA256 = "482518ea32af3b82ed15d09e2e7714806775deb62aeed81491e534f6cc6bbc47"
@@ -87,6 +99,7 @@ LOCAL_EXTRACTION_ATTESTATION_DOMAIN = "localvault.clonezilla.extraction-attestat
 LOCAL_EXTRACTION_ATTESTATION_SCHEME = "detached-gpgv-v1"
 PRODUCTION_EXTRACTION_METHOD = "clonezilla-iso-extract-v1"
 PRODUCTION_EXTRACTION_POLICY = "localvault-clonezilla-extractor-v1"
+MAX_PRODUCTION_EXTRACTION_MANIFEST_BYTES = 64 * 1024 * 1024
 SYNTHETIC_EXTRACTION_METHOD = "synthetic-test-fixture-v1"
 SYNTHETIC_EXTRACTION_POLICY = "synthetic-test-fixture-policy-v1"
 RUNTIME_VALIDATION_PROFILE_SYNTHETIC_TEST = "synthetic_test"
@@ -138,9 +151,9 @@ def _safe_filename(value: Any, *, field: str) -> str:
     return text
 
 
-def _safe_relative_path(value: Any) -> str:
+def _safe_relative_path(value: Any, *, allow_literal_backslash: bool = False) -> str:
     text = _safe_text(value, field="extraction manifest path", max_length=512)
-    if "\\" in text or text.startswith("/") or text.endswith("/") or normpath(text) != text:
+    if (not allow_literal_backslash and "\\" in text) or text.startswith("/") or text.endswith("/") or normpath(text) != text:
         raise OfflineCloneBlocked("offline extraction manifest path is not normalized", "offline_verification_failed")
     parts = text.split("/")
     if not parts or any(part in {"", ".", ".."} for part in parts):
@@ -152,9 +165,185 @@ def _safe_target(value: Any) -> str:
     if value == "":
         return ""
     text = _safe_text(value, field="extraction manifest link target", max_length=1024)
-    if "\\" in text or "\x00" in text or text == ".":
+    if "\x00" in text:
         raise OfflineCloneBlocked("offline extraction link target is invalid", "offline_verification_failed")
     return text
+
+
+_WSL_SCAN_SCRIPT = r'''
+import hashlib, json, os, posixpath, stat, sys
+
+root = sys.argv[1]
+empty_hash = hashlib.sha256(b"").hexdigest()
+inventory = []
+blockers = []
+seen_case = {}
+seen_paths = set()
+hardlinks = {}
+
+def add(entry):
+    path = entry["path"]
+    folded = path.casefold()
+    if path in seen_paths:
+        blockers.append("duplicate_canonical_path")
+    seen_paths.add(path)
+    seen_case.setdefault(folded, path)
+    inventory.append(entry)
+
+def metadata(info, *, hardlink_to="", major=0, minor=0, special_type=""):
+    return {
+        "mode": stat.S_IMODE(info.st_mode),
+        "uid": int(info.st_uid),
+        "gid": int(info.st_gid),
+        "hardlink_to": hardlink_to,
+        "major": int(major),
+        "minor": int(minor),
+        "special_type": special_type,
+    }
+
+def digest_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb", buffering=0) as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                return digest.hexdigest()
+            digest.update(chunk)
+
+def visit(directory, prefix=""):
+    try:
+        entries = sorted(os.scandir(directory), key=lambda item: (item.name.casefold(), item.name))
+    except OSError:
+        blockers.append("extracted_tree_unreadable")
+        return
+    for item in entries:
+        relative = f"{prefix}/{item.name}" if prefix else item.name
+        if (relative.startswith("/") or relative.endswith("/") or posixpath.normpath(relative) != relative
+                or any(part in ("", ".", "..") for part in relative.split("/"))):
+            blockers.append("extracted_tree_path_invalid")
+            continue
+        parts = relative.split("/")
+        folded_parts = {part.casefold() for part in parts}
+        if len(parts) == 1 and folded_parts & {"upper", "upperdir", "work", "overlay", "cow"}:
+            blockers.append("unexpected_writable_overlay")
+        if item.name.startswith(".wh."):
+            blockers.append("overlay_whiteout_present")
+        try:
+            info = os.lstat(item.path)
+        except OSError:
+            blockers.append("extracted_tree_entry_unreadable")
+            continue
+        base = {"path": relative, "target": ""}
+        if stat.S_ISLNK(info.st_mode):
+            try:
+                target = os.readlink(item.path)
+            except OSError:
+                blockers.append("extracted_tree_link_unreadable")
+                continue
+            encoded = target.encode("utf-8", "surrogateescape")
+            add({**base, "file_type": "symlink", "size": len(encoded),
+                 "sha256": hashlib.sha256(encoded).hexdigest(), "executable": False,
+                 "target": target, **metadata(info)})
+        elif stat.S_ISDIR(info.st_mode):
+            add({**base, "file_type": "directory", "size": 0, "sha256": empty_hash,
+                 "executable": bool(info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)),
+                 **metadata(info)})
+            visit(item.path, relative)
+        elif stat.S_ISREG(info.st_mode):
+            try:
+                digest = digest_file(item.path)
+            except OSError:
+                blockers.append("extracted_tree_entry_unreadable")
+                continue
+            key = (int(info.st_dev), int(info.st_ino))
+            link_to = hardlinks.get(key, "") if int(getattr(info, "st_nlink", 1)) > 1 and key[1] else ""
+            if int(getattr(info, "st_nlink", 1)) > 1 and key[1] and not link_to:
+                hardlinks[key] = relative
+            add({**base, "file_type": "regular", "size": int(info.st_size), "sha256": digest,
+                 "executable": bool(info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)),
+                 **metadata(info, hardlink_to=link_to)})
+        else:
+            if stat.S_ISFIFO(info.st_mode):
+                special_type = "fifo"
+            elif stat.S_ISSOCK(info.st_mode):
+                special_type = "socket"
+            elif stat.S_ISCHR(info.st_mode):
+                special_type = "char_device"
+            elif stat.S_ISBLK(info.st_mode):
+                special_type = "block_device"
+            else:
+                special_type = "other"
+            major = os.major(info.st_rdev) if special_type in ("char_device", "block_device") else 0
+            minor = os.minor(info.st_rdev) if special_type in ("char_device", "block_device") else 0
+            add({**base, "file_type": "special", "size": 0, "sha256": empty_hash,
+                 "executable": False, **metadata(info, major=major, minor=minor,
+                 special_type=special_type)})
+
+if not os.path.isdir(root) or os.path.islink(root):
+    blockers.append("extracted_tree_missing")
+else:
+    visit(root)
+paths = {entry["path"] for entry in inventory}
+for entry in inventory:
+    if entry["file_type"] != "symlink":
+        continue
+    target = entry["target"]
+    candidate = target.lstrip("/") if target.startswith("/") else posixpath.join(posixpath.dirname(entry["path"]), target)
+    candidate = posixpath.normpath(candidate)
+    if candidate == ".." or candidate.startswith("../"):
+        blockers.append("symlink_escapes_image_root")
+    elif candidate not in paths and entry["path"] in {
+        f"{directory}/{name}" for name in ("gpg", "sha256sum", "lsblk", "blkid", "udevadm", "findmnt", "ocs-onthefly",
+        "partclone.ntfs", "partclone.extfs", "partclone.dd", "partclone.chkimg", "partclone.info", "partclone.fstype", "partclone.restore")
+        for directory in ("bin", "sbin", "usr/bin", "usr/sbin")
+    }:
+        blockers.append(f"dangling_required_tool_link:{entry['path']}")
+    elif candidate == entry["path"]:
+        blockers.append("cyclic_required_tool_link")
+inventory.sort(key=lambda entry: entry["path"])
+print(json.dumps({"inventory": inventory, "blockers": sorted(set(blockers))}, ensure_ascii=True, separators=(",", ":")))
+'''
+
+
+def _wsl_root_spec(root: Path) -> tuple[str, str] | None:
+    """Return the WSL distribution and POSIX path for a ``\\\\wsl$`` tree."""
+    text = str(root)
+    match = re.match(r"^\\\\wsl(?:\.localhost)?\$\\([^\\]+)(.*)$", text, re.IGNORECASE)
+    if not match:
+        return None
+    suffix = match.group(2).replace("\\", "/") or "/"
+    if any(part in {".", ".."} for part in suffix.split("/")):
+        return None
+    if not suffix.startswith("/"):
+        suffix = "/" + suffix
+    return match.group(1), posixpath.normpath(suffix)
+
+
+def _scan_real_tree_via_wsl(root: Path) -> tuple[list[dict[str, Any]], list[str]] | None:
+    spec = _wsl_root_spec(root)
+    if spec is None:
+        return None
+    distribution, posix_root = spec
+    try:
+        wsl = shutil.which("wsl.exe") or shutil.which("wsl")
+        if not wsl:
+            return [], ["wsl_runtime_unavailable"]
+        completed = subprocess.run(
+            [wsl, "-d", distribution, "-u", "root", "--", "python3", "-c", _WSL_SCAN_SCRIPT, posix_root],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=20 * 60,
+        )
+        if completed.returncode != 0:
+            return [], ["extracted_tree_unreadable"]
+        payload = json.loads(completed.stdout.decode("utf-8"))
+        if not isinstance(payload, dict) or not isinstance(payload.get("inventory"), list) or not isinstance(payload.get("blockers"), list):
+            return [], ["extracted_tree_inventory_invalid"]
+        return payload["inventory"], [str(item) for item in payload["blockers"]]
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return [], ["extracted_tree_unreadable"]
 
 
 def _read_json(path: Path, *, max_bytes: int = 256 * 1024) -> tuple[bytes, dict[str, Any]]:
@@ -449,11 +638,15 @@ class RuntimeExtractionManifest:
             if self.schema == EXTRACTION_MANIFEST_SCHEMA and any((self.rootfs_relative_path, self.rootfs_sha256, self.iso_extractor_product, self.iso_extractor_version, self.iso_extractor_sha256, self.rootfs_extractor_product, self.rootfs_extractor_version, self.rootfs_extractor_sha256, self.extraction_log_sha256, self.required_tools_evidence_sha256, self.entry_count, self.total_regular_file_bytes, self.official_checksum_manifest_sha256, self.official_signer_fingerprint, self.official_keyring_sha256, self.vm_boot_completed, self.physical_boot_completed, self.clone_executed)):
                 raise OfflineCloneBlocked("legacy extraction manifest contains production-only evidence", "offline_verification_failed")
         previous = ""
+        entries_by_path = {entry.get("path"): entry for entry in self.files if isinstance(entry, dict)}
         for entry in self.files:
-            expected_keys = {"path", "file_type", "size", "sha256", "executable"} if self.schema == EXTRACTION_MANIFEST_SCHEMA else {"path", "file_type", "size", "sha256", "executable", "target"}
-            if not isinstance(entry, dict) or set(entry) != expected_keys:
+            base_keys = {"path", "file_type", "size", "sha256", "executable"} if self.schema == EXTRACTION_MANIFEST_SCHEMA else {"path", "file_type", "size", "sha256", "executable", "target"}
+            metadata_keys = {"mode", "uid", "gid", "hardlink_to", "major", "minor", "special_type"}
+            expected_keys = base_keys if self.schema == EXTRACTION_MANIFEST_SCHEMA else base_keys | metadata_keys
+            if not isinstance(entry, dict) or set(entry) not in ((base_keys,) if self.schema == EXTRACTION_MANIFEST_SCHEMA else (base_keys, expected_keys)):
                 raise OfflineCloneBlocked("offline extraction file evidence is incomplete", "offline_verification_failed")
-            path = _safe_relative_path(entry["path"])
+            enriched = set(entry) == expected_keys
+            path = _safe_relative_path(entry["path"], allow_literal_backslash=self.schema == PRODUCTION_EXTRACTION_MANIFEST_SCHEMA)
             if path <= previous:
                 raise OfflineCloneBlocked("offline extraction file inventory is not canonically ordered", "offline_verification_failed")
             previous = path
@@ -465,6 +658,26 @@ class RuntimeExtractionManifest:
                 _safe_target(entry["target"])
                 if entry["file_type"] != "symlink" and entry["target"] != "":
                     raise OfflineCloneBlocked("offline extraction non-link target is invalid", "offline_verification_failed")
+                if not enriched:
+                    raise OfflineCloneBlocked("production extraction object metadata is missing", "offline_verification_failed")
+                if type(entry["mode"]) is not int or not 0 <= entry["mode"] <= 0o7777:
+                    raise OfflineCloneBlocked("offline extraction mode metadata is invalid", "offline_verification_failed")
+                if type(entry["uid"]) is not int or entry["uid"] < 0 or type(entry["gid"]) is not int or entry["gid"] < 0:
+                    raise OfflineCloneBlocked("offline extraction ownership metadata is invalid", "offline_verification_failed")
+                if not isinstance(entry["hardlink_to"], str) or (entry["hardlink_to"] and _safe_relative_path(entry["hardlink_to"], allow_literal_backslash=True) >= path):
+                    raise OfflineCloneBlocked("offline extraction hardlink metadata is invalid", "offline_verification_failed")
+                if type(entry["major"]) is not int or entry["major"] < 0 or type(entry["minor"]) is not int or entry["minor"] < 0:
+                    raise OfflineCloneBlocked("offline extraction device metadata is invalid", "offline_verification_failed")
+                if not isinstance(entry["special_type"], str) or entry["special_type"] not in {"", "fifo", "socket", "char_device", "block_device", "other"}:
+                    raise OfflineCloneBlocked("offline extraction special-object metadata is invalid", "offline_verification_failed")
+                if entry["file_type"] == "special" and not entry["special_type"]:
+                    raise OfflineCloneBlocked("offline extraction special-object type is missing", "offline_verification_failed")
+                if entry["file_type"] != "special" and (entry["major"] or entry["minor"] or entry["special_type"]):
+                    raise OfflineCloneBlocked("offline extraction non-special device metadata is invalid", "offline_verification_failed")
+                if entry["hardlink_to"]:
+                    target_entry = entries_by_path.get(entry["hardlink_to"])
+                    if not target_entry or target_entry.get("file_type") != "regular" or target_entry.get("size") != entry["size"] or target_entry.get("sha256") != entry["sha256"]:
+                        raise OfflineCloneBlocked("offline extraction hardlink target is invalid", "offline_verification_failed")
         if hashlib.sha256(canonical_json([dict(entry) for entry in self.files])).hexdigest() != self.inventory_sha256:
             raise OfflineCloneBlocked("offline extraction inventory digest does not match its files", "offline_verification_failed")
 
@@ -689,7 +902,7 @@ class OfflineRuntimeValidator:
                 return
             for entry in entries:
                 relative = f"{prefix}/{entry.name}" if prefix else entry.name
-                if entry.name.casefold() in _OVERLAY_NAMES or any(part.casefold() in _OVERLAY_NAMES for part in relative.split("/")):
+                if not prefix and entry.name.casefold() in _OVERLAY_NAMES:
                     blockers.append("unexpected_writable_overlay")
                 if entry.is_symlink():
                     blockers.append("symlink_present")
@@ -724,30 +937,31 @@ class OfflineRuntimeValidator:
     @staticmethod
     def _scan_real_tree(root: Path) -> tuple[list[dict[str, Any]], list[str]]:
         """Inventory a Linux image tree without following host-facing links."""
+        via_wsl = _scan_real_tree_via_wsl(Path(root))
+        if via_wsl is not None:
+            return via_wsl
         inventory: list[dict[str, Any]] = []
         blockers: list[str] = []
-        seen_casefold: dict[str, str] = {}
+        seen_paths: set[str] = set()
+        hardlinks: dict[tuple[int, int], str] = {}
+        empty_hash = hashlib.sha256(b"").hexdigest()
 
         def add(entry: dict[str, Any]) -> None:
             path = entry["path"]
-            folded = path.casefold()
-            previous = seen_casefold.get(folded)
-            if previous is not None and previous != path:
-                blockers.append("case_collision_ambiguity")
-            elif path in {item["path"] for item in inventory}:
+            if path in seen_paths:
                 blockers.append("duplicate_canonical_path")
-            seen_casefold[folded] = path
+            seen_paths.add(path)
             inventory.append(entry)
 
         def visit(directory: Path, prefix: str = "") -> None:
             try:
-                entries = sorted(os.scandir(directory), key=lambda item: item.name.casefold())
+                entries = sorted(os.scandir(directory), key=lambda item: (item.name.casefold(), item.name))
             except OSError:
                 blockers.append("extracted_tree_unreadable")
                 return
             for item in entries:
                 relative = f"{prefix}/{item.name}" if prefix else item.name
-                if "\\" in relative or normpath(relative) != relative or any(part in {"", ".", ".."} for part in relative.split("/")):
+                if normpath(relative) != relative or any(part in {"", ".", ".."} for part in relative.split("/")):
                     blockers.append("extracted_tree_path_invalid")
                     continue
                 try:
@@ -761,11 +975,12 @@ class OfflineRuntimeValidator:
                     except OSError:
                         blockers.append("extracted_tree_link_unreadable")
                         continue
-                    add({"path": relative, "file_type": "symlink", "size": len(target.encode("utf-8", "surrogateescape")), "sha256": hashlib.sha256(target.encode("utf-8", "surrogateescape")).hexdigest(), "executable": False, "target": target})
+                    encoded = target.encode("utf-8", "surrogateescape")
+                    add({"path": relative, "file_type": "symlink", "size": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest(), "executable": False, "target": target, "mode": stat.S_IMODE(info.st_mode), "uid": int(getattr(info, "st_uid", 0)), "gid": int(getattr(info, "st_gid", 0)), "hardlink_to": "", "major": 0, "minor": 0, "special_type": ""})
                 elif getattr(info, "st_file_attributes", 0) & 0x400:
                     blockers.append("reparse_point_present")
                 elif stat.S_ISDIR(info.st_mode):
-                    add({"path": relative, "file_type": "directory", "size": 0, "sha256": hashlib.sha256(b"").hexdigest(), "executable": False, "target": ""})
+                    add({"path": relative, "file_type": "directory", "size": 0, "sha256": empty_hash, "executable": bool(info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)), "target": "", "mode": stat.S_IMODE(info.st_mode), "uid": int(getattr(info, "st_uid", 0)), "gid": int(getattr(info, "st_gid", 0)), "hardlink_to": "", "major": 0, "minor": 0, "special_type": ""})
                     visit(Path(item.path), relative)
                 elif stat.S_ISREG(info.st_mode):
                     try:
@@ -773,10 +988,26 @@ class OfflineRuntimeValidator:
                     except OSError:
                         blockers.append("extracted_tree_entry_unreadable")
                         continue
-                    add({"path": relative, "file_type": "regular", "size": info.st_size, "sha256": digest, "executable": bool(info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)), "target": ""})
+                    key = (int(getattr(info, "st_dev", 0)), int(getattr(info, "st_ino", 0)))
+                    link_capable = int(getattr(info, "st_nlink", 1)) > 1 and key[1] != 0
+                    hardlink_to = hardlinks.get(key, "") if link_capable else ""
+                    if link_capable and not hardlink_to:
+                        hardlinks[key] = relative
+                    add({"path": relative, "file_type": "regular", "size": info.st_size, "sha256": digest, "executable": bool(info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)), "target": "", "mode": stat.S_IMODE(info.st_mode), "uid": int(getattr(info, "st_uid", 0)), "gid": int(getattr(info, "st_gid", 0)), "hardlink_to": hardlink_to, "major": 0, "minor": 0, "special_type": ""})
                 else:
-                    blockers.append("non_regular_tree_entry")
-                    add({"path": relative, "file_type": "special", "size": 0, "sha256": hashlib.sha256(b"").hexdigest(), "executable": False, "target": ""})
+                    if stat.S_ISFIFO(info.st_mode):
+                        special_type = "fifo"
+                    elif stat.S_ISSOCK(info.st_mode):
+                        special_type = "socket"
+                    elif stat.S_ISCHR(info.st_mode):
+                        special_type = "char_device"
+                    elif stat.S_ISBLK(info.st_mode):
+                        special_type = "block_device"
+                    else:
+                        special_type = "other"
+                    major = os.major(info.st_rdev) if special_type in {"char_device", "block_device"} else 0
+                    minor = os.minor(info.st_rdev) if special_type in {"char_device", "block_device"} else 0
+                    add({"path": relative, "file_type": "special", "size": 0, "sha256": empty_hash, "executable": False, "target": "", "mode": stat.S_IMODE(info.st_mode), "uid": int(getattr(info, "st_uid", 0)), "gid": int(getattr(info, "st_gid", 0)), "hardlink_to": "", "major": major, "minor": minor, "special_type": special_type})
 
         if root.is_symlink() or not root.is_dir():
             return [], ["extracted_tree_missing"]
@@ -825,7 +1056,8 @@ class OfflineRuntimeValidator:
             if any(entry not in acceptable for entry in candidates):
                 blockers.append(f"tool_path_not_allowlisted:{name}")
             if len(acceptable) == 0:
-                blockers.append(f"missing_tool:{name}")
+                if name not in OPTIONAL_RUNTIME_TOOLS:
+                    blockers.append(f"missing_tool:{name}")
                 continue
             if len(acceptable) != 1:
                 blockers.append(f"ambiguous_tool:{name}")
@@ -1011,7 +1243,7 @@ class OfflineRuntimeValidator:
                 blockers.extend(("extracted_tree_binding_missing", "local_extraction_attestation_missing"))
             else:
                 try:
-                    raw, value = _read_json(Path(extraction_manifest_path), max_bytes=8 * 1024 * 1024)
+                    raw, value = _read_json(Path(extraction_manifest_path), max_bytes=MAX_PRODUCTION_EXTRACTION_MANIFEST_BYTES)
                     if raw != canonical_json(value):
                         raise OfflineCloneBlocked("offline extraction manifest is not canonical", "offline_verification_failed")
                     extraction = RuntimeExtractionManifest.from_dict(value)

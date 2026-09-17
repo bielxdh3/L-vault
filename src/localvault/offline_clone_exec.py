@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import signal
 import stat
 import subprocess
 import threading
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PurePosixPath
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .offline_clone import (
     ClonezillaCommandPlan,
@@ -153,6 +154,28 @@ class BoundedSubprocessCloneRunner:
         finally:
             pipe.close()
 
+    @staticmethod
+    def _terminate_process_group(process) -> None:  # type: ignore[no-untyped-def]
+        """Terminate the Clonezilla process and descendants as one unit."""
+        try:
+            if os.name == "nt":
+                taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
+                result = subprocess.run(
+                    [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
+        except (AttributeError, OSError, ValueError):
+            # A test double or an already-exited process may not expose a PID;
+            # retain the fail-closed single-process fallback in that case.
+            process.kill()
+
     def run(
         self,
         argv: tuple[str, ...],
@@ -166,28 +189,34 @@ class BoundedSubprocessCloneRunner:
                 "offline_execution_disabled",
             )
 
-        process = subprocess.Popen(
-            list(argv),
-            cwd="/",
-            env=env,
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        popen_options = {
+            "cwd": "/",
+            "env": env,
+            "shell": False,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+        }
+        if os.name == "nt":
+            popen_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            popen_options["start_new_session"] = True
+        process = subprocess.Popen(list(argv), **popen_options)
         stdout = bytearray()
         stderr = bytearray()
-        digest = hashlib.sha256()
-        truncated = [False]
+        stdout_digest = hashlib.sha256()
+        stderr_digest = hashlib.sha256()
+        stdout_truncated = [False]
+        stderr_truncated = [False]
         readers = (
             threading.Thread(
                 target=self._reader,
-                args=(process.stdout, self.max_captured_output_bytes, stdout, digest, truncated),
+                args=(process.stdout, self.max_captured_output_bytes, stdout, stdout_digest, stdout_truncated),
                 daemon=True,
             ),
             threading.Thread(
                 target=self._reader,
-                args=(process.stderr, self.max_captured_output_bytes, stderr, digest, truncated),
+                args=(process.stderr, self.max_captured_output_bytes, stderr, stderr_digest, stderr_truncated),
                 daemon=True,
             ),
         )
@@ -199,20 +228,25 @@ class BoundedSubprocessCloneRunner:
             exit_status = process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
-            process.kill()
+            self._terminate_process_group(process)
             exit_status = process.wait(timeout=10)
 
         for reader in readers:
             reader.join(timeout=10)
 
         exit_status = normalize_process_return_code(exit_status, timed_out=timed_out)
+        log_digest = hashlib.sha256()
+        log_digest.update(b"stdout\0")
+        log_digest.update(stdout_digest.digest())
+        log_digest.update(b"stderr\0")
+        log_digest.update(stderr_digest.digest())
         return ProcessOutcome(
             exit_status=exit_status,
             stdout=bytes(stdout),
             stderr=bytes(stderr),
-            log_hash=digest.hexdigest(),
+            log_hash=log_digest.hexdigest(),
             timed_out=timed_out,
-            output_truncated=truncated[0],
+            output_truncated=stdout_truncated[0] or stderr_truncated[0],
         )
 
 
@@ -288,11 +322,13 @@ class ProductionOfflineCloneExecutor:
         *,
         replay_store: ReplayStore | None = None,
         runtime_ready: bool | None = None,
+        clock: Callable[[], datetime] | None = None,
     ):
         self.policy = policy
         self.runner = runner
         self.replay_store = replay_store
         self.runtime_ready = runtime_ready
+        self.clock = clock
         self.last_plan: ClonezillaCommandPlan | None = None
 
     def execute(self, job: OfflineJob, resolution: OfflineResolution, *, now=None) -> ProcessOutcome:
@@ -344,6 +380,17 @@ class ProductionOfflineCloneExecutor:
         self.last_plan = plan
         if self.replay_store is None:
             raise OfflineCloneBlocked("offline job replay claim is unavailable", "offline_verification_failed")
+        # Re-check the signed capability immediately before consuming its nonce
+        # and again immediately before creating the destructive process.
+        def fresh_authorization_time() -> datetime:
+            value = self.clock() if self.clock is not None else current
+            if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+                raise OfflineCloneBlocked("offline execution time must include a timezone", "offline_verification_failed")
+            return value.astimezone(timezone.utc)
+
+        current = fresh_authorization_time()
+        if current < created or current > expires:
+            raise OfflineCloneBlocked("offline job is expired", "offline_job_expired")
         # Claim only after every pre-start guard and immediately before the
         # process boundary. A duplicate nonce can therefore never spawn twice.
         self.replay_store.claim(job.nonce)
@@ -353,6 +400,9 @@ class ProductionOfflineCloneExecutor:
             "TZ": "UTC",
             "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
         }
+        current = fresh_authorization_time()
+        if current < created or current > expires:
+            raise OfflineCloneBlocked("offline job is expired", "offline_job_expired")
         return self.runner.run(
             plan.argv,
             timeout_seconds=self.policy.timeout_seconds,

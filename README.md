@@ -242,7 +242,7 @@ python -m localvault disk-clone-artifact-status --cache <PRIVATE_ARTIFACT_CACHE>
 python -m localvault disk-clone-attestor-status --gpg <ABSOLUTE_HOST_GPG> --gnupg-home <PRIVATE_ATTESTOR_HOME> --public-keyring <PUBLIC_ATTESTOR_KEYRING>
 ```
 
-A verificacao oficial do publicador e a assinatura local de extracao sao trust roots separados. A arvore real, quando extraida por ferramenta local explicitamente permitida, e inventariada sem seguir links para o host; `gpg`, `gpgv`, `sha256sum`, `lsblk`, `blkid`, `udevadm`, `findmnt` e `ocs-onthefly` sao apenas inspecionados e marcados `present_unexecuted`. Nenhum comando extrai executaveis para rodar, monta ISO, acessa disco/USB, cria VM, inicializa, reinicia ou executa clone. Validacao estatica nao prova bootabilidade, Secure Boot ou corretude de clone.
+A verificacao oficial do publicador e a assinatura local de extracao sao trust roots separados. A arvore real, quando extraida por ferramenta local explicitamente permitida, e inventariada sem seguir links para o host; `gpg`, `sha256sum`, `lsblk`, `blkid`, `udevadm`, `findmnt`, `ocs-onthefly` e os binarios `partclone.*` fixados sao apenas inspecionados e marcados `present_unexecuted`. O `gpgv` e o verificador oficial no host, nao uma ferramenta exigida pelo rootfs Live. Nenhum comando extrai executaveis para rodar, monta ISO, acessa disco/USB, cria VM, inicializa, reinicia ou executa clone. Validacao estatica nao prova bootabilidade, Secure Boot ou corretude de clone.
 
 ## Limites Seguros
 
