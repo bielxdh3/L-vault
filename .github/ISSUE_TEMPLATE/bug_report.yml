@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a reproducible L-Vault problem
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include OAuth credentials, tokens, cookies, passwords, databases,
+        Gmail exports, Takeout archives, backups, device identifiers, or private paths.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.2.0 or abc1234
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Windows 11; Python 3.12.x
+    validations:
+      required: true
+
+  - type: input
+    id: component
+    attributes:
+      label: Component
+      placeholder: Gmail, Takeout, viewer, auth, restore, replica, disk clone
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened?
+      description: Describe observed and expected behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Use disposable data only.
+      placeholder: |
+        1. Configure ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized logs or evidence
+      render: text
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, private data, backups, databases, and sensitive paths.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: This is not an undisclosed security vulnerability.
+          required: true

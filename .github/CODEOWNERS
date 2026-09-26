@@ -1,0 +1,11 @@
+# Default ownership
+* @bielxdh3
+
+# Security- and data-sensitive areas
+/SECURITY.md @bielxdh3
+/src/ @bielxdh3
+/config/ @bielxdh3
+/docs/disk-clone-offline.md @bielxdh3
+/docs/disk-clone-production-readiness.md @bielxdh3
+/.github/workflows/ @bielxdh3
+/*.ps1 @bielxdh3
