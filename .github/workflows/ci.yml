@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  windows-python:
+    name: Windows Python 3.12
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project and tests
+        run: python -m pip install --disable-pip-version-check -e ".[test]"
+
+      - name: Compile Python
+        run: python -m compileall -q src tests
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Confirm clean checkout
+        shell: pwsh
+        run: |
+          if (git status --porcelain) {
+            git status --short
+            throw "Validation generated repository changes"
+          }
