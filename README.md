@@ -7,6 +7,8 @@
 Um cofre local para preservar, organizar, verificar e consultar backups do Gmail e do Google Takeout.
 
 [![Status](https://img.shields.io/badge/status-desenvolvimento%20ativo-orange)](#estado-do-projeto)
+[![CI](https://github.com/bielxdh3/L-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/bielxdh3/L-vault/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Versão](https://img.shields.io/badge/versão-0.2.0-blue)](#estado-do-projeto)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB)](#requisitos)
 [![Plataforma](https://img.shields.io/badge/plataforma-Windows-0078D4)](#requisitos)
@@ -261,3 +263,20 @@ python -m localvault gmail-dedupe-audit --root <VAULT_ROOT>
 ```
 
 O backup Gmail API e incremental: depois do primeiro indice, ele busca somente mensagens recentes com uma pequena margem de seguranca e pula e-mails ja salvos por `gmail_id` ou hash SHA-256.
+
+
+## Comunidade e contribuição
+
+- [Como contribuir](CONTRIBUTING.md)
+- [Suporte](SUPPORT.md)
+- [Política de segurança](SECURITY.md)
+- [Código de conduta](CODE_OF_CONDUCT.md)
+- [Governança](GOVERNANCE.md)
+
+## Licença
+
+O L-Vault é distribuído sob a [Apache License 2.0](LICENSE).
+
+É permitido usar, modificar, redistribuir, incorporar e vender o software, inclusive em produtos comerciais ou de código fechado, respeitando os termos da Apache-2.0. Redistribuições devem preservar os avisos aplicáveis de licença, copyright e atribuição, incluindo o [NOTICE](NOTICE) quando exigido.
+
+**Copyright 2026 bielxdh3.**
