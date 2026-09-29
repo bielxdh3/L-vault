@@ -71,24 +71,18 @@ python -m localvault replica-plan --root <VAULT_ROOT> --destination <REPLICA_ROO
 python -m localvault replica --root <VAULT_ROOT> --destination <REPLICA_ROOT>
 ```
 
-Os nomes e horarios padrao do scheduler sao: Daily Backup 02:00, Weekly Takeout Import 03:00 aos domingos, Verify Weekly 04:00 aos domingos e Bootable Disk Clone 03:00 quando habilitado. O clone continua desativado e fail-closed por padrao.
+Os nomes e horarios padrao do scheduler sao: Daily Backup 02:00, Weekly Takeout Import 03:00 aos domingos, Verify Weekly 04:00 aos domingos e Bootable Disk Clone 03:00 quando habilitado. Essa última tarefa é o executor offline legado e permanece fail-closed; ela não controla a ação manual Clone do sistema descrita abaixo.
 
-## Clone inicializavel
+## Clone do sistema Windows
 
-O clone fisico vem desativado e nunca deve ser testado contra discos reais. Primeiro descubra o provedor sem mutar armazenamento:
+Abra **L-vault → Clone do sistema** e escolha **Clone now**. O caminho normal usa DiskGenius 6.1.1 em **Tools → System Migration → Hot Migration**. Não exige Clonezilla, USB, menu BIOS/UEFI ou comandos Linux; não altere a sequência de boot.
 
-```powershell
-python -m localvault disk-clone-status --root E:\LocalVault
-python -m localvault disk-clone-check --root E:\LocalVault
-python -m localvault disk-clone-simulate --root E:\LocalVault
-```
+O papel autorizado da origem é KINGSTON SNV2S1000G / `****775.` (Windows atual, somente leitura). O destino autorizado é ST1000VM002-1CT162 / `****4EM2` e será apagado. O HGST HTS541010A9E680 / `****91NS` contém `E:\LocalVault`; nunca selecione esse disco no DiskGenius. A página mostra os números de disco e volumes atuais após uma inventarização fresca e pede confirmação visual da origem e destino; L-vault repete a validação das identidades persistentes antes da confirmação destrutiva.
 
-Somente depois de validar o provedor local e confirmar que o destino dedicado pode ser apagado, execute a inscricao administrativa. Ela grava um manifesto HMAC com identidade estavel, deixa o destino offline e nao inicia um clone:
+No assistente DiskGenius, mantenha selecionadas as partições padrão de sistema/boot: a ESP Kingston ativa auditada é a partição 2 (100 MiB), e as partições 3–5 são ESPs históricas. Confirme visualmente Kingston como origem e Seagate como destino; deixe desmarcada qualquer opção para alterar a sequência de boot; escolha Hot Migration. Depois da conclusão exibida pelo DiskGenius, feche-o e use **Verificar resultado** em L-vault.
 
-```powershell
-python -m localvault disk-clone-enroll --root E:\LocalVault
-```
+L-vault verifica GPT, uma ESP FAT32, partição Windows NTFS, Windows, arquivos EFI/BCD e o vínculo entre BCD e o Windows migrado. Essa verificação é estrutural e não inicia o Windows clonado. O estado BitLocker da origem é exibido quando o Windows permite consultá-lo; se aparecer como desconhecido, confirme-o no Windows antes de aceitar a gravação. Mantenha a chave de recuperação disponível se o Kingston estiver criptografado.
 
-O intervalo padrao e 30 dias (configuravel entre 1 e 3650), a janela 03:00-04:00 usa o horario local do Windows, e timestamps persistentes usam UTC. A amostragem de atividade usa limite de 70%, e cada tentativa mostra cinco minutos de aviso. Revalidacao de identidade, resolucao de caminhos protegidos por disco fisico e inventario pos-provedor sao obrigatorios; qualquer ambiguidade bloqueia. O destino deve permanecer offline entre execucoes. O painel `Clone do disco` mostra estado, progresso honesto, atividade, historico, verificacao estrutural, limpeza offline e o aviso permanente de que nenhum boot test foi realizado.
+O modo assistido não lê as linhas selecionadas no DiskGenius. A seleção visual do proprietário e o relato de conclusão do fornecedor permanecem entradas confiáveis. Se a janela de revalidação expirar antes do início, não aceite o aviso de sobrescrita: feche DiskGenius sem iniciar a gravação, registre o cancelamento seguro no L-vault e comece uma sessão nova. Uma falha ou interrupção não é repetida automaticamente.
 
-O cadastro de hardware e a ativacao do provedor sao fail-closed. O provedor selecionado vem de `disk_clone.provider`; nao ha fallback silencioso de um provedor configurado. DiskGenius permanece sem contrato CLI seguro validado. AOMEI ausente ou com edicao/capacidades nao validadas permanece bloqueado. A execucao real tambem continua desativada enquanto `allow_real_provider_execution` for falso.
+Os comandos CLI `disk-clone-*` e a tarefa agendada Bootable Disk Clone pertencem ao antigo fluxo offline Clonezilla e continuam separados desta ação manual. Sua opção `disk_clone.enabled` controla apenas o executor legado; não habilita Clonezilla nem altera o fluxo DiskGenius do proprietário. Veja [a implementação e seus limites](docs/diskgenius-normal-clone.md) e [o protótipo offline](docs/disk-clone-offline.md).

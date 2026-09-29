@@ -40,6 +40,13 @@ from .disk_clone import (
     validated_disk_clone_config,
 )
 from .disk_clone_ui import spawn_retry_worker
+from .diskgenius_assisted import (
+    CLONE_MODE_LABEL,
+    PROTECTED_ROLE,
+    SOURCE_ROLE,
+    TARGET_ROLE,
+    DiskGeniusNormalProvider,
+)
 from .replica import replica_status
 from .scheduler import merge_automation_config
 from .vault_index import cleanup_missing_index_entries, dashboard_data, delete_local_file_and_index, open_in_explorer, safe_vault_path
@@ -76,6 +83,34 @@ def _safe_tls_path(path: Path, label: str) -> Path:
     return resolved
 
 
+def _diskgenius_clone_page(request: Request, provider, templates: Jinja2Templates, *, action_error: str = "", status_code: int = 200):
+    try:
+        capabilities = provider.inspect_capabilities()
+    except Exception:
+        capabilities = None
+    try:
+        session = provider.monitor()
+    except DiskCloneBlocked as exc:
+        session = {"state": "blocked_audit", "session_id": "", "source": None, "target": None, "protected": None}
+        action_error = action_error or exc.reason
+        status_code = 409
+    return templates.TemplateResponse(
+        request,
+        "disk_clone.html",
+        {
+            "source_role": SOURCE_ROLE,
+            "target_role": TARGET_ROLE,
+            "protected_role": PROTECTED_ROLE,
+            "clone_mode": CLONE_MODE_LABEL,
+            "capabilities": capabilities,
+            "session": session,
+            "action_error": action_error,
+            "request": request,
+        },
+        status_code=status_code,
+    )
+
+
 def _same_origin(request: Request, origin: str) -> bool:
     from urllib.parse import urlsplit
     parsed = urlsplit(origin)
@@ -87,7 +122,7 @@ def _same_origin(request: Request, origin: str) -> bool:
     return parsed.scheme == request.url.scheme and parsed.hostname == request_host and origin_port == request_port
 
 
-def create_app(root: Path | None = None, https_enabled: bool | None = None, disk_inventory=None, protected_path_resolver=None) -> FastAPI:
+def create_app(root: Path | None = None, https_enabled: bool | None = None, disk_inventory=None, protected_path_resolver=None, diskgenius_provider=None) -> FastAPI:
     p = paths(root or Path(load_config()["vault_root"]))
     viewer_config = load_config(p.root).get("viewer", {})
     secure_session = bool(viewer_config.get("tls_enabled", False) if https_enabled is None else https_enabled)
@@ -96,6 +131,11 @@ def create_app(root: Path | None = None, https_enabled: bool | None = None, disk
     # enumerate host disks during ordinary page rendering.
     app.state.disk_inventory = disk_inventory
     app.state.protected_path_resolver = protected_path_resolver
+    app.state.diskgenius_provider = diskgenius_provider or DiskGeniusNormalProvider(
+        p.root,
+        inventory=disk_inventory,
+        protected_path_resolver=protected_path_resolver,
+    )
     templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 
     @pass_context
@@ -192,26 +232,51 @@ def create_app(root: Path | None = None, https_enabled: bool | None = None, disk
 
     @app.get("/disk-clone", response_class=HTMLResponse)
     def disk_clone_page(request: Request):
-        data = disk_clone_dashboard_data(p)
-        refresh_requested = request.query_params.get("refresh") == "1"
-        refresh_error = ""
-        if refresh_requested:
-            inventory = app.state.disk_inventory
-            if inventory is None:
-                inventory = WindowsDiskInventory()
-            try:
-                data["disk_candidates"] = public_disk_candidates(inventory.list_disks())
-            except Exception:
-                data["disk_candidates"] = []
-                refresh_error = "A atualização de discos não está disponível neste runtime. Tente novamente ou use um runtime Windows autorizado."
-        else:
-            # The ordinary page is entirely side-effect free. Even an
-            # injected inventory is read only after the owner requests refresh.
-            data["disk_candidates"] = []
-        data["disk_refresh_error"] = refresh_error
-        data["disk_refresh_requested"] = refresh_requested
-        data["request"] = request
-        return templates.TemplateResponse(request, "disk_clone.html", data)
+        return _diskgenius_clone_page(request, app.state.diskgenius_provider, templates)
+
+    @app.post("/disk-clone/launch", response_class=HTMLResponse)
+    def disk_clone_launch(request: Request):
+        try:
+            app.state.diskgenius_provider.launch()
+            return _diskgenius_clone_page(request, app.state.diskgenius_provider, templates)
+        except DiskCloneBlocked as exc:
+            return _diskgenius_clone_page(request, app.state.diskgenius_provider, templates, action_error=exc.reason, status_code=409)
+
+    @app.post("/disk-clone/revalidate", response_class=HTMLResponse)
+    async def disk_clone_revalidate(request: Request):
+        from urllib.parse import parse_qs
+        values = parse_qs((await request.body()).decode("utf-8", "replace"))
+        session_id = (values.get("session_id") or [""])[-1]
+        selection_verified = (values.get("selection_verified") or [""])[-1] == "on"
+        try:
+            app.state.diskgenius_provider.revalidate_before_overwrite(session_id, selected_devices_verified=selection_verified)
+            return _diskgenius_clone_page(request, app.state.diskgenius_provider)
+        except DiskCloneBlocked as exc:
+            return _diskgenius_clone_page(request, app.state.diskgenius_provider, action_error=exc.reason, status_code=409)
+
+    @app.post("/disk-clone/cancel-before-overwrite", response_class=HTMLResponse)
+    async def disk_clone_cancel_before_overwrite(request: Request):
+        from urllib.parse import parse_qs
+        values = parse_qs((await request.body()).decode("utf-8", "replace"))
+        session_id = (values.get("session_id") or [""])[-1]
+        confirmed = (values.get("confirmed_not_started") or [""])[-1] == "on"
+        try:
+            app.state.diskgenius_provider.cancel_before_overwrite(session_id, confirmed_not_started=confirmed)
+            return _diskgenius_clone_page(request, app.state.diskgenius_provider)
+        except DiskCloneBlocked as exc:
+            return _diskgenius_clone_page(request, app.state.diskgenius_provider, action_error=exc.reason, status_code=409)
+
+    @app.post("/disk-clone/verify", response_class=HTMLResponse)
+    async def disk_clone_verify(request: Request):
+        from urllib.parse import parse_qs
+        values = parse_qs((await request.body()).decode("utf-8", "replace"))
+        session_id = (values.get("session_id") or [""])[-1]
+        confirmed_complete = (values.get("confirmed_complete") or [""])[-1] == "on"
+        try:
+            app.state.diskgenius_provider.verify(session_id, owner_confirmed_complete=confirmed_complete)
+            return _diskgenius_clone_page(request, app.state.diskgenius_provider)
+        except DiskCloneBlocked as exc:
+            return _diskgenius_clone_page(request, app.state.diskgenius_provider, action_error=exc.reason, status_code=409)
 
     @app.get("/disk-clone/candidates")
     def disk_clone_candidates():
