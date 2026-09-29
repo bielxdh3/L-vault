@@ -52,7 +52,7 @@ REPARSE_TAG_SYMLINK = 0xA000000C
 VOLUME_GUID_RE = re.compile(r"Volume\{([0-9a-fA-F-]{36})\}")
 # This pins the only script elevated during first-use setup to the exact
 # installer reviewed with the application. Update it only with that script.
-TRUSTED_INSTALLER_SHA256 = "fd28c3dda919f7732fee7f58a5e6ff594ee1231b873cd66854cdfc0d42ffd9b5"
+TRUSTED_INSTALLER_SHA256 = "da0f9c882447144ca56c00fc41c5c79d38f7a7634e93aaf883679c4e98e695a5"
 
 
 class DataCloneError(RuntimeError):
