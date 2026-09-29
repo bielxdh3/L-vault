@@ -42,6 +42,8 @@ SID_RE = re.compile(r"S-1-\d+(?:-\d+)+\Z")
 
 SYSTEM_SID = "S-1-5-18"
 ADMINISTRATORS_SID = "S-1-5-32-544"
+TRUSTED_INSTALLER_SID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+TRUSTED_PARENT_OWNERS = {SYSTEM_SID, ADMINISTRATORS_SID, TRUSTED_INSTALLER_SID}
 USERS_SID = "S-1-5-32-545"
 CREATOR_OWNER_SID = "S-1-3-0"
 OWNER_RIGHTS_SID = "S-1-3-4"
@@ -208,8 +210,8 @@ def _check_parent_acl(row: dict[str, Any], issues: list[str]) -> None:
         issues.append(f"{path} is a reparse point")
     if row.get("is_directory") is not True:
         issues.append(f"{path} is not a directory")
-    if str(row.get("owner_sid", "")) in STANDARD_PRINCIPALS:
-        issues.append(f"{path} is owned by an unelevated principal")
+    if str(row.get("owner_sid", "")) not in TRUSTED_PARENT_OWNERS:
+        issues.append(f"{path} is not owned by a trusted Windows principal")
     rules = _applicable_rules(row)
     masks: dict[str, int] = {}
     for rule in rules:

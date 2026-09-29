@@ -10,6 +10,11 @@ param(
     [string]$ExpectedVssHelperSha256 = ''
 )
 
+# ShellExecuteEx cannot supply a replacement environment block for the UAC
+# launch. Remove the inherited/user PSModulePath before any installer command
+# can trigger PowerShell module auto-loading from a user-writable directory.
+$env:PSModulePath = "$PSHOME\Modules"
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -35,6 +40,7 @@ $script:RuntimeTransactionPath = Join-Path $script:StateRoot 'runtime-install-tr
 
 $script:SystemSid = 'S-1-5-18'
 $script:AdministratorsSid = 'S-1-5-32-544'
+$script:TrustedInstallerSid = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 $script:UsersSid = 'S-1-5-32-545'
 $script:CreatorOwnerSid = 'S-1-3-0'
 $script:OwnerRightsSid = 'S-1-3-4'
@@ -237,6 +243,10 @@ function Assert-SafeCloneAcl([string]$LiteralPath, [switch]$RequireProtected) {
     }
 }
 
+function Test-TrustedProgramDataOwner([string]$OwnerSid) {
+    return $OwnerSid -in @($script:SystemSid, $script:AdministratorsSid, $script:TrustedInstallerSid)
+}
+
 function Assert-ProgramDataAncestors {
     $replaceMask = 0x500D0040L # DELETE_CHILD, DELETE, WRITE_DAC/OWNER, GENERIC_WRITE/ALL
     $standardSids = @('S-1-1-0', 'S-1-2-0', 'S-1-5-4', 'S-1-5-7', 'S-1-5-11', 'S-1-5-12', $script:UsersSid, 'S-1-5-32-547')
@@ -246,7 +256,7 @@ function Assert-ProgramDataAncestors {
         if (-not $item.PSIsContainer) { throw "Windows ancestor is not a directory: $path" }
         $acl = Get-Acl -LiteralPath $path
         $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
-        if ($owner -in $standardSids) { throw "Standard users own a ProgramData ancestor: $path" }
+        if (-not (Test-TrustedProgramDataOwner $owner)) { throw "A ProgramData ancestor has an untrusted owner: $path" }
         foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
             $sid = $rule.IdentityReference.Value
             if ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
@@ -1004,6 +1014,13 @@ function Invoke-InstallerSelfTests {
 }
 
 function Invoke-SelfCheck {
+    if ($env:PSModulePath -ne "$PSHOME\Modules") { throw 'The inherited PowerShell module search path was not reset before installer commands.' }
+    if (-not (Test-TrustedProgramDataOwner $script:SystemSid) -or
+        -not (Test-TrustedProgramDataOwner $script:AdministratorsSid) -or
+        -not (Test-TrustedProgramDataOwner $script:TrustedInstallerSid) -or
+        (Test-TrustedProgramDataOwner 'S-1-5-21-111111111-222222222-333333333-1001')) {
+        throw 'ProgramData ancestor ownership accepts an untrusted principal.'
+    }
     if ($script:WorkerInstalled -ne 'C:\ProgramData\L-vault\clone-runtime\LocalVaultCloneWorker.exe' -or
         $script:StateRoot -ne 'C:\ProgramData\L-vault\clone-state' -or
         $script:VssInstalled -ne 'C:\ProgramData\L-vault\clone-runtime\LVaultVssSnapshot.exe') {

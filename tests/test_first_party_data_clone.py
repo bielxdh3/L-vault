@@ -466,6 +466,38 @@ def test_runtime_file_acl_rejects_unprotected_acl_and_reparse_substitution():
     assert any("reparse point" in issue for issue in issues)
 
 
+def test_programdata_ancestor_owner_must_be_trusted_windows_principal():
+    from localvault.clone_runtime_security import (
+        ADMINISTRATORS_SID,
+        READ_EXECUTE_MASK,
+        SYSTEM_SID,
+        TRUSTED_INSTALLER_SID,
+        USERS_SID,
+        _check_parent_acl,
+    )
+
+    row = {
+        "path": "C:\\",
+        "exists": True,
+        "is_directory": True,
+        "reparse": False,
+        "owner_sid": TRUSTED_INSTALLER_SID,
+        "rules": [
+            {"sid": SYSTEM_SID, "allow": True, "rights": 0x001F01FF, "propagation": "None"},
+            {"sid": ADMINISTRATORS_SID, "allow": True, "rights": 0x001F01FF, "propagation": "None"},
+            {"sid": USERS_SID, "allow": True, "rights": READ_EXECUTE_MASK, "propagation": "None"},
+        ],
+    }
+    issues = []
+    _check_parent_acl(row, issues)
+    assert not issues
+
+    row["owner_sid"] = "S-1-5-21-111111111-222222222-333333333-1001"
+    issues = []
+    _check_parent_acl(row, issues)
+    assert any("trusted Windows principal" in issue for issue in issues)
+
+
 def test_runtime_preflight_allows_first_install_only_when_parent_trust_is_safe(monkeypatch, tmp_path: Path):
     if os.name != "nt":
         pytest.skip("The protected runtime audit is Windows-only")
@@ -590,6 +622,15 @@ def test_application_pins_the_reviewed_first_use_installer_hash():
 
     installer = Path(__file__).resolve().parents[1] / "tools" / "install_clone_worker.ps1"
     assert clone._installer_sha256(installer) == clone.TRUSTED_INSTALLER_SHA256
+
+
+def test_elevated_installer_resets_module_search_path_before_cmdlet_use():
+    installer = Path(__file__).resolve().parents[1] / "tools" / "install_clone_worker.ps1"
+    source = installer.read_text(encoding="utf-8")
+    reset = source.index('$env:PSModulePath = "$PSHOME\\Modules"')
+    assert reset < source.index("Set-StrictMode -Version Latest")
+    assert reset < source.index("Add-Type -TypeDefinition")
+    assert reset < source.index("Get-Acl -LiteralPath")
 
 
 def test_windows_runtime_stage_file_locks_prevent_replacement_but_not_new_children(tmp_path: Path):
