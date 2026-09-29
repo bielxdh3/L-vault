@@ -1,120 +1,77 @@
-# Protected clone worker runtime contract
+# Protected first-party clone runtime
 
-This packaging spike provides a first-party, single elevated worker with a native
-Windows VSS requester. It does not invoke a separate cloning application and does
-not touch a physical disk during build or installation.
+L-vault owns runtime preparation, elevation, cloning, progress, verification,
+and cleanup. The normal owner flow does not open a separate cloning product or
+ask for manual shell, firmware, or USB steps.
 
-## Fixed paths
+## Fixed protected paths
 
 | Purpose | Path |
 | --- | --- |
 | Worker | `C:\ProgramData\L-vault\clone-runtime\LocalVaultCloneWorker.exe` |
 | Native VSS requester | `C:\ProgramData\L-vault\clone-runtime\LVaultVssSnapshot.exe` |
 | One-file extraction | `C:\ProgramData\L-vault\clone-runtime\Temp` |
-| Protected operation state and audit | `C:\ProgramData\L-vault\clone-state` |
+| Operation state and audit | `C:\ProgramData\L-vault\clone-state` |
 | Owner binding | `C:\ProgramData\L-vault\clone-state\owner.sid` |
+| Runtime manifest | `C:\ProgramData\L-vault\clone-state\runtime-install.json` |
 
-The installer creates the L-vault directories with a protected DACL: SYSTEM and
-Administrators have Full Control; Users have Read and Execute. It verifies these
-rules, rejects reparse points in all managed paths, and fails rather than taking
-over an existing user-writable runtime or state directory. The worker repeats
-the path, reparse-point, and DACL checks before it imports the bundled clone
-modules. PyInstaller one-file extraction is restricted to the protected `Temp`
-directory so an unelevated user cannot replace extracted Python modules.
+The installer creates fixed directories with protected DACLs, rejects reparse
+points, and refuses unsafe existing paths. SYSTEM and Administrators receive
+Full Control, Users receive Read and Execute, and Owner Rights deny ownership or
+DACL changes. The read-only runtime verifier checks these objects and their
+`C:\` and `C:\ProgramData` ancestors before the app enables cloning or the
+worker proceeds.
 
-`localvault.clone_runtime_security.verify_clone_runtime_security()` is the
-read-only verifier for both the app capability gate and worker startup. It
-checks `C:\` and `C:\ProgramData` as well as every fixed runtime/state object.
-It rejects a standard principal that can delete, replace, or take over a child
-through `DELETE_CHILD`, `DELETE`, `WRITE_DAC`, `WRITE_OWNER`, `GENERIC_WRITE`, or
-`GENERIC_ALL`. ProgramData may grant ordinary create-subdirectory rights, so the
-installer creates `L-vault` with an explicit protected DACL in one directory
-creation call and fails if an unsafe preexisting child wins that name. The
-managed DACL also limits implicit owner rights, so a standard account that
-created the process cannot change the runtime's DACL through object ownership.
+## Local integrity trust
 
-## Request and trust boundary
+The normal path supports local builds without a commercial signing certificate.
+The first clone request rebuilds the worker/helper bundle without elevation. L-vault
+requires a clean Git checkout for the worker/helper inputs, pins existing input
+files while building, pins the installer to a hash carried by the running
+application, and holds the installer and staged artifact files against
+write/delete sharing through UAC. The owner-approved UAC prompt is the local
+build's trust bootstrap. L-vault measures the three runtime hashes while those
+staged-file locks remain held. The elevated installer
+checks those exact values before copying into protected ProgramData, verifies
+readback hashes, writes an owner-SID-bound SHA-256 manifest, and starts only the
+protected worker. The local staging manifest is checked as build evidence; it is
+not the source of the hashes passed to the elevated installer. Authenticode is
+additionally verified when the release has a configured trusted-publisher
+thumbprint. Existing build-input files are held against replacement while the
+non-elevated worker/helper build runs; Git cleanliness is checked before and
+afterward. The helper uses an isolated per-build Cargo target directory so stale
+native outputs are not reused.
 
-The only operational worker argument is:
+Runtime updates use a protected journal and same-volume rollback backups. The
+manifest is promoted last. If an update is interrupted, the next installer
+invocation either finishes cleanup for a validated committed update or restores
+the previous worker, helper, and manifest. A pending journal disables worker
+execution until recovery succeeds. Runtime installation refuses to run while a
+clone or VSS recovery is active.
 
-```text
-LocalVaultCloneWorker.exe --job-id <32 lowercase hexadecimal characters>
-```
+## Worker contract
 
-The job ID is an untrusted selector for one operation. The worker does not accept
-a repository root, disk number, drive letter, source/target identity, plan file,
-snapshot path, or script path. It derives the authorized physical roles from a
-fresh Windows inventory, resolves current selectors itself, and uses the bundled
-L-vault worker code. Persistent job status, snapshot records, manifests, markers,
-and worker lock stay under `clone-state`. `E:\LocalVault` is fixed in the
-packaged code and is used only for the protected-repository-to-HGST exclusion
-check; it is not used as a job-plan or script input.
+The only operational worker argument is a random 32-character lowercase
+hexadecimal job ID. It does not accept a disk number, drive letter, source or
+target identity, repository root, arbitrary plan, or helper path. The worker
+resolves the Kingston, Seagate, and protected HGST from a fresh Windows disk
+inventory and repeats persistent identity checks immediately before destructive
+target preparation. Job status, snapshot records, manifests, and audit data
+remain under the protected ProgramData state directory.
 
-The bundled worker launches the co-located `LVaultVssSnapshot.exe` by absolute
-path for VSS operations. The helper path is fixed beside the worker and both
-executables must pass signature checks at installation. The worker rechecks the
-helper's path, reparse status, and ACL before execution. The target and source
-identity checks remain in L-vault's worker; the VSS helper only accepts canonical
-volume GUIDs and exact snapshot IDs passed by that worker.
+The worker reads the Kingston through Windows snapshots, uses inbox Windows
+storage tools to prepare one NTFS target volume, and invokes the inbox Robocopy
+program with fixed arguments for each source data volume. Reparse points are
+treated as filesystem objects; mount-point destinations are not traversed.
+Runtime-only Windows files and boot/recovery partitions are explicitly
+excluded and reported. The result is a data copy, not a bootable system disk.
 
-## Installation and build
+## Cancellation and recovery
 
-The installer and worker self-checks do not inspect physical disks or write files:
-
-```powershell
-.\tools\install_clone_worker.ps1 -SelfCheck
-py -3 .\tools\clone_worker_entry.py --self-check
-```
-
-Build development artifacts as a **non-elevated** user. BuildOnly invokes
-PyInstaller and Cargo without running the resulting worker or VSS helper:
-
-```powershell
-.\tools\install_clone_worker.ps1 -BuildOnly
-```
-
-Build prerequisites are 64-bit Windows PowerShell, Python with PyInstaller,
-64-bit Rust/Cargo, the `x86_64-pc-windows-msvc` Rust target, Visual Studio C++
-Build Tools, and the Windows SDK/VssApi import library. The build bundle is
-written to `E:\LocalVault\.build\clone-runtime-stage\bundle`. The one-file
-worker embeds `C:\ProgramData\L-vault\clone-runtime\Temp` as its extraction
-directory.
-
-The current script deliberately refuses installation until the production
-Authenticode certificate thumbprint is pinned in the release build. The local
-development artifacts are unsigned and are not suitable for an elevated install.
-The signed release process must Authenticode-sign both executables with the
-approved L-vault publisher, pin that exact certificate thumbprint in
-`tools/install_clone_worker.ps1`, place those signed files in the fixed bundle,
-then install from one elevated PowerShell session:
-
-```powershell
-.\tools\install_clone_worker.ps1 -Install
-```
-
-Installation verifies signatures before creating managed directories, verifies
-them again after copying, checks copied hashes, writes a protected install audit,
-and does not launch either executable. The helper is therefore never run by the
-installer.
-
-## Status and cancellation
-
-The clone provider can read `clone-state\active.json`. Worker state is not read from or written to the
-user-writable repository tree.
-
-Cancellation stays available from the normal UI without a second elevation
-prompt. It uses a per-job named Windows event and mutex. Their DACLs grant
-access only to SYSTEM, Administrators, and the exact interactive owner SID
-recorded by the protected installer. Cancellation and the worker's transition
-to target preparation serialize through that mutex: if cancellation wins first,
-target preparation is skipped; after the destructive boundary, cancellation is
-refused. No cancellation marker or clone state is read from the repository
-tree; status, identities, manifests, journals, and audit remain in protected
-ProgramData.
-
-The current host has no L-vault code-signing certificate with a private key.
-Its user-installed PyInstaller and Rust toolchain are suitable only for
-`-BuildOnly`. Production installation requires signed release binaries from a
-pinned, trusted publisher. Until that release trust material and artifacts are
-available, the runtime capability gate keeps Clone disabled. No clone, VSS
-request, or physical-disk action was performed by this implementation.
+The UI and worker share a per-job named event and mutex whose DACLs grant the
+interactive owner, SYSTEM, and Administrators the required access. Cancellation
+and the transition to target preparation serialize on that mutex. If cancellation
+wins first, the target is not changed. After target preparation begins, the UI
+refuses cancellation. An interrupted clone is marked incomplete and cannot be
+retried until reviewed. VSS cleanup uses only snapshot IDs journaled by that
+operation.

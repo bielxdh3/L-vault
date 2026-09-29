@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -29,9 +30,15 @@ STATE_ROOT = APP_ROOT / "clone-state"
 WORKER = RUNTIME_ROOT / "LocalVaultCloneWorker.exe"
 VSS_HELPER = RUNTIME_ROOT / "LVaultVssSnapshot.exe"
 OWNER_SID = STATE_ROOT / "owner.sid"
-# Release engineering must replace this placeholder in both the application and
-# installer with the approved L-vault Authenticode publisher certificate.
-CLONE_RUNTIME_SIGNER_THUMBPRINT = "SET_IN_RELEASE_BUILD"
+RUNTIME_MANIFEST = STATE_ROOT / "runtime-install.json"
+RUNTIME_TRANSACTION = STATE_ROOT / "runtime-install-transaction.json"
+# Optional release hardening. Local installs use protected SHA-256 pins; a
+# publisher signature is enforced only when an L-vault publisher is configured.
+CLONE_RUNTIME_SIGNER_THUMBPRINT: str | None = None
+RUNTIME_MANIFEST_SCHEMA = 1
+RUNTIME_VERSION = "1"
+SHA256_RE = re.compile(r"[A-Fa-f0-9]{64}\Z")
+SID_RE = re.compile(r"S-1-\d+(?:-\d+)+\Z")
 
 SYSTEM_SID = "S-1-5-18"
 ADMINISTRATORS_SID = "S-1-5-32-544"
@@ -79,6 +86,7 @@ class CloneRuntimeSecurityReport:
     ready: bool
     issues: tuple[str, ...]
     evidence: dict[str, Any]
+    installable: bool = False
 
 
 def _system_powershell() -> Path:
@@ -100,6 +108,7 @@ def _query_acl_facts(paths: list[Path]) -> list[dict[str, Any]]:
     encoded_paths = base64.b64encode(json.dumps([str(path) for path in paths]).encode("utf-8")).decode("ascii")
     script = r"""
 $ErrorActionPreference = 'Stop'
+$callerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $paths = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('""" + encoded_paths + r"""')) | ConvertFrom-Json
 function Test-AnyReparse([string]$path) {
     $full = [IO.Path]::GetFullPath($path)
@@ -140,6 +149,7 @@ $rows = foreach ($path in $paths) {
     [pscustomobject]@{
         path = $item.FullName
         exists = $true
+        caller_sid = $callerSid
         is_directory = [bool]$item.PSIsContainer
         reparse = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
         protected = [bool]$acl.AreAccessRulesProtected
@@ -246,7 +256,7 @@ def _check_child_acl(row: dict[str, Any], issues: list[str]) -> None:
     if row.get("exists") is not True:
         issues.append(f"{path} is missing")
         return
-    if row.get("is_directory") and row.get("protected") is not True:
+    if row.get("protected") is not True:
         issues.append(f"{path} inherits an unverified DACL")
     rules = row.get("rules")
     if not isinstance(rules, list) or not rules:
@@ -282,9 +292,11 @@ def _check_child_acl(row: dict[str, Any], issues: list[str]) -> None:
             issues.append(f"{path} is owned by an unelevated principal without owner-rights protection")
 
 
-def _signature_issues(rows: list[dict[str, Any]], expected_thumbprint: str = CLONE_RUNTIME_SIGNER_THUMBPRINT) -> list[str]:
+def _signature_issues(rows: list[dict[str, Any]], expected_thumbprint: str | None = CLONE_RUNTIME_SIGNER_THUMBPRINT) -> list[str]:
+    if expected_thumbprint is None or expected_thumbprint == "":
+        return []
     if not re.fullmatch(r"[A-Fa-f0-9]{40}", expected_thumbprint):
-        return ["the L-vault release Authenticode thumbprint is not pinned"]
+        return ["the configured L-vault Authenticode thumbprint is invalid"]
     wanted = {str(WORKER).casefold(), str(VSS_HELPER).casefold()}
     observed = {
         str(row.get("path", "")).casefold(): row
@@ -305,6 +317,66 @@ def _signature_issues(rows: list[dict[str, Any]], expected_thumbprint: str = CLO
     if set(observed) != wanted:
         issues.append("Authenticode query returned an unexpected runtime file set")
     return issues
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _manifest_issues(
+    value: Any,
+    *,
+    caller_sid: str,
+    owner_sid: str,
+    worker_sha256: str,
+    vss_helper_sha256: str,
+    expected_signer: str | None = CLONE_RUNTIME_SIGNER_THUMBPRINT,
+) -> list[str]:
+    if not isinstance(value, dict):
+        return ["the protected clone runtime manifest is malformed"]
+    issues: list[str] = []
+    if type(value.get("schema")) is not int or value.get("schema") != RUNTIME_MANIFEST_SCHEMA:
+        issues.append("the protected clone runtime manifest schema is unsupported")
+    manifest_sid = str(value.get("owner_sid", ""))
+    if not SID_RE.fullmatch(manifest_sid) or manifest_sid.casefold() != caller_sid.casefold() or manifest_sid.casefold() != owner_sid.casefold():
+        issues.append("the protected clone runtime is bound to a different Windows owner")
+    if str(value.get("worker_path", "")).casefold() != str(WORKER).casefold():
+        issues.append("the protected clone runtime manifest names an unexpected worker path")
+    if str(value.get("vss_helper_path", "")).casefold() != str(VSS_HELPER).casefold():
+        issues.append("the protected clone runtime manifest names an unexpected VSS helper path")
+    for key, actual in (("worker_sha256", worker_sha256), ("vss_helper_sha256", vss_helper_sha256)):
+        expected = value.get(key)
+        if not isinstance(expected, str) or not SHA256_RE.fullmatch(expected) or expected.casefold() != actual.casefold():
+            issues.append(f"the installed clone runtime {key.removesuffix('_sha256')} bytes do not match the protected manifest")
+    if str(value.get("runtime_version", "")) != RUNTIME_VERSION:
+        issues.append("the protected clone runtime version is unsupported")
+    if not isinstance(value.get("source_commit"), str) or len(value["source_commit"]) > 80:
+        issues.append("the protected clone runtime build identifier is malformed")
+    if not isinstance(value.get("installed_at_utc"), str) or not value["installed_at_utc"].strip():
+        issues.append("the protected clone runtime installation time is missing")
+    authenticode = value.get("authenticode")
+    if not isinstance(authenticode, dict):
+        issues.append("the protected clone runtime trust metadata is malformed")
+    elif expected_signer:
+        if authenticode.get("policy") != "pinned_publisher" or str(authenticode.get("thumbprint", "")).replace(" ", "").upper() != expected_signer.upper():
+            issues.append("the protected clone runtime publisher metadata does not match the configured pin")
+    elif authenticode.get("policy") != "local_integrity_pinned" or authenticode.get("thumbprint") is not None:
+        issues.append("the protected clone runtime does not declare the expected local integrity trust mode")
+    return issues
+
+
+def _read_protected_manifest() -> dict[str, Any]:
+    size = RUNTIME_MANIFEST.stat().st_size
+    if size < 2 or size > 16 * 1024:
+        raise OSError("protected clone runtime manifest has an invalid size")
+    value = json.loads(RUNTIME_MANIFEST.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise OSError("protected clone runtime manifest is not an object")
+    return value
 
 
 def _query_signature_facts() -> list[dict[str, Any]]:
@@ -362,18 +434,19 @@ def verify_clone_runtime_security() -> CloneRuntimeSecurityReport:
     """Freshly audit fixed ProgramData ancestry and runtime ACLs, read-only."""
     if os.name != "nt":
         return CloneRuntimeSecurityReport(False, ("Windows clone runtime requires Windows",), {})
-    paths = [SYSTEM_DRIVE_ROOT, PROGRAM_DATA, APP_ROOT, RUNTIME_ROOT, RUNTIME_TEMP, STATE_ROOT, WORKER, VSS_HELPER, OWNER_SID]
+    paths = [SYSTEM_DRIVE_ROOT, PROGRAM_DATA, APP_ROOT, RUNTIME_ROOT, RUNTIME_TEMP, STATE_ROOT, WORKER, VSS_HELPER, OWNER_SID, RUNTIME_MANIFEST, RUNTIME_TRANSACTION]
     try:
         rows = _query_acl_facts(paths)
     except Exception as exc:
         return CloneRuntimeSecurityReport(False, (f"Windows ACL query failed ({type(exc).__name__})",), {})
-    issues: list[str] = []
+    hard_issues: list[str] = []
+    runtime_issues: list[str] = []
     evidence: dict[str, Any] = {}
     for row in rows[:2]:
         if row.get("exists") is not True:
-            issues.append(f"{row.get('path')} is missing")
+            hard_issues.append(f"{row.get('path')} is missing")
         else:
-            _check_parent_acl(row, issues)
+            _check_parent_acl(row, hard_issues)
             evidence[f"{row.get('path')}_owner_sid"] = row.get("owner_sid")
             evidence[f"{row.get('path')}_standard_users_can_replace_child"] = any(
                 rule.get("allow")
@@ -383,22 +456,60 @@ def verify_clone_runtime_security() -> CloneRuntimeSecurityReport:
                 for rule in row.get("rules", [])
             )
     for row in rows[2:]:
-        _check_child_acl(row, issues)
+        if row.get("exists") is not True:
+            if str(row.get("path", "")).casefold() == str(RUNTIME_TRANSACTION).casefold():
+                continue
+            runtime_issues.append(f"{row.get('path')} is missing")
+            continue
+        _check_child_acl(row, hard_issues)
+        if str(row.get("path", "")).casefold() == str(RUNTIME_TRANSACTION).casefold():
+            runtime_issues.append("a prior runtime installation needs recovery")
         evidence[str(row.get("path", "unknown"))] = {
             "exists": row.get("exists"),
             "owner_sid": row.get("owner_sid"),
             "dacl_protected": row.get("protected"),
             "reparse": row.get("reparse"),
         }
-    if WORKER.is_file() and VSS_HELPER.is_file():
+    caller_sid = str(rows[0].get("caller_sid", "")) if rows else ""
+    evidence["caller_sid"] = caller_sid
+    if not SID_RE.fullmatch(caller_sid):
+        hard_issues.append("Windows did not return the current owner SID")
+    owner_sid = ""
+    try:
+        if OWNER_SID.is_file():
+            owner_sid = OWNER_SID.read_text(encoding="ascii").strip()
+            if not SID_RE.fullmatch(owner_sid) or owner_sid.casefold() != caller_sid.casefold():
+                hard_issues.append("the protected clone runtime belongs to a different Windows owner")
+        else:
+            runtime_issues.append("the protected clone runtime owner binding is missing")
+    except (OSError, UnicodeError):
+        hard_issues.append("the protected clone runtime owner binding is unreadable")
+    if not hard_issues and WORKER.is_file() and VSS_HELPER.is_file() and RUNTIME_MANIFEST.is_file():
         try:
-            issues.extend(_signature_issues(_query_signature_facts()))
+            manifest = _read_protected_manifest()
+            worker_hash = _sha256_file(WORKER)
+            helper_hash = _sha256_file(VSS_HELPER)
+            manifest_issues = _manifest_issues(
+                manifest,
+                caller_sid=caller_sid,
+                owner_sid=owner_sid,
+                worker_sha256=worker_hash,
+                vss_helper_sha256=helper_hash,
+            )
+            runtime_issues.extend(manifest_issues)
+            if CLONE_RUNTIME_SIGNER_THUMBPRINT:
+                runtime_issues.extend(_signature_issues(_query_signature_facts()))
+            if not manifest_issues:
+                evidence["runtime_trust"] = "pinned_publisher" if CLONE_RUNTIME_SIGNER_THUMBPRINT else "local_integrity_pinned"
+                evidence["worker_sha256"] = worker_hash
+                evidence["vss_helper_sha256"] = helper_hash
         except Exception as exc:
-            issues.append(f"runtime Authenticode verification failed ({type(exc).__name__})")
+            runtime_issues.append(f"protected clone runtime verification failed ({type(exc).__name__})")
     else:
-        issues.append("the protected clone worker and VSS requester are not both installed")
-    unique_issues = tuple(dict.fromkeys(issues))
-    return CloneRuntimeSecurityReport(not unique_issues, unique_issues, evidence)
+        runtime_issues.append("the protected clone worker, VSS requester, or installation manifest is missing")
+    unique_issues = tuple(dict.fromkeys((*hard_issues, *runtime_issues)))
+    evidence["runtime_trust"] = evidence.get("runtime_trust", "installation_required")
+    return CloneRuntimeSecurityReport(not unique_issues, unique_issues, evidence, installable=not hard_issues)
 
 
 def require_clone_runtime_security() -> CloneRuntimeSecurityReport:

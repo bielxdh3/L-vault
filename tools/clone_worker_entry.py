@@ -29,6 +29,7 @@ RUNTIME_TEMP_ROOT = RUNTIME_DIR / "Temp"
 WORKER_EXE = RUNTIME_DIR / "LocalVaultCloneWorker.exe"
 VSS_HELPER_EXE = RUNTIME_DIR / "LVaultVssSnapshot.exe"
 OWNER_SID_FILE = STATE_ROOT / "owner.sid"
+RUNTIME_MANIFEST_FILE = STATE_ROOT / "runtime-install.json"
 JOB_ID_RE = re.compile(r"[a-f0-9]{32}\Z")
 
 SYSTEM_SID = "S-1-5-18"
@@ -202,7 +203,7 @@ def _assert_secure_layout() -> None:
     if not getattr(sys, "frozen", False) or _normal(sys.executable) != expected_exe:
         raise BootstrapError("worker was not started from its fixed ProgramData path")
 
-    for path in (APP_ROOT, RUNTIME_DIR, RUNTIME_TEMP_ROOT, STATE_ROOT, OWNER_SID_FILE, WORKER_EXE, VSS_HELPER_EXE):
+    for path in (APP_ROOT, RUNTIME_DIR, RUNTIME_TEMP_ROOT, STATE_ROOT, OWNER_SID_FILE, RUNTIME_MANIFEST_FILE, WORKER_EXE, VSS_HELPER_EXE):
         _assert_no_reparse_chain(path)
     if not WORKER_EXE.is_file() or not VSS_HELPER_EXE.is_file():
         raise BootstrapError("the worker or native VSS requester is missing")
@@ -219,7 +220,7 @@ def _assert_secure_layout() -> None:
             require_protected=row["path"].casefold()
             in {str(APP_ROOT).casefold(), str(RUNTIME_DIR).casefold(), str(RUNTIME_TEMP_ROOT).casefold(), str(STATE_ROOT).casefold()},
         )
-    file_rows = _read_acl_facts([WORKER_EXE, VSS_HELPER_EXE, OWNER_SID_FILE])
+    file_rows = _read_acl_facts([WORKER_EXE, VSS_HELPER_EXE, OWNER_SID_FILE, RUNTIME_MANIFEST_FILE])
     for row in file_rows:
         _assert_safe_acl_facts(row, require_protected=False)
 

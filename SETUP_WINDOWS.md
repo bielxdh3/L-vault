@@ -75,8 +75,8 @@ Os nomes e horários padrão do agendador são: Daily Backup 02:00, Weekly Takeo
 
 ## Clone de dados do Windows
 
-O clone normal é um clone de dados não inicializável controlado pelo próprio L-vault. O botão fica desabilitado até a distribuição assinada do trabalhador elevado e do helper VSS passar pela validação do publicador fixado. Não abra DiskGenius nem Clonezilla e não altere as configurações de boot para esse fluxo.
+O clone normal é um clone de dados não inicializável controlado pelo próprio L-vault. Ao clicar em Clone, o L-vault prepara o runtime first-party se necessário, pede a permissão padrão do Windows e inicia a cópia. O runtime protegido registra os hashes exatos dos binários e o SID proprietário; uma assinatura Authenticode só é exigida quando um publicador estiver configurado. Não é necessário abrir outro programa nem alterar opções de inicialização.
 
-Os papéis físicos autorizados são KINGSTON SNV2S1000G / `****775.` como origem somente leitura; ST1000VM002-1CT162 / `****4EM2` como destino que será apagado; e HGST HTS541010A9E680 / `****91NS` como disco protegido do repositório. A página mantém o clone desabilitado enquanto o helper elevado protegido e o snapshot VSS first-party não estiverem disponíveis e validados. Não use uma ferramenta externa como substituto.
+Os papéis físicos autorizados são KINGSTON SNV2S1000G / `****775.` como origem somente leitura; ST1000VM002-1CT162 / `****4EM2` como destino que será apagado; e HGST HTS541010A9E680 / `****91NS` como disco protegido do repositório. O L-vault valida novamente esses discos por identidade persistente antes de apagar o alvo. Se alguma identidade ou proteção não puder ser confirmada, o clone para sem iniciar a gravação.
 
 Os comandos `disk-clone-*`, o fluxo DiskGenius e o protótipo Clonezilla são caminhos legados/históricos e não definem o clone normal de dados.

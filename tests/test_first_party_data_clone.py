@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -375,7 +376,7 @@ def test_sample_hashing_revalidates_source_snapshot(tmp_path: Path):
     assert checks
 
 
-def test_runtime_signature_gate_requires_both_exactly_pinned_valid_signatures():
+def test_runtime_authenticode_is_optional_but_enforces_a_configured_publisher():
     from localvault.clone_runtime_security import VSS_HELPER, WORKER, _signature_issues
 
     thumbprint = "0123456789ABCDEF" * 2 + "01234567"
@@ -383,10 +384,349 @@ def test_runtime_signature_gate_requires_both_exactly_pinned_valid_signatures():
         {"path": str(WORKER), "status": "Valid", "thumbprint": thumbprint.lower()},
         {"path": str(VSS_HELPER), "status": "Valid", "thumbprint": thumbprint},
     ]
+    assert _signature_issues([], None) == []
     assert _signature_issues(rows, thumbprint) == []
-    assert _signature_issues(rows, "SET_IN_RELEASE_BUILD")
+    assert _signature_issues(rows, "0123456789ABCDEF" * 2 + "89ABCDEF")
     assert _signature_issues(rows[:-1], thumbprint)
     assert _signature_issues([rows[0], rows[1] | {"status": "NotSigned"}], thumbprint)
+
+
+def test_local_runtime_manifest_pins_exact_installed_bytes_and_owner():
+    from localvault.clone_runtime_security import RUNTIME_VERSION, VSS_HELPER, WORKER, _manifest_issues
+
+    owner = "S-1-5-21-111111111-222222222-333333333-1001"
+    worker_hash = "a" * 64
+    helper_hash = "b" * 64
+    manifest = {
+        "schema": 1,
+        "owner_sid": owner,
+        "worker_path": str(WORKER),
+        "vss_helper_path": str(VSS_HELPER),
+        "worker_sha256": worker_hash,
+        "vss_helper_sha256": helper_hash,
+        "runtime_version": RUNTIME_VERSION,
+        "source_commit": "a" * 40,
+        "installed_at_utc": "2026-09-29T00:00:00Z",
+        "authenticode": {"policy": "local_integrity_pinned", "thumbprint": None},
+    }
+    kwargs = {
+        "caller_sid": owner,
+        "owner_sid": owner,
+        "worker_sha256": worker_hash,
+        "vss_helper_sha256": helper_hash,
+    }
+    assert _manifest_issues(manifest, **kwargs) == []
+    assert any("worker bytes" in issue for issue in _manifest_issues(manifest, **(kwargs | {"worker_sha256": "c" * 64})))
+    assert any("helper bytes" in issue for issue in _manifest_issues(manifest, **(kwargs | {"vss_helper_sha256": "d" * 64})))
+    assert any("different Windows owner" in issue for issue in _manifest_issues(manifest, **(kwargs | {"caller_sid": "S-1-5-21-999-1001"})))
+    assert _manifest_issues(None, **kwargs)
+    assert _manifest_issues(manifest | {"worker_path": "C:\\Temp\\worker.exe"}, **kwargs)
+
+
+def test_runtime_manifest_enforces_optional_expected_authenticode_publisher():
+    from localvault.clone_runtime_security import VSS_HELPER, WORKER, _manifest_issues
+
+    owner = "S-1-5-21-111111111-222222222-333333333-1001"
+    manifest = {
+        "schema": 1,
+        "owner_sid": owner,
+        "worker_path": str(WORKER),
+        "vss_helper_path": str(VSS_HELPER),
+        "worker_sha256": "a" * 64,
+        "vss_helper_sha256": "b" * 64,
+        "runtime_version": "1",
+        "source_commit": "a" * 40,
+        "installed_at_utc": "2026-09-29T00:00:00Z",
+        "authenticode": {"policy": "pinned_publisher", "thumbprint": "0123456789ABCDEF" * 2 + "01234567"},
+    }
+    kwargs = {"caller_sid": owner, "owner_sid": owner, "worker_sha256": "a" * 64, "vss_helper_sha256": "b" * 64}
+    assert _manifest_issues(manifest, **kwargs, expected_signer="0123456789ABCDEF" * 2 + "01234567") == []
+    assert _manifest_issues(manifest, **kwargs, expected_signer="0123456789ABCDEF" * 2 + "89ABCDEF")
+
+
+def test_runtime_file_acl_rejects_unprotected_acl_and_reparse_substitution():
+    from localvault.clone_runtime_security import _check_child_acl
+
+    row = {
+        "path": "C:\\ProgramData\\L-vault\\clone-state\\runtime-install.json",
+        "exists": True,
+        "is_directory": False,
+        "protected": False,
+        "reparse": False,
+        "owner_sid": "S-1-5-18",
+        "rules": [],
+    }
+    issues = []
+    _check_child_acl(row, issues)
+    assert any("unverified DACL" in issue for issue in issues)
+    row["protected"] = True
+    row["reparse"] = True
+    issues = []
+    _check_child_acl(row, issues)
+    assert any("reparse point" in issue for issue in issues)
+
+
+def test_runtime_preflight_allows_first_install_only_when_parent_trust_is_safe(monkeypatch, tmp_path: Path):
+    if os.name != "nt":
+        pytest.skip("The protected runtime audit is Windows-only")
+    from localvault import clone_runtime_security as security
+
+    caller = "S-1-5-21-111111111-222222222-333333333-1001"
+    full = security.FULL_CONTROL_MASK
+    read = security.READ_EXECUTE_MASK
+    parent_rows = [
+        {
+            "path": str(path), "exists": True, "caller_sid": caller, "is_directory": True,
+            "reparse": False, "protected": False, "owner_sid": security.ADMINISTRATORS_SID,
+            "rules": [
+                {"sid": security.SYSTEM_SID, "allow": True, "rights": full, "propagation": "None"},
+                {"sid": security.ADMINISTRATORS_SID, "allow": True, "rights": full, "propagation": "None"},
+                {"sid": security.USERS_SID, "allow": True, "rights": read, "propagation": "None"},
+            ],
+        }
+        for path in (security.SYSTEM_DRIVE_ROOT, security.PROGRAM_DATA)
+    ]
+    all_paths = [security.SYSTEM_DRIVE_ROOT, security.PROGRAM_DATA, security.APP_ROOT, security.RUNTIME_ROOT,
+                 security.RUNTIME_TEMP, security.STATE_ROOT, security.WORKER, security.VSS_HELPER,
+                 security.OWNER_SID, security.RUNTIME_MANIFEST, security.RUNTIME_TRANSACTION]
+    missing = [{"path": str(path), "exists": False} for path in all_paths[2:]]
+    monkeypatch.setattr(security, "_query_acl_facts", lambda _paths: parent_rows + missing)
+    monkeypatch.setattr(security, "OWNER_SID", tmp_path / "missing-owner.sid")
+    monkeypatch.setattr(security, "WORKER", tmp_path / "missing-worker.exe")
+    monkeypatch.setattr(security, "VSS_HELPER", tmp_path / "missing-helper.exe")
+    monkeypatch.setattr(security, "RUNTIME_MANIFEST", tmp_path / "missing-manifest.json")
+    report = security.verify_clone_runtime_security()
+    assert not report.ready
+    assert report.installable
+    assert report.evidence["caller_sid"] == caller
+
+    unsafe_child = {
+        "path": str(security.APP_ROOT), "exists": True, "caller_sid": caller, "is_directory": True,
+        "reparse": False, "protected": False, "owner_sid": security.ADMINISTRATORS_SID,
+        "rules": [{"sid": security.USERS_SID, "allow": True, "rights": full, "propagation": "None"}],
+    }
+    monkeypatch.setattr(security, "_query_acl_facts", lambda _paths: parent_rows + [unsafe_child, *missing[1:]])
+    refused = security.verify_clone_runtime_security()
+    assert not refused.ready
+    assert not refused.installable
+
+
+def test_layout_revalidation_ignores_mutable_drive_letters_but_catches_geometry_change():
+    from dataclasses import replace
+    from localvault.first_party_data_clone import _layout_digest
+
+    source = _known_disks()[0]
+    original = source.partitions[0]
+    remounted = replace(source, partitions=(replace(original, mount_point="Z:"),))
+    resized = replace(source, partitions=(replace(original, size_bytes=original.size_bytes - 512),))
+    assert _layout_digest(source) == _layout_digest(remounted)
+    assert _layout_digest(source) != _layout_digest(resized)
+
+
+def test_local_runtime_stage_requires_fixed_names_exact_hashes_and_current_checkout(monkeypatch, tmp_path: Path):
+    import hashlib
+    import json
+    from types import SimpleNamespace
+    from localvault import first_party_data_clone as clone
+
+    root = tmp_path.resolve()
+    installer = root / "tools" / "install_clone_worker.ps1"
+    bundle = root / ".build" / "clone-runtime-stage" / "bundle"
+    manifest_path = bundle / "build-manifest.json"
+    worker = bundle / "LocalVaultCloneWorker.exe"
+    helper = bundle / "LVaultVssSnapshot.exe"
+    installer.parent.mkdir()
+    bundle.mkdir(parents=True)
+    installer.write_text("script", encoding="utf-8")
+    worker.write_bytes(b"worker bytes")
+    helper.write_bytes(b"helper bytes")
+    commit = "a" * 40
+    installer_hash = clone._installer_sha256(installer)
+    monkeypatch.setattr(clone, "TRUSTED_INSTALLER_SHA256", installer_hash)
+    value = {
+        "schema": 2,
+        "status": "local-integrity-install-bootstrap",
+        "repository": str(root),
+        "commit": commit,
+        "worker_artifact": worker.name,
+        "vss_helper_artifact": helper.name,
+        "installer_sha256": installer_hash,
+        "worker_sha256": hashlib.sha256(worker.read_bytes()).hexdigest(),
+        "vss_helper_sha256": hashlib.sha256(helper.read_bytes()).hexdigest(),
+    }
+    manifest_path.write_text(json.dumps(value), encoding="utf-8")
+    monkeypatch.setattr(clone, "_clone_runtime_paths", lambda _root: (installer, bundle, manifest_path, worker, helper))
+    monkeypatch.setattr(clone, "_is_reparse_path", lambda _path: False)
+    monkeypatch.setattr(clone.shutil, "which", lambda _name: "git.exe")
+    dirty = {"value": ""}
+
+    def fake_git(args, **_kwargs):
+        if "rev-parse" in args:
+            return SimpleNamespace(returncode=0, stdout=commit + "\n")
+        if "status" in args:
+            return SimpleNamespace(returncode=0, stdout=dirty["value"])
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(clone.subprocess, "run", fake_git)
+
+    assert clone._runtime_stage_is_valid(root)
+    dirty["value"] = " M src/localvault/first_party_clone_worker.py\n"
+    assert not clone._runtime_stage_is_valid(root)
+    dirty["value"] = ""
+    worker.write_bytes(b"changed worker bytes")
+    assert not clone._runtime_stage_is_valid(root)
+    worker.write_bytes(b"worker bytes")
+    value["installer_sha256"] = "c" * 64
+    manifest_path.write_text(json.dumps(value), encoding="utf-8")
+    assert not clone._runtime_stage_is_valid(root)
+    value["installer_sha256"] = installer_hash
+    value["commit"] = "b" * 40
+    manifest_path.write_text(json.dumps(value), encoding="utf-8")
+    assert not clone._runtime_stage_is_valid(root)
+
+
+def test_application_pins_the_reviewed_first_use_installer_hash():
+    from localvault import first_party_data_clone as clone
+
+    installer = Path(__file__).resolve().parents[1] / "tools" / "install_clone_worker.ps1"
+    assert clone._installer_sha256(installer) == clone.TRUSTED_INSTALLER_SHA256
+
+
+def test_windows_runtime_stage_file_locks_prevent_replacement_but_not_new_children(tmp_path: Path):
+    if os.name != "nt":
+        pytest.skip("Windows CreateFile sharing semantics are required")
+    import ctypes
+    from localvault import first_party_data_clone as clone
+
+    directory = tmp_path / "bootstrap"
+    directory.mkdir()
+    artifact = directory / "installer.ps1"
+    artifact.write_text("pinned", encoding="utf-8")
+    file_handle = None
+    try:
+        file_handle = clone._open_runtime_stage_lock(artifact)
+        with pytest.raises(OSError):
+            os.replace(artifact, directory / "replacement.ps1")
+        # Windows directory handles do not prevent child creation. The build
+        # path relies on exact input-file locks and clean-checkout validation,
+        # not on a directory sharing mode that Windows does not provide.
+        (directory / "new_source.py").write_text("untrusted", encoding="utf-8")
+        with pytest.raises(PermissionError):
+            os.replace(directory, tmp_path / "renamed-bootstrap")
+    finally:
+        close = ctypes.windll.kernel32.CloseHandle
+        close.argtypes = [ctypes.c_void_p]
+        close.restype = ctypes.c_int
+        if file_handle is not None:
+            close(ctypes.c_void_p(file_handle))
+
+
+def test_clone_provider_automatically_installs_runtime_after_identity_preflight(monkeypatch, tmp_path: Path):
+    if os.name != "nt":
+        pytest.skip("The normal clone provider requires Windows")
+    from types import SimpleNamespace
+    from localvault import first_party_data_clone as clone
+
+    owner = "S-1-5-21-111111111-222222222-333333333-1001"
+    disks = _known_disks()
+    report = SimpleNamespace(ready=False, installable=True, evidence={"caller_sid": owner, "runtime_trust": "installation_required"})
+    calls = {"build": 0, "installer": [], "worker": [], "gate": []}
+
+    class Gate:
+        def close(self):
+            pass
+        def signal_cancel(self):
+            pass
+
+    class Store:
+        def __init__(self, *_args, **_kwargs):
+            pass
+        def load(self):
+            return None
+        def cancel_gate(self, job_id, *, create, owner_sid_override=None):
+            calls["gate"].append((job_id, create, owner_sid_override))
+            return Gate()
+
+    installer = tmp_path / "tools" / "install_clone_worker.ps1"
+    installer.parent.mkdir()
+    installer.write_text("installer placeholder", encoding="utf-8")
+    bundle = tmp_path / ".build" / "clone-runtime-stage" / "bundle"
+    paths_value = (installer, bundle, bundle / "build-manifest.json", bundle / "LocalVaultCloneWorker.exe", bundle / "LVaultVssSnapshot.exe")
+    monkeypatch.setattr(clone, "CloneJobStore", Store)
+    monkeypatch.setattr(clone, "_clone_runtime_paths", lambda _root: paths_value)
+    monkeypatch.setattr(clone, "_is_reparse_path", lambda _path: False)
+    monkeypatch.setattr(clone, "_protected_worker_path", lambda: None)
+    monkeypatch.setattr(clone, "windows_powershell_path", lambda: Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"))
+    monkeypatch.setattr(clone, "windows_system_directory", lambda: Path(r"C:\Windows\System32"))
+    monkeypatch.setattr(clone, "verify_clone_runtime_security", lambda: report)
+
+    provider = clone.FirstPartyDataCloneProvider(
+        tmp_path,
+        inventory=object(),
+        protected_path_resolver=object(),
+        worker_launcher=lambda *_args: calls["worker"].append(True),
+        installer_launcher=lambda root, job_id, sid: calls["installer"].append((root, job_id, sid)),
+        runtime_stage_preparer=lambda _root: calls.__setitem__("build", calls["build"] + 1),
+        runtime_security_verifier=lambda: report,
+    )
+    monkeypatch.setattr(provider, "_roles", lambda: (disks[0], disks[1], disks[2], disks))
+
+    result = provider.launch(confirmation="CLONE")
+    assert result["state"] == "starting"
+    assert calls["build"] == 1
+    assert len(calls["installer"]) == 1
+    assert re.fullmatch(r"[a-f0-9]{32}", calls["installer"][0][1])
+    assert calls["installer"][0][1] == calls["gate"][0][0]
+    assert calls["gate"][0][1:] == (True, owner)
+    assert calls["installer"][0][2] == owner
+    assert calls["worker"] == []
+
+
+def test_clone_provider_cancels_during_runtime_preparation_before_uac(monkeypatch, tmp_path: Path):
+    if os.name != "nt":
+        pytest.skip("The normal clone provider requires Windows")
+    from types import SimpleNamespace
+    from localvault import first_party_data_clone as clone
+
+    owner = "S-1-5-21-111111111-222222222-333333333-1001"
+    disks = _known_disks()
+    report = SimpleNamespace(ready=False, installable=True, evidence={"caller_sid": owner})
+    calls = {"installer": 0}
+
+    class Store:
+        def __init__(self, *_args, **_kwargs):
+            pass
+        def load(self):
+            return None
+        def cancel_gate(self, *_args, **_kwargs):
+            raise AssertionError("cancel before setup must not create the gate")
+
+    installer = tmp_path / "tools" / "install_clone_worker.ps1"
+    installer.parent.mkdir()
+    installer.write_text("installer placeholder", encoding="utf-8")
+    bundle = tmp_path / ".build" / "bundle"
+    monkeypatch.setattr(clone, "CloneJobStore", Store)
+    monkeypatch.setattr(clone, "_clone_runtime_paths", lambda _root: (installer, bundle, bundle / "m.json", bundle / "w.exe", bundle / "h.exe"))
+    monkeypatch.setattr(clone, "_is_reparse_path", lambda _path: False)
+    monkeypatch.setattr(clone, "_protected_worker_path", lambda: None)
+    monkeypatch.setattr(clone, "windows_powershell_path", lambda: Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"))
+    monkeypatch.setattr(clone, "windows_system_directory", lambda: Path(r"C:\Windows\System32"))
+
+    provider = clone.FirstPartyDataCloneProvider(
+        tmp_path,
+        worker_launcher=lambda *_args: None,
+        installer_launcher=lambda *_args: calls.__setitem__("installer", calls["installer"] + 1),
+        runtime_security_verifier=lambda: report,
+    )
+    monkeypatch.setattr(provider, "_roles", lambda: (disks[0], disks[1], disks[2], disks))
+
+    def cancel_during_build(_root):
+        assert provider.cancel()["state"] == "cancelling"
+
+    provider.runtime_stage_preparer = cancel_during_build
+    result = provider.launch(confirmation="CLONE")
+    assert result["state"] == "cancelled"
+    assert calls["installer"] == 0
 
 
 def test_cancel_gate_uses_random_job_scoped_name_and_owner_only_acl():

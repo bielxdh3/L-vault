@@ -33,7 +33,7 @@
   <h2 id="clone-details-heading">Clone details</h2>
   <dl>
     <dt>Mode</dt><dd>{{ clone_mode }}</dd>
-    <dt>Backend</dt><dd>Windows inbox VSS, Storage, and NTFS file-copy facilities</dd>
+    <dt>Backend</dt><dd>L-vault managed</dd>
     <dt>Bootable</dt><dd>No · this is a data clone</dd>
   </dl>
   <p id="readiness" class="muted" role="status">{{ readiness_message }}</p>
@@ -74,9 +74,9 @@
 
 <details class="panel-block">
   <summary>Data included and excluded</summary>
-  <p>L-vault copies source files with Windows backup semantics and verifies the target file tree plus selected content hashes.</p>
-  <p>Runtime exclusions: pagefile.sys, hiberfil.sys, swapfile.sys, and VSS system metadata. Junctions and mount-point destinations are not traversed; unsupported reparse points fail closed.</p>
-  <p>Boot partitions and historical ESP entries are not copied. The target is a data volume and is not bootable.</p>
+  <p>L-vault copies the source files and checks the finished copy. The runtime-only files pagefile.sys, hiberfil.sys, and swapfile.sys are left out and reported in the result.</p>
+  <p>Junctions and mount points are not followed into other disks. Unsupported reparse points are not followed and stop the clone safely.</p>
+  <p>Boot partitions are not copied. The target is a data volume and is not bootable.</p>
 </details>
 
 <script>
@@ -90,7 +90,7 @@
   const cancellableStates = new Set(['starting', 'precheck', 'snapshot', 'copy', 'verify', 'cancelling']);
   const initiallyReady = {{ ready|tojson }};
   const labels = {
-    PRECHECK: 'Checking disks', SNAPSHOT: 'Preparing source snapshot', TARGET_PREPARE: 'Preparing target',
+    PRECHECK: 'Checking disks', SNAPSHOT: 'Preparing Windows data', TARGET_PREPARE: 'Preparing target',
     COPY: 'Copying data', VERIFY: 'Verifying copy', CLEANUP: 'Cleaning up', COMPLETE: 'Complete'
   };
   const formatBytes = value => {
