@@ -17,7 +17,7 @@ from localvault.extract import safe_extract_zip
 from localvault.gmail_takeout import ingest_gmail_takeout
 from localvault.locks import BackupLock
 from localvault.photos import ingest_photos_takeout
-from localvault.recovery import _write_fixture_zip, run_recovery_test
+from localvault.recovery import _restore_matches_index, _write_fixture_zip, run_recovery_test
 from localvault.reports import RunReport, mark_stale_running_runs, start_run
 from localvault.restore import execute_restore, plan_restore
 from localvault.utils import atomic_copy, sha256_file, temp_path_for
@@ -43,6 +43,42 @@ def test_recovery_drill_is_repeatable_and_sources_are_synthetic():
 
     assert first["status"] == second["status"] == "passed"
     assert first["restore"]["copied"] == second["restore"]["copied"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows short-name alias behavior only applies on Windows")
+def test_recovery_index_containment_accepts_short_names_without_widening_root(tmp_path: Path):
+    import ctypes
+
+    p, source = _indexed_fixture(tmp_path)
+    get_short_path_name = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+    get_short_path_name.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_wchar), ctypes.c_uint32]
+    get_short_path_name.restype = ctypes.c_uint32
+    buffer = ctypes.create_unicode_buffer(32768)
+    copied = get_short_path_name(str(source), buffer, len(buffer))
+    assert copied > 0
+    short_source = Path(buffer.value)
+    if str(short_source).casefold() == str(source.resolve()).casefold():
+        pytest.skip("This Windows volume does not provide a distinct 8.3 alias")
+
+    destination = tmp_path / "restore"
+    restored = destination / source.relative_to((p.root / "vault").resolve())
+    restored.parent.mkdir(parents=True)
+    restored.write_bytes(source.read_bytes())
+    with db.connect(p.db) as conn:
+        conn.execute("UPDATE files SET path = ?", (str(short_source),))
+
+    assert _restore_matches_index(p, destination) is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path alias behavior only applies on Windows")
+def test_recovery_index_rejects_file_outside_vault_even_when_resolved(tmp_path: Path):
+    p, source = _indexed_fixture(tmp_path)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(source.read_bytes())
+    with db.connect(p.db) as conn:
+        conn.execute("UPDATE files SET path = ?", (str(outside),))
+
+    assert _restore_matches_index(p, tmp_path / "restore") is False
 
 
 def test_duplicate_synthetic_source_is_skipped_without_new_index_rows(tmp_path: Path):

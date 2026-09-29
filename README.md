@@ -196,7 +196,7 @@ O agendador diario padrao:
 - Daily Backup: 02:00; Gmail API, sync de fontes, importacao de Takeout e relatorio de duplicados
 - Weekly Takeout Import: 03:00 aos domingos; importa Takeout reconhecido
 - Verify Weekly: 04:00 aos domingos; verifica o cofre
-- Bootable Disk Clone: 03:00 quando explicitamente habilitado; permanece fail-closed e fora do catch-up comum
+- Bootable Disk Clone (tarefa legada): 03:00 quando explicitamente habilitada; permanece fail-closed e não executa o novo fluxo normal DiskGenius
 
 Se o PC estiver desligado no horario marcado, as tarefas comuns podem seguir o comportamento de catch-up existente. A tarefa de clone e diferente: ela nao usa `StartWhenAvailable` e nunca inicia durante o dia.
 
@@ -210,7 +210,15 @@ python -m localvault schedule-install --root <VAULT_ROOT>
 
 `health-check --json` fornece metricas limitadas de espaco, indice, crescimento, duplicatas, erros, locks, temporarios e execucoes. `recovery-test` usa somente dados sinteticos temporarios e nao representa clone fisico.
 
-## Clone offline open-source do disco
+## Clone do sistema Windows
+
+A ação **Clone do sistema** usa o DiskGenius 6.1.1 instalado localmente em **System Migration · Hot Migration**. L-vault confere as identidades persistentes do Kingston autorizado, do Seagate autorizado e do HGST protegido, abre o DiskGenius e pede que o proprietário confirme visualmente a seleção antes do aviso de sobrescrita. O caminho normal não exige USB, menu de firmware nem comandos Linux.
+
+Hot Migration é descrito pelo fornecedor como operação por snapshot; a documentação pública consultada não identifica os VSS writers usados. A interface do DiskGenius não é observada por automação neste fluxo: o proprietário escolhe o Seagate no assistente e L-vault refaz a resolução dos discos, volumes e números atuais antes da confirmação destrutiva. Depois da conclusão indicada pelo DiskGenius, L-vault verifica a estrutura e os arquivos EFI/BCD sem iniciar o Windows do destino. O boot físico permanece não testado.
+
+Veja [a arquitetura e os limites do fluxo DiskGenius](docs/diskgenius-normal-clone.md). O protótipo offline Clonezilla continua documentado como histórico avançado em [docs/disk-clone-offline.md](docs/disk-clone-offline.md); não é o caminho normal da interface.
+
+## Histórico: protótipo Clonezilla offline
 
 O L-vault nao exige software pago. O Windows prepara um pacote de job assinado; uma futura sessao Clonezilla Live executara a clonagem somente com a origem desmontada e fora do Windows. O status e os comandos de clone permanecem disponiveis, mas a execucao fisica continua gated: nenhum boot, reboot ou escrita em disco e autorizado nesta fase. O clone físico permanece desativado por padrão e fail-closed.
 
@@ -228,13 +236,13 @@ O comando acima usa somente inventario e pacotes temporarios falsos. A fase `fak
 
 O handoff escolhido e um USB Clonezilla Live dedicado com selecao manual de boot. Ele evita alterar permanentemente a ordem de boot e exige uma acao humana; nenhum BCD, UEFI NVRAM, BootNext, USB, particao ou PXE foi alterado. A fase atual separa a verificacao `gpgv` oficial do DRBL da atestacao local L-vault, com o fingerprint DRBL `54C0821A48715DAFD61BFCAF667857D045599AFD` e o SHA-256 oficial `482518ea32af3b82ed15d09e2e7714806775deb62aeed81491e534f6cc6bbc47` do ISO `clonezilla-live-3.3.3-15-amd64.iso` fixados no contrato de producao. Esses valores nao podem ser redefinidos por CLI, configuracao, manifesto ou construtor; overrides de digest existem somente na fabrica explicita de testes sinteticos. A atestacao local L-vault permanece um trust root separado e nunca e proveniencia oficial Clonezilla/DRBL. O binding criptografico entre ISO verificado e inventario completo da arvore extraida, a inspeÃ§Ã£o estatica de ferramentas sem execucao, o canal de retorno virtual duravel e o runner virtual somente-simulacao continuam ativos. Como nao havia ISO oficial, arvore extraida ou stack de VM segura presente, o status honesto continua `offline_runtime_blocked`; nenhum boot de VM ocorreu.
 
-O canal virtual usa somente diretorios temporarios e dispositivos sinteticos. Os estados `pending`, `running`, `result`, `failed` e `consumed` sao monotÃ´nicos; publicacao parcial, resultado duplicado, conflito, replay, truncamento ou crash nunca vira sucesso. A UI continua afirmando que nenhum clone fisico foi executado, nenhum boot fisico foi testado, a execucao real esta desativada, e validacao estatica/virtual nao equivale a validacao no hardware do usuario.
+O canal virtual do protótipo antigo usa somente diretórios temporários e dispositivos sintéticos. Seus estados monotônicos impedem que publicação parcial, replay, truncamento ou crash virem sucesso. Essas afirmações descrevem apenas o protótipo Clonezilla; a interface atual oferece o fluxo DiskGenius assistido descrito acima.
 
-AOMEI e DiskGenius permanecem alternativas historicas rejeitadas, nao recomendacoes. Nao houve inscricao real, selecao de disco, clone, formatacao, reparticionamento, `Set-Disk`, montagem, desmontagem, provider launch, tarefa destrutiva, reboot ou boot test.
+AOMEI e Clonezilla descrevem experimentos/prototipos anteriores. DiskGenius 6.1.1 é o backend do caminho normal atual; os comandos offline descritos nesta seção não fazem parte desse fluxo.
 
 Fontes oficiais e aplicabilidade estao em [`docs/disk-clone-offline.md`](docs/disk-clone-offline.md).
 
-### Validacao estatica do artefato real
+### Histórico do protótipo: validação estática do artefato Clonezilla
 
 O fluxo separado de artefato real baixa ou revalida somente o Clonezilla Live `3.3.3-15` amd64 fixado, verifica `CHECKSUMS.TXT` e sua assinatura DRBL com `54C0821A48715DAFD61BFCAF667857D045599AFD`, e confirma o ISO `clonezilla-live-3.3.3-15-amd64.iso` pelo SHA-256 `482518ea32af3b82ed15d09e2e7714806775deb62aeed81491e534f6cc6bbc47`. O cache privado fica fora do repositorio; o modo offline apenas revalida arquivos existentes.
 

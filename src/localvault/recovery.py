@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ctypes
 import email.policy
 import json
+import os
 import tempfile
 from email.message import EmailMessage
 from pathlib import Path
@@ -93,9 +95,39 @@ def _write_fixture_zip(path: Path, marker: str = "synthetic") -> Path:
 def _restore_matches_index(p, destination: Path) -> bool:
     with db.connect(p.db) as conn:
         rows = conn.execute("SELECT path,sha256,size FROM files ORDER BY id").fetchall()
+    try:
+        vault_root = _canonical_existing_path(p.root / "vault")
+    except (OSError, RuntimeError):
+        return False
     for row in rows:
-        source = Path(row["path"])
-        target = destination / source.relative_to((p.root / "vault").resolve())
+        try:
+            source = _canonical_existing_path(Path(row["path"]))
+            relative = source.relative_to(vault_root)
+        except (OSError, RuntimeError, ValueError):
+            return False
+        target = destination / relative
         if not target.is_file() or target.stat().st_size != int(row["size"] or 0) or sha256_file(target) != row["sha256"]:
             return False
     return bool(rows)
+
+
+def _canonical_existing_path(path: Path) -> Path:
+    """Resolve a real path and normalize Windows 8.3 aliases before containment checks."""
+    resolved = path.resolve(strict=True)
+    if os.name != "nt":
+        return resolved
+
+    get_long_path_name = ctypes.WinDLL("kernel32", use_last_error=True).GetLongPathNameW
+    get_long_path_name.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_wchar), ctypes.c_uint32]
+    get_long_path_name.restype = ctypes.c_uint32
+    value = str(resolved)
+    buffer_size = 260
+    for _ in range(8):
+        buffer = ctypes.create_unicode_buffer(buffer_size)
+        copied = get_long_path_name(value, buffer, buffer_size)
+        if copied == 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if copied < buffer_size:
+            return Path(buffer.value)
+        buffer_size = copied + 1
+    raise OSError("Windows returned an overlong path while resolving a recovery fixture")

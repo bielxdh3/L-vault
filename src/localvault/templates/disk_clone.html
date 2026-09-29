@@ -1,172 +1,150 @@
-{% extends "base.html" %}{% block title %}Clone físico do disco - LocalVault{% endblock %}
+{% extends "base.html" %}{% block title %}Clone do sistema - LocalVault{% endblock %}
 {% block content %}
 <section class="page-head">
   <div>
-    <h1>Clone físico do disco</h1>
-    <p class="muted">Cópia completa para recuperação do disco de sistema, separada da réplica de arquivos.</p>
+    <h1>Clone do sistema</h1>
+    <p class="muted">Migre o Windows atual para o Seagate usando DiskGenius. O Kingston continua como inicialização padrão.</p>
   </div>
-  <span class="badge">{{ "ATIVADO" if enabled else "DESATIVADO" }}</span>
+  <span class="badge">DiskGenius {{ capabilities.version if capabilities else "6.1.1" }}</span>
+</section>
+
+{% if action_error %}
+<section class="notice" role="alert"><strong>Operação bloqueada</strong><span>{{ action_error }}</span></section>
+{% endif %}
+
+{% if capabilities and not capabilities.available %}
+<section class="notice" role="alert"><strong>DiskGenius indisponível</strong><span>{{ capabilities.blocker }}</span></section>
+{% elif not capabilities %}
+<section class="notice" role="alert"><strong>DiskGenius indisponível</strong><span>Não foi possível validar o executável DiskGenius.</span></section>
+{% endif %}
+
+<section class="control-grid">
+  <article>
+    <h2>Origem · somente leitura</h2>
+    <p><strong>{{ source_role.model }}</strong></p>
+    <p class="muted">{{ "****" ~ source_role.serial_suffix }} · {{ "{:,}".format(source_role.size_bytes) }} bytes<br>Windows atual · Kingston NVMe</p>
+  </article>
+  <article>
+    <h2>Destino · será apagado</h2>
+    <p><strong>{{ target_role.model }}</strong></p>
+    <p class="muted">****{{ target_role.serial_suffix }} · {{ "{:,}".format(target_role.size_bytes) }} bytes<br><strong>Todos os dados do Seagate serão substituídos.</strong></p>
+  </article>
+  <article>
+    <h2>Protegido · excluído</h2>
+    <p><strong>{{ protected_role.model }}</strong></p>
+    <p class="muted">****{{ protected_role.serial_suffix }} · L-vault<br>L-vault exclui este disco do mapeamento; não o selecione no DiskGenius.</p>
+  </article>
+  <article>
+    <h2>Backend</h2>
+    <p><strong>DiskGenius 6.1.1</strong></p>
+    <p class="muted">{{ clone_mode }}<br>Sem reinício no modo Hot Migration. Inicialização do Kingston permanece padrão.</p>
+  </article>
 </section>
 
 <section class="notice">
   <div>
-    <strong>Limite de segurança atual</strong>
-    <span>Preflight e simulação são não destrutivos. Um clone físico real só pode existir após autorização explícita, revalidação offline da origem/destino e runtime Clonezilla confiável.</span>
+    <strong>Antes de apagar o Seagate</strong>
+    <span>L-vault confere as identidades persistentes e os volumes atuais. DiskGenius exige que você aceite o aviso final de sobrescrita depois de conferir a seleção.</span>
   </div>
 </section>
 
-<section class="control-grid">
-  <article>
-    <h2>Origem</h2>
-    <p><strong>{{ source or "Não inscrita" }}</strong></p>
-    <p class="muted">Disco de sistema. Nunca é escolhido apenas por letra, número efêmero ou capacidade.</p>
-  </article>
-  <article>
-    <h2>Destino</h2>
-    <p><strong>{{ target or "Não inscrito" }}</strong></p>
-    <p class="muted">Quando um clone real for autorizado, este disco será sobrescrito. A identidade é revalidada antes da execução.</p>
-  </article>
-  <article>
-    <h2>Prontidão</h2>
-    <p><span class="badge">{{ current_state_label }}</span></p>
-    <p class="muted">Runtime offline: {{ offline_runtime_state }}<br>{{ offline_runtime_reason }}</p>
-  </article>
-  <article>
-    <h2>Agendamento</h2>
-    <p><strong>{{ interval_days }} dia(s)</strong></p>
-    <p class="muted">Próximo vencimento UTC: {{ next_due_at }}<br>Janela local: {{ window_start }}–{{ window_end }}.</p>
-  </article>
-</section>
-
-<section class="panel-block" aria-labelledby="enrollment-heading">
-  <div class="page-head compact-head">
-    <div>
-      <h2 id="enrollment-heading">Inscrição de origem e destino</h2>
-      <p class="muted">Atualize a lista antes de escolher. O número é apenas momentâneo; a confirmação usa identidade persistente e capacidade exata.</p>
-    </div>
-    <a class="soft-button" href="/disk-clone?refresh=1">Atualizar discos</a>
-  </div>
-  {% if disk_refresh_error %}
-  <div class="notice" role="alert">
-    <strong>Atualização indisponível</strong>
-    <span>{{ disk_refresh_error }} <a href="/disk-clone?refresh=1">Tentar novamente</a></span>
-  </div>
-  {% endif %}
-  {% if disk_candidates %}
-  <div style="overflow:auto" role="region" aria-label="Discos encontrados" tabindex="0">
-  <table>
-    <caption class="sr-only">Discos encontrados para inscrição</caption>
-    <tr><th>Função</th><th>Identidade exibida</th><th>Capacidade aproximada</th><th>Transporte</th><th>Partições</th><th>Estado</th></tr>
-    {% for disk in disk_candidates %}
-    <tr>
-      <td>{% if disk.is_system %}<strong>Origem · sistema atual</strong>{% else %}Destino possível{% endif %}</td>
-      <td>{{ disk.label }}</td>
-      <td>{{ disk.capacity_label }}</td>
-      <td>{{ disk.bus_type }}</td>
-      <td>{{ disk.partition_style }}</td>
-      <td>{{ "online" if disk.online else "offline" }} · {{ "somente leitura" if disk.read_only else "gravável" }} · {{ "montado" if disk.mounted else "desmontado" }}</td>
-    </tr>
-    {% endfor %}
-  </table>
-  </div>
-  <form method="post" action="/disk-clone/enroll" class="filter-panel">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <label>Destino
-      <select name="target_number" required>
-        <option value="">Selecione um disco</option>
-        {% for disk in disk_candidates %}
-        <option value="{{ disk.number }}"{% if disk.is_system %} disabled{% endif %}>{{ disk.label }} · {{ disk.bus_type }} · {{ disk.partition_style }}{% if disk.is_system %} · sistema atual{% endif %}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Confirmação exata do destino
-      <input name="confirmation" autocomplete="off" placeholder="APAGAR modelo capacidade ****1234" required>
-    </label>
-    <button type="submit">Confirmar inscrição</button>
-  </form>
+{% set state = session.state if session else "ready" %}
+{% if state == "ready" or state == "verified_structurally_bootable" or state == "cancelled_before_overwrite" %}
+<section class="panel-block" aria-labelledby="clone-action-heading">
+  <h2 id="clone-action-heading">{{ "Clonagem verificada" if state == "verified_structurally_bootable" else "Pronto para iniciar" }}</h2>
+  {% if state == "verified_structurally_bootable" %}
+  <p>{{ session.verification.evidence }}</p>
   {% else %}
-  <p class="empty-state">Nenhum candidato foi carregado. Use “Atualizar discos” para solicitar uma leitura somente leitura do inventário.</p>
+  <p class="muted">A conferência final dos discos será feita imediatamente antes de abrir o DiskGenius.</p>
+  {% endif %}
+  <form method="post" action="/disk-clone/launch">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="primary-action" type="submit"{% if not capabilities or not capabilities.available %} disabled{% endif %}>Clone now</button>
+  </form>
+</section>
+{% elif state == "launch_unknown" %}
+<section class="panel-block" aria-labelledby="diskgenius-unknown-heading">
+  <h2 id="diskgenius-unknown-heading">Abertura do DiskGenius não confirmada</h2>
+  <p>Não inicie a migração nesta sessão. Se o DiskGenius abriu, feche-o sem começar a gravação no Seagate; depois registre o cancelamento seguro abaixo.</p>
+  <form method="post" action="/disk-clone/cancel-before-overwrite">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="session_id" value="{{ session.session_id }}">
+    <label class="checkbox-label"><input type="checkbox" name="confirmed_not_started" required> Fechei o DiskGenius sem iniciar a gravação no Seagate.</label>
+    <button type="submit">Registrar cancelamento seguro</button>
+  </form>
+</section>
+{% elif state in ["launched", "ready_to_confirm"] %}
+<section class="panel-block" aria-labelledby="diskgenius-steps-heading">
+  <h2 id="diskgenius-steps-heading">{{ "Valide a seleção antes da sobrescrita" if state == "launched" else ("Revalidação expirada" if session.revalidation_expired else "Revalidação concluída") }}</h2>
+  <p><strong>Origem atual:</strong> {{ session.source.model }} · {{ session.source.masked_serial }} · Disco {{ session.source.disk_number }} · {{ "{:,}".format(session.source.size_bytes) }} bytes{% if session.source.volumes %} · {{ session.source.volumes | join(", ") }}{% endif %} · BitLocker: {{ session.source.bitlocker_state or "unknown" }}</p>
+  {% if session.source.bitlocker_state == "unknown" %}
+  <section class="notice" role="alert"><strong>BitLocker não foi determinado</strong><span>Confirme o estado de criptografia do Kingston no Windows antes de iniciar. O provedor não conseguiu consultar essa informação nesta sessão.</span></section>
+  {% elif session.source.bitlocker_state and session.source.bitlocker_state != "FullyDecrypted:Off" %}
+  <section class="notice"><strong>Origem com estado BitLocker: {{ session.source.bitlocker_state }}</strong><span>Deixe a chave de recuperação do Windows disponível para a primeira inicialização do clone.</span></section>
+  {% endif %}
+  <p><strong>Destino autorizado:</strong> {{ session.target.model }} · {{ session.target.masked_serial }} · Disco {{ session.target.disk_number }} · {{ "{:,}".format(session.target.size_bytes) }} bytes{% if session.target.volumes %} · {{ session.target.volumes | join(", ") }}{% endif %}</p>
+  <p><strong>Protegido:</strong> {{ session.protected.model }} · {{ session.protected.masked_serial }} · Disco {{ session.protected.disk_number }}{% if session.protected.volumes %} · {{ session.protected.volumes | join(", ") }}{% endif %}</p>
+  <ol>
+    <li>No DiskGenius, abra <strong>Tools → System Migration</strong> e selecione somente <strong>{{ target_role.model }}</strong> como destino. Não selecione o HGST protegido.</li>
+    <li>Deixe a seleção padrão de partições do sistema e de boot. No Kingston, a ESP ativa auditada é a partição 2 (100 MiB); as partições 3–5 são históricas e não devem ser selecionadas. Inclua a partição Windows e não escolha outro disco.</li>
+    {% if state == "launched" %}
+    <li>Volte aqui antes de clicar em <strong>Start</strong>. Confirme visualmente a origem, o destino, o número de disco e a capacidade mostrados acima.</li>
+    {% elif session.revalidation_expired %}
+    <li><strong>A janela de dois minutos expirou.</strong> Se ainda não iniciou, não aceite o aviso de sobrescrita: feche o DiskGenius sem gravar e registre o cancelamento seguro para iniciar uma nova sessão. Se a migração já começou, aguarde o resultado; não a reinicie.</li>
+    {% else %}
+    <li>Esta revalidação expira em dois minutos: {{ session.overwrite_revalidation_expires_at }}.</li>
+    {% endif %}
+    {% if state == "launched" %}<li>Deixe desmarcada qualquer opção para alterar a sequência de boot. Depois da revalidação abaixo, clique em <strong>Start</strong>, aceite o aviso final que apaga o destino e escolha <strong>Hot Migration</strong>.</li>{% elif not session.revalidation_expired %}<li>Deixe desmarcada qualquer opção para alterar a sequência de boot. Clique em <strong>Start</strong>, aceite o aviso final que apaga o destino e escolha <strong>Hot Migration</strong>.</li>{% endif %}
+  </ol>
+    {% if state == "launched" %}
+  <form method="post" action="/disk-clone/revalidate" class="filter-panel">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="session_id" value="{{ session.session_id }}">
+    <label class="checkbox-label"><input type="checkbox" name="selection_verified" required> Conferi no DiskGenius a origem Kingston e o destino Seagate indicados acima.</label>
+    <button type="submit">Revalidar identidade do destino</button>
+  </form>
+  {% endif %}
+  <p class="muted">O progresso e o resultado aparecem no DiskGenius. L-vault não trata a abertura ou o fechamento da janela como conclusão.</p>
+  <div class="quick-actions">
+    {% if state == "ready_to_confirm" %}
+    <form method="post" action="/disk-clone/verify">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="session_id" value="{{ session.session_id }}">
+      <label class="checkbox-label"><input type="checkbox" name="confirmed_complete" required> O DiskGenius informou que a migração foi concluída com sucesso, e fechei o DiskGenius.</label>
+      <button type="submit">Verificar resultado</button>
+    </form>
+    {% endif %}
+    {% if state in ["launched", "ready_to_confirm"] %}
+    <form method="post" action="/disk-clone/cancel-before-overwrite">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="session_id" value="{{ session.session_id }}">
+      <label class="checkbox-label"><input type="checkbox" name="confirmed_not_started" required> Fechei o DiskGenius sem iniciar a gravação no Seagate.</label>
+      <button type="submit">Registrar cancelamento seguro</button>
+    </form>
+    {% endif %}
+  </div>
+</section>
+{% elif state == "failed_partial" %}
+<section class="notice" role="alert"><strong>Alvo pode ter sido parcialmente sobrescrito</strong><span>{{ session.verification.evidence if session.verification else "Verifique o Seagate antes de qualquer nova tentativa. L-vault não repetirá o clone automaticamente." }}</span></section>
+{% elif state == "blocked_audit" %}
+<section class="notice" role="alert"><strong>Auditoria local inválida</strong><span>A sessão foi bloqueada. Não inicie uma nova operação até revisar o estado DiskGenius.</span></section>
+{% else %}
+<section class="notice"><strong>Estado da sessão:</strong><span>{{ state }}</span></section>
+{% endif %}
+
+<section class="panel-block" aria-labelledby="bootability-heading">
+  <h2 id="bootability-heading">Verificação de boot</h2>
+  <p class="muted">L-vault confere GPT, ESP, Windows, arquivos de boot e BCD no Seagate. Essa verificação não inicia o Windows clonado. WinRE estava desabilitado na origem.</p>
+  {% if session and session.verification %}
+  <p><strong>Resultado:</strong> {{ session.verification.bootability }} · boot físico {% if session.verification.boot_tested %}testado{% else %}não testado{% endif %}</p>
   {% endif %}
 </section>
 
-<section class="panel-block">
-  <h2>Estado da cadeia offline</h2>
-  <p><strong>Preparação Windows:</strong> {{ windows_preparation_provider }}</p>
-  <p><strong>Motor offline:</strong> {{ offline_engine }} {{ offline_engine_version }}</p>
-  <p><strong>Inscrição:</strong> {{ enrollment }}</p>
-  <p><strong>Handoff de boot:</strong> {{ "configurado" if offline_handoff.configured else "não configurado" }}</p>
-  <p><strong>Boot test:</strong> {{ boot_test }}</p>
-  {% if provider_blocker %}<p class="muted">{{ provider_blocker }}</p>{% endif %}
-</section>
-
-<h2>Ações seguras</h2>
-<section class="quick-actions">
-  <form method="post" action="/disk-clone/action?action=preflight">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <button type="submit">Verificar prontidão</button>
-  </form>
-  <form method="post" action="/disk-clone/action?action=simulate">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <button type="submit">Simular fluxo completo</button>
-  </form>
-</section>
-<p class="muted">Essas ações não executam Clonezilla contra um disco real.</p>
-
-<section class="control-grid">
-  <article>
-    <h2>Progresso</h2>
-    {% if progress %}
-      <p><span class="badge">{{ progress.progress_type }}</span> {{ progress.percent if progress.percent is not none else "indisponível" }}{% if progress.percent is not none %}%{% endif %}</p>
-      <p class="muted">Fase: {{ progress.phase or "desconhecida" }}<br>Bytes: {{ progress.copied_bytes or "indisponível" }}<br>Velocidade: {{ progress.speed_bytes or "indisponível" }}<br>ETA: {{ progress.eta_seconds or "indisponível" }}</p>
-    {% else %}
-      <p class="muted">Nenhum sinal de progresso persistido.</p>
-    {% endif %}
-  </article>
-  <article>
-    <h2>Verificação</h2>
-    <p class="muted">Sucesso exige resultado assinado e verificação estrutural. Isso não equivale a um boot test.</p>
-  </article>
-  <article>
-    <h2>Destino offline</h2>
-    <p class="muted">A política atual exige que o destino volte ao estado offline após uma conclusão válida.</p>
-  </article>
-  <article>
-    <h2>Bloqueios</h2>
-    <p class="muted">{{ offline_handoff.blockers | join(" ") if offline_handoff.blockers else "Nenhum bloqueio de handoff informado." }}</p>
-  </article>
-</section>
-
-<h2>Configuração segura</h2>
-<form class="filter-panel" method="post" action="/disk-clone/settings">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <input type="hidden" name="enabled" value="false">
-  <label class="checkbox-label"><input type="checkbox" name="enabled" value="true"{% if enabled %} checked{% endif %}> Habilitar agendamento</label>
-  <label>Intervalo (1–3650 dias)
-    <input type="number" min="1" max="3650" name="interval_days" value="{{ interval_days }}">
-  </label>
-  <button type="submit">Salvar intervalo</button>
-</form>
-<p class="muted">A inscrição de origem/destino continua exigindo identidade persistente forte. Nenhuma seleção por número efêmero vira autorização destrutiva por si só.</p>
-
-<h2>Histórico recente</h2>
-{% if recent_runs %}
-<div style="overflow:auto" role="region" aria-label="Histórico do clone" tabindex="0">
-<table>
-  <tr><th>Run</th><th>Estado</th><th>Início</th><th>Fim</th><th>Destino offline</th><th>Verificação</th><th>Motivo</th></tr>
-  {% for run in recent_runs %}
-  <tr>
-    <td>{{ run.run_id }}</td>
-    <td><span class="badge">{{ run.state }}</span></td>
-    <td>{{ run.started_at }}</td>
-    <td>{{ run.finished_at or "-" }}</td>
-    <td>{{ run.target_offline_result or "-" }}</td>
-    <td>{{ run.verification_status or "-" }}</td>
-    <td>{{ run.reason or "" }}{% if run.cleanup_failure_reason %}<br><strong>Limpeza:</strong> {{ run.cleanup_failure_reason }}{% endif %}</td>
-  </tr>
-  {% endfor %}
-</table>
-</div>
-{% else %}
-<p class="empty-state">Nenhuma execução registrada.</p>
-{% endif %}
+<details class="panel-block">
+  <summary>Detalhes do backend</summary>
+  <p><strong>Modo:</strong> {{ clone_mode }}</p>
+  <p><strong>Licença:</strong> System Migration é documentado pela DiskGenius na edição Free; a edição instalada não é publicada nos metadados locais.</p>
+  <p><strong>Consistência:</strong> Hot Migration usa o mecanismo de snapshot da DiskGenius; detalhes de VSS Writer não são expostos pela interface. Estado BitLocker vem do inventário Windows e pode permanecer desconhecido sem acesso suficiente.</p>
+  <p><strong>Limite da automação:</strong> L-vault não lê as linhas selecionadas no assistente DiskGenius. Você confirma visualmente a seleção; L-vault revalida identidades, números de disco e volumes antes da confirmação destrutiva.</p>
+</details>
 {% endblock %}
