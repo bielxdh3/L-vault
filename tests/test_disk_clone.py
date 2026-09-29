@@ -34,6 +34,7 @@ from localvault.disk_clone import (
     VerificationResult,
     WindowsStructuralVerifier,
     clone_is_due,
+    windows_powershell_environment,
     _source_paths,
     protected_path_conflicts,
     validate_disk_clone_config,
@@ -56,6 +57,17 @@ from localvault.health import health_snapshot
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+def test_windows_powershell_environment_excludes_incompatible_parent_module_paths(monkeypatch):
+    executable = Path("WindowsPowerShell") / "v1.0" / "powershell.exe"
+    monkeypatch.setattr("localvault.disk_clone.windows_powershell_path", lambda: executable)
+    monkeypatch.setenv("PSModulePath", "incompatible-parent-module-path")
+
+    child_environment = windows_powershell_environment()
+
+    assert child_environment["PSModulePath"] == str(executable.parent / "Modules")
+    assert os.environ["PSModulePath"] == "incompatible-parent-module-path"
 
 
 def _disk(number: int, serial: str, *, system: bool = False, size: int = 1000, mounts=()):
