@@ -37,6 +37,22 @@ ENROLLMENT_FILE = "disk_clone_enrollment.json"
 ENROLLMENT_SECRET_FILE = "disk_clone_enrollment.secret"
 ENROLLMENT_SCHEMA = 2
 MASKED_SERIAL = "(serial oculto)"
+
+
+def windows_powershell_path() -> Path:
+    """Resolve the inbox Windows PowerShell executable without consulting PATH."""
+    if os.name != "nt":
+        return Path("powershell")
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise OSError("Could not resolve the Windows system directory")
+    executable = Path(buffer.value) / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    if not executable.is_file():
+        raise OSError("Inbox Windows PowerShell was not found in the system directory")
+    return executable
+
+
 TERMINAL_STATES = {
     "success",
     "skipped_not_due",
@@ -136,14 +152,18 @@ class PartitionIdentity:
     mount_point: str = ""
     is_active: bool = False
     is_os_volume: bool = False
+    offset_bytes: int = 0
+    gpt_partition_id: str = ""
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "PartitionIdentity":
         return cls(
             number=_safe_int(value.get("number")),
+            offset_bytes=_safe_int(value.get("offset_bytes")),
             kind=_clean(value.get("kind") or value.get("type")),
             size_bytes=_safe_int(value.get("size_bytes") or value.get("size")),
             gpt_type=_clean(value.get("gpt_type")),
+            gpt_partition_id=_clean(value.get("gpt_partition_id")),
             filesystem=_clean(value.get("filesystem")),
             is_system=_safe_bool(value.get("is_system")),
             is_boot=_safe_bool(value.get("is_boot")),
@@ -208,6 +228,7 @@ class DiskIdentity:
     mount_points: tuple[str, ...] = ()
     partitions: tuple[PartitionIdentity, ...] = ()
     signature: str = ""
+    disk_guid: str = ""
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "DiskIdentity":
@@ -238,6 +259,7 @@ class DiskIdentity:
             is_virtual=_safe_bool(value.get("is_virtual")),
             is_removable=_safe_bool(value.get("is_removable")),
             bitlocker_state=_clean(value.get("bitlocker_state") or "unknown"),
+            disk_guid=_clean(value.get("disk_guid")),
             mount_points=tuple(_clean(item) for item in mounts if _clean(item)),
             partitions=tuple(PartitionIdentity.from_dict(item) for item in partitions),
             signature=_clean(value.get("signature")),
@@ -454,17 +476,23 @@ $ErrorActionPreference = 'Stop'
 $physical = @{}
 Get-CimInstance Win32_DiskDrive | ForEach-Object { $physical[[int]$_.Index] = $_ }
 $systemDrive = ($env:SystemDrive -replace ':$','')
+$systemBitLocker = 'unknown'
+try {
+  $blv = Get-BitLockerVolume -MountPoint "$($systemDrive):" -ErrorAction Stop
+  if ($blv) { $systemBitLocker = "$($blv.VolumeStatus):$($blv.ProtectionStatus)" }
+} catch { }
 $rows = foreach ($disk in Get-Disk) {
   $physicalDisk = $physical[[int]$disk.Number]
   $parts = @(Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | ForEach-Object {
     $vol = Get-Volume -Partition $_ -ErrorAction SilentlyContinue
-    [pscustomobject]@{number=$_.PartitionNumber; kind=$_.Type; size_bytes=$_.Size; gpt_type=$_.GptType; filesystem=if($vol){$vol.FileSystem}else{''}; is_system=$false; is_boot=$_.IsActive; is_active=$_.IsActive; is_os_volume=($_.DriveLetter -eq $systemDrive); drive_letter=if($_.DriveLetter){$_.DriveLetter}else{''}; mount_point=if($vol){$vol.Path}else{''}}
+    [pscustomobject]@{number=$_.PartitionNumber; offset_bytes=$_.Offset; kind=$_.Type; size_bytes=$_.Size; gpt_type=$_.GptType; gpt_partition_id=$_.Guid; filesystem=if($vol){$vol.FileSystem}else{''}; is_system=$false; is_boot=$_.IsActive; is_active=$_.IsActive; is_os_volume=($_.DriveLetter -eq $systemDrive); drive_letter=if($_.DriveLetter){$_.DriveLetter}else{''}; mount_point=if($vol){$vol.Path}else{''}}
   })
-  [pscustomobject]@{number=$disk.Number; model=$disk.FriendlyName; serial=$disk.SerialNumber; pnp_device_id=if($physicalDisk){$physicalDisk.PNPDeviceID}else{''}; runtime_selector=if($physicalDisk){$physicalDisk.DeviceID}else{''}; storage_unique_id=$disk.UniqueId; bus_type=$disk.BusType; media_type=$disk.MediaType; size_bytes=$disk.Size; logical_sector_size=$disk.LogicalSectorSize; physical_sector_size=$disk.PhysicalSectorSize; partition_style=$disk.PartitionStyle; signature=$disk.Signature; online=(-not $disk.IsOffline); read_only=$disk.IsReadOnly; is_system=$disk.IsSystem; is_boot=$disk.IsBoot; is_pagefile=$disk.IsPagefile; is_crash_dump=$disk.IsCrashDump; is_clustered=$disk.IsClustered; is_virtual=($disk.Location -match 'Virtual'); is_removable=($disk.BusType -eq 'USB'); partitions=$parts}
+  $mounts = @($parts | Where-Object { $_.drive_letter } | ForEach-Object { "$($_.drive_letter):" })
+  [pscustomobject]@{number=$disk.Number; model=$disk.FriendlyName; serial=$disk.SerialNumber; pnp_device_id=if($physicalDisk){$physicalDisk.PNPDeviceID}else{''}; runtime_selector=if($physicalDisk){$physicalDisk.DeviceID}else{''}; storage_unique_id=$disk.UniqueId; bus_type=$disk.BusType; media_type=$disk.MediaType; size_bytes=$disk.Size; logical_sector_size=$disk.LogicalSectorSize; physical_sector_size=$disk.PhysicalSectorSize; partition_style=$disk.PartitionStyle; disk_guid=$disk.Guid; signature=$disk.Signature; online=(-not $disk.IsOffline); read_only=$disk.IsReadOnly; is_system=$disk.IsSystem; is_boot=$disk.IsBoot; is_pagefile=$disk.IsPagefile; is_crash_dump=$disk.IsCrashDump; is_clustered=$disk.IsClustered; is_virtual=($disk.Location -match 'Virtual'); is_removable=($disk.BusType -eq 'USB'); bitlocker_state=if($disk.IsSystem){$systemBitLocker}else{'not_system_volume'}; mount_points=$mounts; partitions=$parts}
 }
 $rows | ConvertTo-Json -Depth 8 -Compress
 """
-        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], text=True, capture_output=True, check=False)
+        result = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, capture_output=True, check=False)
         if result.returncode:
             raise DiskCloneBlocked("Nao foi possivel obter inventario estruturado dos discos.")
         try:
@@ -1164,7 +1192,7 @@ $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop
 $physical = Get-CimInstance Win32_DiskDrive | Where-Object Index -eq $disk.Number | Select-Object -First 1
 [pscustomobject]@{{path='{original.replace("'", "''")}'; disk_number=$disk.Number; runtime_selector=if($physical){{$physical.DeviceID}}else{{''}}; serial=if($disk.SerialNumber){{$disk.SerialNumber}}else{{''}}; pnp=if($physical){{$physical.PNPDeviceID}}else{{''}}; unique_id=if($disk.UniqueId){{$disk.UniqueId}}else{{''}}}} | ConvertTo-Json -Compress
 """
-            completed = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], text=True, capture_output=True, check=False)
+            completed = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, capture_output=True, check=False)
             if completed.returncode:
                 result.append(ProtectedPathResolution(original, False, reason="falha ao resolver volume/disco fisico"))
                 continue
