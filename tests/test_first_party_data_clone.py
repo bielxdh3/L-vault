@@ -459,6 +459,22 @@ def test_stale_lock_with_malformed_pid_fails_closed(tmp_path: Path):
     assert disk_clone._pid_is_live(lock) is True
 
 
+@pytest.mark.parametrize(
+    ("states", "expected"),
+    [
+        ({"windows": "FullyEncrypted:On:Unlocked"}, "encrypted_unlocked"),
+        ({"windows": "FullyDecrypted:Off:Unlocked"}, "unencrypted"),
+        ({"windows": "FullyEncrypted:On:Locked"}, "unknown"),
+        ({"windows": "FullyEncrypted:On:Unlocked", "data": "unknown_not_reported"}, "unknown"),
+        ({}, "unknown"),
+    ],
+)
+def test_source_encryption_summary_reports_only_known_unlocked_volume_states(states, expected):
+    from localvault.first_party_data_clone import _public_source_encryption
+
+    assert _public_source_encryption(states) == expected
+
+
 def test_vss_journal_accepts_exact_unique_guid_ids_and_rejects_reparse_or_duplicate(tmp_path: Path):
     journal = tmp_path / "vss_snapshot_journal.json"
     journal.write_text('{"snapshot_ids":["{bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb}"]}', encoding="utf-8")

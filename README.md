@@ -212,9 +212,9 @@ python -m localvault schedule-install --root <VAULT_ROOT>
 
 ## Clone de dados do Windows
 
-O clone normal está sendo redesenhado como uma operação de dados controlada pelo próprio L-vault. Ele não depende de DiskGenius, Clonezilla, mídia USB ou menus de firmware, e não cria uma unidade inicializável. A página identifica o Kingston autorizado como origem somente leitura, o Seagate autorizado como destino a apagar e o HGST do repositório como protegido.
+O clone normal foi implementado como uma operação de dados controlada pelo próprio L-vault. Ele não depende de DiskGenius, Clonezilla, mídia USB ou menus de firmware, e não cria uma unidade inicializável. A página identifica o Kingston autorizado como origem somente leitura, o Seagate autorizado como destino a apagar e o HGST do repositório como protegido.
 
-Esta revisão ainda não libera gravação física: o trabalhador elevado precisa estar instalado em uma localização protegida e o snapshot VSS precisa ser criado por um helper first-party suportado no Windows cliente. Até esses pré-requisitos e a revisão de segurança serem concluídos, L-vault mantém o botão de clone desabilitado. Nenhum clone real foi executado por esta implementação.
+O botão de clone permanece desabilitado até que o trabalhador elevado e o helper VSS sejam distribuídos com assinaturas Authenticode de um publicador confiável fixado no runtime. Este host não tem o certificado de publicação nem os artefatos assinados, então o instalador recusa a instalação. Nenhum clone real foi executado por esta implementação.
 
 O fluxo legado DiskGenius e o protótipo Clonezilla estão documentados apenas como histórico em [`docs/diskgenius-normal-clone.md`](docs/diskgenius-normal-clone.md) e [`docs/disk-clone-offline.md`](docs/disk-clone-offline.md).
 

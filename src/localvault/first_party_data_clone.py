@@ -812,10 +812,31 @@ def _public_result(value: Any, state: dict[str, Any]) -> dict[str, Any] | None:
         "exclusion_count": sum(exclusion_counts.values()),
         "exclusions": exclusion_counts,
         "bootability": "not_applicable_data_clone",
+        "source_encryption": _public_source_encryption(state.get("source_encryption")),
         "target_encryption": str(value.get("target_encryption", "unknown")),
         "metadata_limits": [str(item) for item in value.get("metadata_limits", []) if isinstance(item, str)],
         "verification_scope": str(value.get("verification_scope", "")),
     }
+
+
+def _public_source_encryption(value: Any) -> str:
+    if not isinstance(value, dict) or not value:
+        return "unknown"
+    states = []
+    for item in value.values():
+        if item == "unknown_not_reported" or not isinstance(item, str):
+            return "unknown"
+        parts = [part.casefold().replace(" ", "") for part in item.split(":")]
+        if len(parts) != 3 or parts[2] not in {"unlocked", "0"}:
+            return "unknown"
+        if parts[0] not in {"fullyencrypted", "fullydecrypted", "decrypted"}:
+            return "unknown"
+        states.append(parts[0])
+    if states and all(item in {"fullydecrypted", "decrypted"} for item in states):
+        return "unencrypted"
+    if states and all(item == "fullyencrypted" for item in states):
+        return "encrypted_unlocked"
+    return "unknown"
 
 
 def _nonnegative_int(value: Any) -> int:

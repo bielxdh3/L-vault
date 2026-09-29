@@ -157,6 +157,39 @@ def test_status_is_authenticated_and_does_not_expose_worker_identity_or_paths(tm
     ):
         assert private_value not in body
     assert payload["result"]["metadata_limits"] == ["NTFS hard-link relationships are copied as independent files."]
+    assert payload["result"]["exclusion_count"] == 1
+    assert payload["result"]["exclusions"] == [{"label": "Other recorded exclusions", "count": 1}]
+
+
+def test_owner_clone_report_lists_exclusion_categories_without_private_paths():
+    from localvault.viewer import _clone_status_for_owner
+
+    status = _clone_status_for_owner({
+        "state": "complete",
+        "phase": "COMPLETE",
+        "result": {
+            "verified": True,
+            "exclusions": [
+                {"path": "pagefile.sys", "reason": "windows_runtime_file"},
+                {"path": "hiberfil.sys", "reason": "windows_runtime_file"},
+                {"path": "C:\\Users\\owner\\private-junction", "reason": "reparse_mount_point_not_followed"},
+                {"path": "partition:2", "reason": "boot_or_recovery_partition_not_in_data_clone"},
+            ],
+            "source_encryption": "encrypted_unlocked",
+            "target_encryption": "unencrypted",
+        },
+    })
+    result = status["result"]
+    assert result["exclusion_count"] == 4
+    assert result["source_encryption"] == "encrypted_unlocked"
+    assert result["target_encryption"] == "unencrypted"
+    assert [item["count"] for item in result["exclusions"]] == [1, 1, 1, 1]
+    labels = " ".join(item["label"] for item in result["exclusions"])
+    assert "pagefile.sys" in labels
+    assert "hiberfil.sys" in labels
+    assert "Mount points and junction destinations" in labels
+    assert "EFI, MSR, and Recovery partitions" in labels
+    assert "private-junction" not in labels
 
 
 def test_cancel_uses_authenticated_csrf_protected_post(tmp_path: Path):
