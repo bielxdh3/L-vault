@@ -51,3 +51,6 @@ def test_clone_ui_reports_data_clone_bootability_and_explicit_exclusions():
     assert "swapfile.sys" in html
     assert "Junctions and mount-point destinations are not traversed" in html
     assert "unsupported reparse points fail closed" in html
+    assert "result.exclusions" in html
+    assert "Source encryption:" in html
+    assert "Target encryption:" in html

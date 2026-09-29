@@ -64,6 +64,64 @@ def _clone_role_display(role):
     return {"model": role.model, "masked_serial": f"****{role.serial_suffix}", "size_bytes": role.size_bytes}
 
 
+_CLONE_EXCLUSION_LABELS = {
+    "pagefile.sys": "pagefile.sys (runtime paging file)",
+    "hiberfil.sys": "hiberfil.sys (hibernation file)",
+    "swapfile.sys": "swapfile.sys (runtime swap file)",
+    "windows_vss_metadata": "VSS system metadata",
+    "reparse_mount_point_not_followed": "Mount points and junction destinations (not traversed)",
+    "boot_or_recovery_partition_not_in_data_clone": "EFI, MSR, and Recovery partitions (outside data-clone scope)",
+    "other": "Other recorded exclusions",
+}
+
+
+def _clone_exclusion_summary(value):
+    counts: dict[str, int] = {}
+
+    def add(category, count=1):
+        if category not in _CLONE_EXCLUSION_LABELS:
+            category = "other"
+        counts[category] = counts.get(category, 0) + count
+
+    if isinstance(value, dict):
+        for category, count in value.items():
+            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                add(str(category), count)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            if not isinstance(item, dict):
+                add("other")
+                continue
+            path_name = str(item.get("path", "")).replace("\\", "/").rsplit("/", 1)[-1].casefold()
+            reason = str(item.get("reason", "other"))
+            add(path_name if path_name in {"pagefile.sys", "hiberfil.sys", "swapfile.sys"} else reason)
+
+    return [
+        {"label": _CLONE_EXCLUSION_LABELS[category], "count": counts[category]}
+        for category in sorted(counts)
+    ]
+
+
+def _clone_source_encryption(value):
+    if not isinstance(value, dict) or not value:
+        return "unknown"
+    statuses = []
+    for item in value.values():
+        if item == "unknown_not_reported" or not isinstance(item, str):
+            return "unknown"
+        parts = [part.casefold().replace(" ", "") for part in item.split(":")]
+        if len(parts) != 3 or parts[2] not in {"unlocked", "0"}:
+            return "unknown"
+        if parts[0] not in {"fullyencrypted", "fullydecrypted", "decrypted"}:
+            return "unknown"
+        statuses.append(parts[0])
+    if statuses and all(item in {"fullydecrypted", "decrypted"} for item in statuses):
+        return "unencrypted"
+    if statuses and all(item == "fullyencrypted" for item in statuses):
+        return "encrypted_unlocked"
+    return "unknown"
+
+
 def _clone_status_for_owner(value):
     """Keep status responses to owner-facing summaries; never expose worker paths or disk selectors."""
     value = value if isinstance(value, dict) else {}
@@ -81,28 +139,30 @@ def _clone_status_for_owner(value):
     }
     raw_result = value.get("result") if isinstance(value.get("result"), dict) else {}
     raw_exclusions = raw_result.get("exclusions", value.get("exclusions", value.get("excluded_partitions", [])))
+    exclusion_summary = _clone_exclusion_summary(raw_exclusions)
     target_encryption = raw_result.get("target_encryption")
     safe_metadata_limits = {
         "NTFS hard-link relationships are copied as independent files.",
         "ACL, owner, audit data, alternate streams, and extended attributes are requested from Robocopy's backup mode but are not independently read back.",
         "Filesystem compression state is compared through attributes; compression allocation is not independently inspected.",
     }
+    source_encryption = raw_result.get("source_encryption")
+    if not isinstance(source_encryption, str) or source_encryption not in {"unencrypted", "encrypted_unlocked", "unknown"}:
+        source_encryption = "unknown"
     result = {
         "verified": bool(raw_result.get("verified")),
         "file_count": raw_result.get("file_count") if isinstance(raw_result.get("file_count"), int) else None,
         "logical_bytes": raw_result.get("logical_bytes") if isinstance(raw_result.get("logical_bytes"), int) else None,
         "bootability": "not_applicable_data_clone",
         "target_encryption": target_encryption if isinstance(target_encryption, str) and target_encryption in {"unencrypted", "encrypted", "unknown"} else "unknown",
-        "exclusion_count": (
-            sum(max(0, count) for count in raw_exclusions.values() if isinstance(count, int) and not isinstance(count, bool))
-            if isinstance(raw_exclusions, dict)
-            else len(raw_exclusions) if isinstance(raw_exclusions, (list, tuple)) else 0
-        ),
+        "source_encryption": source_encryption,
+        "exclusion_count": sum(item["count"] for item in exclusion_summary),
+        "exclusions": exclusion_summary,
         "metadata_limits": [item for item in raw_result.get("metadata_limits", []) if isinstance(item, str) and item in safe_metadata_limits][:6]
         if isinstance(raw_result.get("metadata_limits"), list) else [],
     }
     message = {
-        "ready": "Ready to clone.",
+        "ready": "Clone has not started.",
         "starting": "Starting clone…",
         "precheck": "Checking disk identities…",
         "snapshot": "Preparing a consistent source view…",

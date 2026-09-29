@@ -66,6 +66,7 @@
   <div id="clone-result" hidden>
     <h3>Clone result</h3>
     <p id="clone-result-summary"></p>
+    <p id="clone-encryption" class="muted"></p>
     <p id="clone-exclusions" class="muted"></p>
     <ul id="clone-metadata-limits"></ul>
   </div>
@@ -132,7 +133,12 @@
       const files = Number.isInteger(result.file_count) ? result.file_count.toLocaleString() : '—';
       const bytes = Number.isInteger(result.logical_bytes) ? formatBytes(result.logical_bytes) : '—';
       document.getElementById('clone-result-summary').textContent = `${verified} · ${files} files · ${bytes} copied · Bootable: No`;
-      document.getElementById('clone-exclusions').textContent = Number.isInteger(result.exclusion_count) ? `${result.exclusion_count} runtime or system exclusions recorded.` : '';
+      const encryptionLabels = {unencrypted: 'Unencrypted', encrypted: 'Encrypted', encrypted_unlocked: 'Encrypted and unlocked', unknown: 'Unknown'};
+      document.getElementById('clone-encryption').textContent = `Source encryption: ${encryptionLabels[result.source_encryption] || 'Unknown'} · Target encryption: ${encryptionLabels[result.target_encryption] || 'Unknown'}`;
+      const exclusions = (result.exclusions || []).filter(item => item && typeof item.label === 'string' && Number.isInteger(item.count) && item.count > 0);
+      document.getElementById('clone-exclusions').textContent = exclusions.length
+        ? `Excluded: ${exclusions.map(item => `${item.label}: ${item.count}`).join('; ')}`
+        : 'No exclusions recorded.';
       const limits = document.getElementById('clone-metadata-limits');
       limits.replaceChildren(...(result.metadata_limits || []).map(text => {
         const item = document.createElement('li');
