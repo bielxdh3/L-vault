@@ -982,15 +982,27 @@ def test_disk_clone_page_and_actions_keep_authentication_and_csrf(tmp_path: Path
     p = ensure_directories(tmp_path / "vault")
     db.init_db(p.db)
     set_password(p.root, "password")
-    client = TestClient(create_app(p.root))
+    class ReadOnlyCloneProvider:
+        def preflight(self):
+            return {"ready": True}
+
+        def monitor(self):
+            return {"state": "ready", "phase": "PRECHECK"}
+
+        def launch(self, *, confirmation: str):
+            raise AssertionError("invalid confirmation must not launch")
+
+        def cancel(self):
+            raise AssertionError("no clone is active")
+
+    client = TestClient(create_app(p.root, data_clone_provider=ReadOnlyCloneProvider()))
     assert client.get("/disk-clone", follow_redirects=False).status_code == 303
     assert client.post("/login", data={"password": "password"}, follow_redirects=False).status_code == 303
-    assert client.post("/disk-clone/action?action=simulate").status_code == 403
+    assert client.post("/disk-clone/start", data={"confirmation": "CLONE"}).status_code == 403
     page = client.get("/disk-clone")
     import re
 
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
-    assert client.post("/disk-clone/action?action=invalid", data={"csrf_token": csrf}).status_code == 400
-    assert client.post("/disk-clone/action?action=preflight", data={"csrf_token": csrf}).status_code == 400
-    assert client.post("/disk-clone/action?action=cancel", data={"csrf_token": csrf}, follow_redirects=False).status_code == 303
-    assert client.post("/disk-clone/action?action=simulate", data={"csrf_token": csrf}, follow_redirects=False).status_code == 303
+    assert client.post("/disk-clone/start", data={"confirmation": "clone", "csrf_token": csrf}).status_code == 400
+    assert client.get("/disk-clone/status").status_code == 200
+    assert client.post("/disk-clone/cancel", data={"csrf_token": csrf}).status_code == 409

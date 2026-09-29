@@ -9,6 +9,7 @@ the fake provider and never touch storage devices.
 """
 
 import ctypes
+import errno
 import hashlib
 import hmac
 import json
@@ -39,15 +40,27 @@ ENROLLMENT_SCHEMA = 2
 MASKED_SERIAL = "(serial oculto)"
 
 
+def windows_system_directory() -> Path:
+    """Resolve the Windows System32 directory through the OS, never caller environment."""
+    if os.name != "nt":
+        raise OSError("Windows system directory is only available on Windows")
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        raise OSError("The Windows clone runtime requires a 64-bit process")
+    buffer = ctypes.create_unicode_buffer(32768)
+    function = ctypes.windll.kernel32.GetSystemDirectoryW
+    function.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+    function.restype = ctypes.c_uint32
+    length = function(buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise OSError("Could not resolve the Windows system directory")
+    return Path(buffer.value)
+
+
 def windows_powershell_path() -> Path:
     """Resolve the inbox Windows PowerShell executable without consulting PATH."""
     if os.name != "nt":
         return Path("powershell")
-    buffer = ctypes.create_unicode_buffer(32768)
-    length = ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer))
-    if not length or length >= len(buffer):
-        raise OSError("Could not resolve the Windows system directory")
-    executable = Path(buffer.value) / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    executable = windows_system_directory() / "WindowsPowerShell" / "v1.0" / "powershell.exe"
     if not executable.is_file():
         raise OSError("Inbox Windows PowerShell was not found in the system directory")
     return executable
@@ -58,6 +71,22 @@ def windows_powershell_environment() -> dict[str, str]:
     env = os.environ.copy()
     env["PSModulePath"] = str(windows_powershell_path().parent / "Modules")
     return env
+
+
+def windows_system_environment(*, temp_directory: Path | None = None) -> dict[str, str]:
+    """Minimal environment for elevated clone helpers; ignore caller-controlled search paths."""
+    system_directory = windows_system_directory()
+    windows_directory = system_directory.parent
+    temporary = Path(temp_directory) if temp_directory else windows_directory / "Temp"
+    return {
+        "SystemRoot": str(windows_directory),
+        "windir": str(windows_directory),
+        "SystemDrive": windows_directory.anchor.rstrip("\\/"),
+        "PATH": str(system_directory),
+        "PSModulePath": str(system_directory / "WindowsPowerShell" / "v1.0" / "Modules"),
+        "TEMP": str(temporary),
+        "TMP": str(temporary),
+    }
 
 
 TERMINAL_STATES = {
@@ -500,7 +529,7 @@ $rows = foreach ($disk in Get-Disk) {
 }
 $rows | ConvertTo-Json -Depth 8 -Compress
 """
-        result = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, encoding="utf-8", errors="replace", capture_output=True, check=False, env=windows_powershell_environment())
+        result = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, encoding="utf-8", errors="replace", capture_output=True, check=False, env=windows_system_environment())
         if result.returncode:
             raise DiskCloneBlocked("Nao foi possivel obter inventario estruturado dos discos.")
         try:
@@ -1091,21 +1120,65 @@ def _pid_is_live(path: Path) -> bool:
         payload = json.loads(path.read_text(encoding="utf-8"))
         pid = int(payload.get("pid", 0))
         if pid <= 0:
-            return False
-        os.kill(pid, 0)
-        return True
+            return True
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return False
+        # A malformed lock has no trustworthy owner PID. Treat it as occupied
+        # rather than deleting it while an unknown process may hold the lock.
+        return True
+    return _process_is_live(pid)
 
 
 def _process_is_live(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _windows_process_is_live(pid)
     try:
         os.kill(pid, 0)
         return True
-    except OSError:
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        # The process exists but cannot be queried by this principal.
+        return True
+    except OSError as exc:
+        return exc.errno != errno.ESRCH
+
+
+def _windows_process_is_live(pid: int) -> bool:
+    """Check process liveness without sending a signal or terminating it."""
+    if pid <= 0:
+        return False
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        open_process.restype = ctypes.c_void_p
+        get_exit_code = kernel32.GetExitCodeProcess
+        get_exit_code.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        get_exit_code.restype = ctypes.c_int
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        # PROCESS_QUERY_LIMITED_INFORMATION is sufficient and does not grant
+        # process termination rights.
+        handle = open_process(0x1000, 0, int(pid))
+        if not handle:
+            # ERROR_INVALID_PARAMETER means that PID does not exist. Other
+            # failures (especially access denied) remain live/unknown so a
+            # lock cannot be stolen from a process we cannot inspect.
+            return ctypes.get_last_error() != 87
+        try:
+            exit_code = ctypes.c_uint32()
+            if not get_exit_code(handle, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == 259  # STILL_ACTIVE
+        finally:
+            close_handle(handle)
+    except Exception:
+        # An unavailable or failing liveness API is not proof that the PID is
+        # dead. Recovery and stale-lock removal must fail closed.
+        return True
 
 
 def windows_interactive_session_available() -> bool:
@@ -1201,7 +1274,7 @@ $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop
 $physical = Get-CimInstance Win32_DiskDrive | Where-Object Index -eq $disk.Number | Select-Object -First 1
 [pscustomobject]@{{path='{original.replace("'", "''")}'; disk_number=$disk.Number; runtime_selector=if($physical){{$physical.DeviceID}}else{{''}}; serial=if($disk.SerialNumber){{$disk.SerialNumber}}else{{''}}; pnp=if($physical){{$physical.PNPDeviceID}}else{{''}}; unique_id=if($disk.UniqueId){{$disk.UniqueId}}else{{''}}}} | ConvertTo-Json -Compress
 """
-            completed = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, encoding="utf-8", errors="replace", capture_output=True, check=False, env=windows_powershell_environment())
+            completed = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, encoding="utf-8", errors="replace", capture_output=True, check=False, env=windows_system_environment())
             if completed.returncode:
                 result.append(ProtectedPathResolution(original, False, reason="falha ao resolver volume/disco fisico"))
                 continue
@@ -1256,7 +1329,7 @@ def _source_paths(p: VaultPaths, cfg: dict[str, Any]) -> list[Path]:
     values.extend(Path(item) for item in source_cfg.get("google_takeout_sources", []) if _clean(item))
     values.extend(Path(item) for item in cfg.get("disk_clone", {}).get("protected_paths", []) if _clean(item))
     if os.name == "nt":
-        system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        system_root = windows_system_directory().parent
         values.extend(path for path in (system_root, system_root / "pagefile.sys", system_root / "memory.dmp") if path.exists())
     return values
 
