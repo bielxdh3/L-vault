@@ -43,6 +43,7 @@ from .first_party_data_clone import (
     robocopy_arguments,
     verify_protected_repository,
 )
+from .clone_runtime_security import require_clone_runtime_security
 
 
 VOLUME_PATH_RE = re.compile(r"\\\\\?\\Volume\{[0-9a-fA-F-]{36}\}\\")
@@ -839,6 +840,10 @@ def _copy_stage(root: Path, job_id: str, snapshot_map: list[dict[str, str]], *, 
         if _cancel_requested(cancel_gate):
             store.update(job_id, state="cancelled", phase="PRECHECK", error="Cancelada antes de apagar o destino.")
             return
+        try:
+            require_clone_runtime_security()
+        except Exception as exc:
+            raise DataCloneError("A integridade do runtime protegido mudou antes da preparação do destino.", "blocked_backend") from exc
         # This persisted boundary and the UI cancel request are serialized by
         # one owner-restricted mutex. Once this phase is visible, the UI refuses
         # cancellation; if cancellation won first, the event above prevents

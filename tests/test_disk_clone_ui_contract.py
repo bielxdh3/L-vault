@@ -19,7 +19,8 @@ def test_clone_ui_is_first_party_and_binds_the_authorized_disk_roles():
         "Bootable",
         "Clone now",
         "Type <strong>CLONE</strong>",
-        "Windows inbox VSS, Storage, and NTFS file-copy facilities",
+        "L-vault managed",
+        "Excluded from clone source, target, and scratch use.",
     ):
         assert expected in html
     for implementation_noise in ("DiskGenius", "Clonezilla", "BIOS", "UEFI", "PowerShell", "BitLocker", "nonce", "/dev/sd", "handoff"):
@@ -49,8 +50,8 @@ def test_clone_ui_reports_data_clone_bootability_and_explicit_exclusions():
     assert "pagefile.sys" in html
     assert "hiberfil.sys" in html
     assert "swapfile.sys" in html
-    assert "Junctions and mount-point destinations are not traversed" in html
-    assert "unsupported reparse points fail closed" in html
+    assert "Junctions and mount points are not followed into other disks." in html
+    assert "Unsupported reparse points are not followed and stop the clone safely." in html
     assert "result.exclusions" in html
     assert "Source encryption:" in html
     assert "Target encryption:" in html

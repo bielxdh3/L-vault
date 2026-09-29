@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import email
 import html
 import re
@@ -227,6 +228,8 @@ def _first_party_clone_page(request: Request, templates: Jinja2Templates, value:
             "readiness_message": (
                 "Clean up the interrupted Windows snapshot before starting another clone."
                 if status["vss_recovery_required"]
+                else "Ready. L-vault will prepare the clone and ask Windows for permission when you start."
+                if value.get("ready") and value.get("runtime_install_required")
                 else "Ready. L-vault will recheck all three physical disks before it erases the target."
                 if value.get("ready")
                 else str(value.get("preflight_blocker") or "L-vault could not confirm all required disk identities. Cloning is disabled.")
@@ -366,6 +369,7 @@ def create_app(root: Path | None = None, https_enabled: bool | None = None, data
                 preflight = provider.preflight()
                 status["ready"] = isinstance(preflight, dict) and preflight.get("ready") is True
                 status["preflight_blocker"] = str(preflight.get("blocker", "")) if isinstance(preflight, dict) else ""
+                status["runtime_install_required"] = bool(preflight.get("runtime_install_required")) if isinstance(preflight, dict) else False
             except Exception:
                 status["ready"] = False
                 status["preflight_blocker"] = "Preflight is unavailable."
@@ -385,7 +389,7 @@ def create_app(root: Path | None = None, https_enabled: bool | None = None, data
         if form.get("confirmation") != "CLONE":
             return JSONResponse({"error": "Type CLONE to authorize erasing the Seagate target."}, status_code=400)
         try:
-            app.state.data_clone_provider.launch(confirmation="CLONE")
+            await asyncio.to_thread(app.state.data_clone_provider.launch, confirmation="CLONE")
             return JSONResponse(_clone_status_for_owner(app.state.data_clone_provider.monitor()), status_code=202)
         except Exception as exc:
             return JSONResponse({"error": _safe_clone_error(exc)}, status_code=409)
