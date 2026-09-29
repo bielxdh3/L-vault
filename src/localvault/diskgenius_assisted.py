@@ -24,6 +24,7 @@ from .disk_clone import (
     WindowsDiskInventory,
     WindowsProtectedPathResolver,
     resolved_protected_path_conflicts,
+    windows_powershell_environment,
     windows_powershell_path,
 )
 from .utils import atomic_write_text
@@ -568,13 +569,14 @@ def _read_executable_metadata(path: Path) -> dict[str, Any]:
     request = json.dumps({"path": str(path.resolve(strict=True) if os.name == "nt" else path)}, ensure_ascii=False)
     script = r"""
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $inputObject = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $path = [string]$inputObject.path
 $file = Get-Item -LiteralPath $path
 $signature = Get-AuthenticodeSignature -LiteralPath $path
 [pscustomobject]@{version=$file.VersionInfo.ProductVersion; signature_status=[string]$signature.Status; publisher=[string]$signature.SignerCertificate.Subject; sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash} | ConvertTo-Json -Compress
 """
-    result = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], input=request, text=True, capture_output=True, check=False)
+    result = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], input=request, text=True, encoding="utf-8", errors="replace", capture_output=True, check=False, env=windows_powershell_environment())
     if result.returncode:
         raise OSError("DiskGenius file identity query failed")
     payload = json.loads(result.stdout or "{}")
@@ -591,10 +593,11 @@ def _launch_elevated(path: Path) -> Any:
 def _diskgenius_is_running(path: Path) -> bool:
     if os.name != "nt":
         raise OSError("DiskGenius process inspection requires Windows")
-    env = os.environ.copy()
+    env = windows_powershell_environment()
     env["LVAULT_DISKGENIUS_EXE"] = str(path.resolve(strict=True))
     script = r"""
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $expected = [IO.Path]::GetFullPath($env:LVAULT_DISKGENIUS_EXE)
 $running = $false
 foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name='DiskGenius.exe'" -ErrorAction Stop)) {
@@ -602,7 +605,7 @@ foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name='DiskGenius.e
 }
 [pscustomobject]@{running=$running} | ConvertTo-Json -Compress
 """
-    result = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, capture_output=True, check=False, timeout=10, env=env)
+    result = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, encoding="utf-8", errors="replace", capture_output=True, check=False, timeout=10, env=env)
     if result.returncode:
         raise OSError("DiskGenius process state query failed")
     payload = json.loads(result.stdout or "{}")
@@ -622,10 +625,11 @@ def _verify_target_files(target: DiskIdentity) -> dict[str, Any]:
         "unique_id": target.storage_unique_id,
         "size_bytes": target.size_bytes,
     }
-    env = os.environ.copy()
+    env = windows_powershell_environment()
     env["LVAULT_DISKGENIUS_TARGET"] = json.dumps(spec, ensure_ascii=False)
     script = r"""
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $spec = ConvertFrom-Json $env:LVAULT_DISKGENIUS_TARGET
 $disk = Get-Disk -Number ([int]$spec.number) -ErrorAction Stop
 $physical = Get-CimInstance Win32_DiskDrive | Where-Object Index -eq $disk.Number | Select-Object -First 1
@@ -683,7 +687,7 @@ finally {
   if (-not $cleanupOk) { throw 'A temporary target volume mount could not be removed' }
 }
 """
-    result = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, capture_output=True, check=False, env=env)
+    result = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, encoding="utf-8", errors="replace", capture_output=True, check=False, env=env)
     if result.returncode:
         return {"verified": False, "reason": "o sistema de arquivos, ESP ou vínculo do BCD do Seagate não passou na verificação"}
     try:

@@ -53,6 +53,13 @@ def windows_powershell_path() -> Path:
     return executable
 
 
+def windows_powershell_environment() -> dict[str, str]:
+    """Keep inbox Windows PowerShell from importing incompatible PowerShell 7 modules."""
+    env = os.environ.copy()
+    env["PSModulePath"] = str(windows_powershell_path().parent / "Modules")
+    return env
+
+
 TERMINAL_STATES = {
     "success",
     "skipped_not_due",
@@ -472,6 +479,7 @@ class WindowsDiskInventory:
         if os.name != "nt":
             raise DiskCloneBlocked("O inventario de discos so esta disponivel no Windows.")
         script = r"""
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
 $physical = @{}
 Get-CimInstance Win32_DiskDrive | ForEach-Object { $physical[[int]$_.Index] = $_ }
@@ -492,7 +500,7 @@ $rows = foreach ($disk in Get-Disk) {
 }
 $rows | ConvertTo-Json -Depth 8 -Compress
 """
-        result = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, capture_output=True, check=False)
+        result = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, encoding="utf-8", errors="replace", capture_output=True, check=False, env=windows_powershell_environment())
         if result.returncode:
             raise DiskCloneBlocked("Nao foi possivel obter inventario estruturado dos discos.")
         try:
@@ -1185,6 +1193,7 @@ class WindowsProtectedPathResolver:
             escaped = str(candidate).replace("'", "''")
             script = rf"""
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $item = Get-Item -LiteralPath '{escaped}' -Force
 $drive = $item.PSDrive.Name
 $partition = Get-Partition -DriveLetter $drive -ErrorAction Stop
@@ -1192,7 +1201,7 @@ $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop
 $physical = Get-CimInstance Win32_DiskDrive | Where-Object Index -eq $disk.Number | Select-Object -First 1
 [pscustomobject]@{{path='{original.replace("'", "''")}'; disk_number=$disk.Number; runtime_selector=if($physical){{$physical.DeviceID}}else{{''}}; serial=if($disk.SerialNumber){{$disk.SerialNumber}}else{{''}}; pnp=if($physical){{$physical.PNPDeviceID}}else{{''}}; unique_id=if($disk.UniqueId){{$disk.UniqueId}}else{{''}}}} | ConvertTo-Json -Compress
 """
-            completed = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, capture_output=True, check=False)
+            completed = subprocess.run([str(windows_powershell_path()), "-NoProfile", "-NonInteractive", "-Command", script], text=True, encoding="utf-8", errors="replace", capture_output=True, check=False, env=windows_powershell_environment())
             if completed.returncode:
                 result.append(ProtectedPathResolution(original, False, reason="falha ao resolver volume/disco fisico"))
                 continue
