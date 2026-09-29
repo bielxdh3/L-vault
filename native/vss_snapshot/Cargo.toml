@@ -1,0 +1,16 @@
+[package]
+name = "lvault-vss-snapshot"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[dependencies]
+windows-core = "=0.100.0"
+
+[build-dependencies]
+windows-bindgen = "=0.100.0"
+
+[[bin]]
+name = "LVaultVssSnapshot"
+path = "src/main.rs"

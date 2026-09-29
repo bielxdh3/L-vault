@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import email
 import html
 import re
@@ -22,31 +23,8 @@ from . import db
 from .config import load_config, paths
 from .auth import SESSION_MAX_AGE, load_auth, verify_password
 from .control_panel import control_panel_data, start_background_command
-from .disk_clone import (
-    CloneService,
-    DiskCloneBlocked,
-    FakeProtectedPathResolver,
-    WindowsDiskInventory,
-    WindowsProtectedPathResolver,
-    active_clone_run_id,
-    create_control_request,
-    disk_clone_dashboard_data,
-    enroll_disk_clone_selection,
-    latest_clone_run_id,
-    public_disk_candidates,
-    provider_for_config,
-    _source_paths,
-    update_disk_clone_settings,
-    validated_disk_clone_config,
-)
-from .disk_clone_ui import spawn_retry_worker
-from .diskgenius_assisted import (
-    CLONE_MODE_LABEL,
-    PROTECTED_ROLE,
-    SOURCE_ROLE,
-    TARGET_ROLE,
-    DiskGeniusNormalProvider,
-)
+from .clone_roles import PROTECTED_ROLE, SOURCE_ROLE, TARGET_ROLE
+from .first_party_data_clone import DataCloneError, FirstPartyDataCloneProvider, MODE_LABEL
 from .replica import replica_status
 from .scheduler import merge_automation_config
 from .vault_index import cleanup_missing_index_entries, dashboard_data, delete_local_file_and_index, open_in_explorer, safe_vault_path
@@ -83,31 +61,181 @@ def _safe_tls_path(path: Path, label: str) -> Path:
     return resolved
 
 
-def _diskgenius_clone_page(request: Request, provider, templates: Jinja2Templates, *, action_error: str = "", status_code: int = 200):
-    try:
-        capabilities = provider.inspect_capabilities()
-    except Exception:
-        capabilities = None
-    try:
-        session = provider.monitor()
-    except DiskCloneBlocked as exc:
-        session = {"state": "blocked_audit", "session_id": "", "source": None, "target": None, "protected": None}
-        action_error = action_error or exc.reason
-        status_code = 409
+def _clone_role_display(role):
+    return {"model": role.model, "masked_serial": f"****{role.serial_suffix}", "size_bytes": role.size_bytes}
+
+
+_CLONE_EXCLUSION_LABELS = {
+    "pagefile.sys": "pagefile.sys (runtime paging file)",
+    "hiberfil.sys": "hiberfil.sys (hibernation file)",
+    "swapfile.sys": "swapfile.sys (runtime swap file)",
+    "windows_vss_metadata": "VSS system metadata",
+    "reparse_mount_point_not_followed": "Mount points and junction destinations (not traversed)",
+    "boot_or_recovery_partition_not_in_data_clone": "EFI, MSR, and Recovery partitions (outside data-clone scope)",
+    "other": "Other recorded exclusions",
+}
+
+
+def _clone_exclusion_summary(value):
+    counts: dict[str, int] = {}
+
+    def add(category, count=1):
+        if category not in _CLONE_EXCLUSION_LABELS:
+            category = "other"
+        counts[category] = counts.get(category, 0) + count
+
+    if isinstance(value, dict):
+        for category, count in value.items():
+            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                add(str(category), count)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            if not isinstance(item, dict):
+                add("other")
+                continue
+            path_name = str(item.get("path", "")).replace("\\", "/").rsplit("/", 1)[-1].casefold()
+            reason = str(item.get("reason", "other"))
+            add(path_name if path_name in {"pagefile.sys", "hiberfil.sys", "swapfile.sys"} else reason)
+
+    return [
+        {"label": _CLONE_EXCLUSION_LABELS[category], "count": counts[category]}
+        for category in sorted(counts)
+    ]
+
+
+def _clone_source_encryption(value):
+    if not isinstance(value, dict) or not value:
+        return "unknown"
+    statuses = []
+    for item in value.values():
+        if item == "unknown_not_reported" or not isinstance(item, str):
+            return "unknown"
+        parts = [part.casefold().replace(" ", "") for part in item.split(":")]
+        if len(parts) != 3 or parts[2] not in {"unlocked", "0"}:
+            return "unknown"
+        if parts[0] not in {"fullyencrypted", "fullydecrypted", "decrypted"}:
+            return "unknown"
+        statuses.append(parts[0])
+    if statuses and all(item in {"fullydecrypted", "decrypted"} for item in statuses):
+        return "unencrypted"
+    if statuses and all(item == "fullyencrypted" for item in statuses):
+        return "encrypted_unlocked"
+    return "unknown"
+
+
+def _clone_status_for_owner(value):
+    """Keep status responses to owner-facing summaries; never expose worker paths or disk selectors."""
+    value = value if isinstance(value, dict) else {}
+    state = str(value.get("state", "unknown"))
+    if state not in {"ready", "starting", "precheck", "snapshot", "target_prepare", "copy", "verify", "cleanup", "cancelling", "complete", "failed", "blocked", "cancelled", "partial"}:
+        state = "unknown"
+    phase = str(value.get("phase", "PRECHECK"))
+    if phase not in {"PRECHECK", "SNAPSHOT", "TARGET_PREPARE", "COPY", "VERIFY", "CLEANUP", "COMPLETE"}:
+        phase = "PRECHECK"
+    progress = value.get("progress") if isinstance(value.get("progress"), dict) else {}
+    progress = {
+        key: progress[key]
+        for key in ("files", "bytes", "expected_files", "expected_bytes", "speed_bytes_per_second", "eta_seconds")
+        if isinstance(progress.get(key), int) and not isinstance(progress.get(key), bool) and progress[key] >= 0
+    }
+    raw_result = value.get("result") if isinstance(value.get("result"), dict) else {}
+    raw_exclusions = raw_result.get("exclusions", value.get("exclusions", value.get("excluded_partitions", [])))
+    exclusion_summary = _clone_exclusion_summary(raw_exclusions)
+    target_encryption = raw_result.get("target_encryption")
+    safe_metadata_limits = {
+        "NTFS hard-link relationships are copied as independent files.",
+        "ACL, owner, audit data, alternate streams, and extended attributes are requested from Robocopy's backup mode but are not independently read back.",
+        "Filesystem compression state is compared through attributes; compression allocation is not independently inspected.",
+    }
+    source_encryption = raw_result.get("source_encryption")
+    if not isinstance(source_encryption, str) or source_encryption not in {"unencrypted", "encrypted_unlocked", "unknown"}:
+        source_encryption = "unknown"
+    result = {
+        "verified": bool(raw_result.get("verified")),
+        "file_count": raw_result.get("file_count") if isinstance(raw_result.get("file_count"), int) else None,
+        "logical_bytes": raw_result.get("logical_bytes") if isinstance(raw_result.get("logical_bytes"), int) else None,
+        "bootability": "not_applicable_data_clone",
+        "target_encryption": target_encryption if isinstance(target_encryption, str) and target_encryption in {"unencrypted", "encrypted", "unknown"} else "unknown",
+        "source_encryption": source_encryption,
+        "exclusion_count": sum(item["count"] for item in exclusion_summary),
+        "exclusions": exclusion_summary,
+        "metadata_limits": [item for item in raw_result.get("metadata_limits", []) if isinstance(item, str) and item in safe_metadata_limits][:6]
+        if isinstance(raw_result.get("metadata_limits"), list) else [],
+    }
+    message = {
+        "ready": "Clone has not started.",
+        "starting": "Starting clone…",
+        "precheck": "Checking disk identities…",
+        "snapshot": "Preparing a consistent source view…",
+        "target_prepare": "Preparing the target…",
+        "copy": "Copying data…",
+        "verify": "Verifying the copy…",
+        "cleanup": "Cleaning up…",
+        "cancelling": "Cancellation requested…",
+        "complete": "Clone complete.",
+        "blocked": "L-vault stopped the operation at a safety check. Review the local operation details.",
+        "failed": "The clone failed. Review the local operation details before trying again.",
+        "partial": "The target may contain an incomplete clone. Review it before any retry.",
+        "cancelled": "The clone was cancelled; the target may be incomplete.",
+        "unknown": "Clone status is unavailable.",
+    }.get(state, "Clone status is unavailable.")
+    return {
+        "state": state,
+        "phase": phase,
+        "mode": MODE_LABEL,
+        "bootable": False,
+        "source": _clone_role_display(SOURCE_ROLE),
+        "target": _clone_role_display(TARGET_ROLE),
+        "protected": _clone_role_display(PROTECTED_ROLE),
+        "progress": progress,
+        "result": result,
+        "target_destroyed": bool(value.get("target_destroyed")),
+        "vss_recovery_required": bool(value.get("vss_recovery_required")),
+        "created_at": value.get("created_at") if isinstance(value.get("created_at"), str) else "",
+        "updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) else "",
+        "message": message,
+    }
+
+
+def _safe_clone_error(exc: Exception) -> str:
+    state = str(getattr(exc, "state", ""))
+    return {
+        "blocked_confirmation": "Type CLONE to authorize erasing the Seagate target.",
+        "blocked_backend": "Windows cloning requirements are unavailable.",
+        "blocked_cancel_too_late": "Target preparation has started, so cancellation is no longer available safely.",
+        "blocked_active_job": "A previous clone is active or incomplete. Review its status before starting again.",
+        "blocked_vss_recovery": "The previous Windows snapshot needs safe cleanup before another clone can start.",
+        "blocked_elevation": "Windows did not grant the required permission. The target was not changed.",
+        "blocked_audit": "L-vault could not validate the clone audit state. No new operation was started.",
+        "blocked_identity": "L-vault could not uniquely confirm the source, target, and protected disks. No new operation was started.",
+        "partial": "The target may contain an incomplete clone. Review it before any retry.",
+        "failed": "The clone failed. Review the local operation details before trying again.",
+    }.get(state, "L-vault could not start the clone. Review disk readiness and local operation details.")
+
+
+def _first_party_clone_page(request: Request, templates: Jinja2Templates, value: dict):
+    status = _clone_status_for_owner(value)
     return templates.TemplateResponse(
         request,
         "disk_clone.html",
         {
-            "source_role": SOURCE_ROLE,
-            "target_role": TARGET_ROLE,
-            "protected_role": PROTECTED_ROLE,
-            "clone_mode": CLONE_MODE_LABEL,
-            "capabilities": capabilities,
-            "session": session,
-            "action_error": action_error,
+            "source_display": status["source"],
+            "target_display": status["target"],
+            "protected_display": status["protected"],
+            "clone_mode": status["mode"],
+            "status": status,
+            "ready": bool(value.get("ready")) and not status["vss_recovery_required"] and status["state"] not in {"starting", "precheck", "snapshot", "target_prepare", "copy", "verify", "cleanup", "cancelling", "partial"},
+            "readiness_message": (
+                "Clean up the interrupted Windows snapshot before starting another clone."
+                if status["vss_recovery_required"]
+                else "Ready. L-vault will prepare the clone and ask Windows for permission when you start."
+                if value.get("ready") and value.get("runtime_install_required")
+                else "Ready. L-vault will recheck all three physical disks before it erases the target."
+                if value.get("ready")
+                else str(value.get("preflight_blocker") or "L-vault could not confirm all required disk identities. Cloning is disabled.")
+            ),
             "request": request,
         },
-        status_code=status_code,
     )
 
 
@@ -122,20 +250,12 @@ def _same_origin(request: Request, origin: str) -> bool:
     return parsed.scheme == request.url.scheme and parsed.hostname == request_host and origin_port == request_port
 
 
-def create_app(root: Path | None = None, https_enabled: bool | None = None, disk_inventory=None, protected_path_resolver=None, diskgenius_provider=None) -> FastAPI:
+def create_app(root: Path | None = None, https_enabled: bool | None = None, data_clone_provider=None) -> FastAPI:
     p = paths(root or Path(load_config()["vault_root"]))
     viewer_config = load_config(p.root).get("viewer", {})
     secure_session = bool(viewer_config.get("tls_enabled", False) if https_enabled is None else https_enabled)
     app = FastAPI(title="LocalVault Backup Manager")
-    # Tests and controlled runtimes inject a synthetic inventory. We do not
-    # enumerate host disks during ordinary page rendering.
-    app.state.disk_inventory = disk_inventory
-    app.state.protected_path_resolver = protected_path_resolver
-    app.state.diskgenius_provider = diskgenius_provider or DiskGeniusNormalProvider(
-        p.root,
-        inventory=disk_inventory,
-        protected_path_resolver=protected_path_resolver,
-    )
+    app.state.data_clone_provider = data_clone_provider or FirstPartyDataCloneProvider(p.root)
     templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 
     @pass_context
@@ -232,129 +352,63 @@ def create_app(root: Path | None = None, https_enabled: bool | None = None, disk
 
     @app.get("/disk-clone", response_class=HTMLResponse)
     def disk_clone_page(request: Request):
-        return _diskgenius_clone_page(request, app.state.diskgenius_provider, templates)
-
-    @app.post("/disk-clone/launch", response_class=HTMLResponse)
-    def disk_clone_launch(request: Request):
+        provider = app.state.data_clone_provider
+        status = {}
+        monitor_ok = True
         try:
-            app.state.diskgenius_provider.launch()
-            return _diskgenius_clone_page(request, app.state.diskgenius_provider, templates)
-        except DiskCloneBlocked as exc:
-            return _diskgenius_clone_page(request, app.state.diskgenius_provider, templates, action_error=exc.reason, status_code=409)
-
-    @app.post("/disk-clone/revalidate", response_class=HTMLResponse)
-    async def disk_clone_revalidate(request: Request):
-        from urllib.parse import parse_qs
-        values = parse_qs((await request.body()).decode("utf-8", "replace"))
-        session_id = (values.get("session_id") or [""])[-1]
-        selection_verified = (values.get("selection_verified") or [""])[-1] == "on"
-        try:
-            app.state.diskgenius_provider.revalidate_before_overwrite(session_id, selected_devices_verified=selection_verified)
-            return _diskgenius_clone_page(request, app.state.diskgenius_provider)
-        except DiskCloneBlocked as exc:
-            return _diskgenius_clone_page(request, app.state.diskgenius_provider, action_error=exc.reason, status_code=409)
-
-    @app.post("/disk-clone/cancel-before-overwrite", response_class=HTMLResponse)
-    async def disk_clone_cancel_before_overwrite(request: Request):
-        from urllib.parse import parse_qs
-        values = parse_qs((await request.body()).decode("utf-8", "replace"))
-        session_id = (values.get("session_id") or [""])[-1]
-        confirmed = (values.get("confirmed_not_started") or [""])[-1] == "on"
-        try:
-            app.state.diskgenius_provider.cancel_before_overwrite(session_id, confirmed_not_started=confirmed)
-            return _diskgenius_clone_page(request, app.state.diskgenius_provider)
-        except DiskCloneBlocked as exc:
-            return _diskgenius_clone_page(request, app.state.diskgenius_provider, action_error=exc.reason, status_code=409)
-
-    @app.post("/disk-clone/verify", response_class=HTMLResponse)
-    async def disk_clone_verify(request: Request):
-        from urllib.parse import parse_qs
-        values = parse_qs((await request.body()).decode("utf-8", "replace"))
-        session_id = (values.get("session_id") or [""])[-1]
-        confirmed_complete = (values.get("confirmed_complete") or [""])[-1] == "on"
-        try:
-            app.state.diskgenius_provider.verify(session_id, owner_confirmed_complete=confirmed_complete)
-            return _diskgenius_clone_page(request, app.state.diskgenius_provider)
-        except DiskCloneBlocked as exc:
-            return _diskgenius_clone_page(request, app.state.diskgenius_provider, action_error=exc.reason, status_code=409)
-
-    @app.get("/disk-clone/candidates")
-    def disk_clone_candidates():
-        inventory = app.state.disk_inventory
-        if inventory is None:
-            # Explicit refresh is the only path that may use the production
-            # Windows collector; rendering the dashboard remains side-effect
-            # free. No collector is invoked by tests unless injected.
-            inventory = WindowsDiskInventory()
-        try:
-            return JSONResponse({"candidates": public_disk_candidates(inventory.list_disks())})
-        except DiskCloneBlocked as exc:
-            raise HTTPException(409, detail=exc.reason)
-
-    @app.post("/disk-clone/enroll")
-    async def disk_clone_enroll(request: Request):
-        from urllib.parse import parse_qs
-        values = parse_qs((await request.body()).decode("utf-8", "replace"))
-        try:
-            target_number = int((values.get("target_number") or [""])[-1])
-            confirmation = (values.get("confirmation") or [""])[-1]
-            inventory = app.state.disk_inventory if app.state.disk_inventory is not None else WindowsDiskInventory()
-            config = load_config(p.root).get("disk_clone", {})
-            resolver = app.state.protected_path_resolver
-            if resolver is None and app.state.disk_inventory is None:
-                resolver = WindowsProtectedPathResolver()
-            elif resolver is None:
-                disks = inventory.list_disks()
-                sources = [disk for disk in disks if disk.is_system or disk.is_boot]
-                if len(sources) == 1:
-                    resolver = FakeProtectedPathResolver({str(path): sources[0] for path in _source_paths(paths(p.root), load_config(p.root))})
-            enroll_disk_clone_selection(
-                p.root,
-                target_number=target_number,
-                confirmation=confirmation,
-                inventory=inventory,
-                provider=provider_for_config(config),
-                resolver=resolver,
-            )
-        except (ValueError, DiskCloneBlocked) as exc:
-            raise HTTPException(400, detail=getattr(exc, "reason", "invalid enrollment"))
-        return RedirectResponse("/disk-clone", status_code=303)
+            status = provider.monitor()
+            if not isinstance(status, dict):
+                status = {}
+                monitor_ok = False
+        except Exception:
+            status = {"state": "unknown"}
+            status["ready"] = False
+            monitor_ok = False
+        if monitor_ok:
+            try:
+                preflight = provider.preflight()
+                status["ready"] = isinstance(preflight, dict) and preflight.get("ready") is True
+                status["preflight_blocker"] = str(preflight.get("blocker", "")) if isinstance(preflight, dict) else ""
+                status["runtime_install_required"] = bool(preflight.get("runtime_install_required")) if isinstance(preflight, dict) else False
+            except Exception:
+                status["ready"] = False
+                status["preflight_blocker"] = "Preflight is unavailable."
+        return _first_party_clone_page(request, templates, status)
 
     @app.get("/disk-clone/status")
     def disk_clone_status():
-        return JSONResponse(disk_clone_dashboard_data(p))
-
-    @app.post("/disk-clone/action")
-    def disk_clone_action(action: str = Query(...), run_id: str | None = Query(None)):
         try:
-            disk_clone_config = validated_disk_clone_config(p.root)
-            if action in {"preflight", "acknowledge", "retry"} and not disk_clone_config["enabled"]:
-                raise DiskCloneBlocked("A clonagem esta desativada por configuracao.", "blocked_configuration")
-            if action == "show" and run_id is None:
-                run_id = active_clone_run_id(p.db) or latest_clone_run_id(p.db)
-            request_id = create_control_request(p.db, action, run_id=run_id, actor="dashboard")
-            if action == "retry":
-                spawn_retry_worker(p.root, request_id)
-        except (DiskCloneBlocked, ValueError):
-            raise HTTPException(400)
-        return RedirectResponse("/disk-clone", status_code=303)
+            status = app.state.data_clone_provider.monitor()
+        except Exception:
+            status = {"state": "unknown"}
+        return JSONResponse(_clone_status_for_owner(status))
 
-    @app.post("/disk-clone/settings")
-    async def disk_clone_settings(request: Request, interval_days: int | None = Query(None), enabled: bool | None = Query(None)):
-        from urllib.parse import parse_qs
-        values = parse_qs((await request.body()).decode("utf-8", "replace"))
-        if "interval_days" in values:
-            try:
-                interval_days = int(values["interval_days"][-1])
-            except ValueError:
-                raise HTTPException(400)
-        if "enabled" in values:
-            enabled = values["enabled"][-1].strip().casefold() in {"1", "true", "yes", "on", "sim"}
+    @app.post("/disk-clone/start")
+    async def disk_clone_start(request: Request):
+        form = await request.form()
+        if form.get("confirmation") != "CLONE":
+            return JSONResponse({"error": "Type CLONE to authorize erasing the Seagate target."}, status_code=400)
         try:
-            update_disk_clone_settings(p.root, interval_days=interval_days, enabled=enabled)
-        except (DiskCloneBlocked, ValueError):
-            raise HTTPException(400)
-        return RedirectResponse("/disk-clone", status_code=303)
+            await asyncio.to_thread(app.state.data_clone_provider.launch, confirmation="CLONE")
+            return JSONResponse(_clone_status_for_owner(app.state.data_clone_provider.monitor()), status_code=202)
+        except Exception as exc:
+            return JSONResponse({"error": _safe_clone_error(exc)}, status_code=409)
+
+    @app.post("/disk-clone/cancel")
+    def disk_clone_cancel():
+        try:
+            app.state.data_clone_provider.cancel()
+            return JSONResponse(_clone_status_for_owner(app.state.data_clone_provider.monitor()), status_code=202)
+        except Exception as exc:
+            return JSONResponse({"error": _safe_clone_error(exc)}, status_code=409)
+
+    @app.post("/disk-clone/recover-vss")
+    def disk_clone_recover_vss():
+        try:
+            app.state.data_clone_provider.recover_vss()
+            return JSONResponse(_clone_status_for_owner(app.state.data_clone_provider.monitor()), status_code=202)
+        except Exception as exc:
+            return JSONResponse({"error": _safe_clone_error(exc)}, status_code=409)
 
     @app.post("/control/run")
     def control_run(command: str = Query(...)):
@@ -615,17 +669,6 @@ def _setup_page_data(p) -> dict:
         "takeout_source_existing": sum(1 for value in sources if Path(str(value)).expanduser().is_dir()),
         "tasks": tasks[:8],
     }
-
-
-def _safe_disk_candidates(inventory) -> list[dict]:
-    if inventory is None:
-        return []
-    try:
-        return public_disk_candidates(inventory.list_disks())
-    except Exception:
-        # The dashboard remains renderable when the optional read-only refresh
-        # is unavailable; the explicit candidates endpoint reports 409.
-        return []
 
 
 def _email_body(path: Path) -> dict[str, str]:
