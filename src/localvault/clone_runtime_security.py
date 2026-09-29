@@ -1,0 +1,409 @@
+"""Read-only verification of the privileged clone runtime's Windows trust boundary.
+
+The capability gate and the elevated worker can both call
+``verify_clone_runtime_security``. It verifies that an unelevated principal cannot
+delete or replace the runtime through ProgramData, and that the L-vault child
+trees have protected DACLs. It never creates directories, changes ACLs, or opens
+any physical disk.
+"""
+
+from __future__ import annotations
+
+import base64
+import ctypes
+import json
+import os
+import re
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+SYSTEM_DRIVE_ROOT = Path("C:\\")
+PROGRAM_DATA = Path(r"C:\ProgramData")
+APP_ROOT = PROGRAM_DATA / "L-vault"
+RUNTIME_ROOT = APP_ROOT / "clone-runtime"
+RUNTIME_TEMP = RUNTIME_ROOT / "Temp"
+STATE_ROOT = APP_ROOT / "clone-state"
+WORKER = RUNTIME_ROOT / "LocalVaultCloneWorker.exe"
+VSS_HELPER = RUNTIME_ROOT / "LVaultVssSnapshot.exe"
+OWNER_SID = STATE_ROOT / "owner.sid"
+# Release engineering must replace this placeholder in both the application and
+# installer with the approved L-vault Authenticode publisher certificate.
+CLONE_RUNTIME_SIGNER_THUMBPRINT = "SET_IN_RELEASE_BUILD"
+
+SYSTEM_SID = "S-1-5-18"
+ADMINISTRATORS_SID = "S-1-5-32-544"
+USERS_SID = "S-1-5-32-545"
+CREATOR_OWNER_SID = "S-1-3-0"
+OWNER_RIGHTS_SID = "S-1-3-4"
+FULL_CONTROL_MASK = 0x001F01FF
+READ_EXECUTE_MASK = 0x001200A9
+OWNER_CONTROL_MASK = 0x000C0000  # WRITE_DAC | WRITE_OWNER
+REPLACE_CHILD_MASK = (
+    0x00000040  # FILE_DELETE_CHILD
+    | 0x00010000  # DELETE
+    | 0x00040000  # WRITE_DAC
+    | 0x00080000  # WRITE_OWNER
+    | 0x10000000  # GENERIC_ALL
+    | 0x40000000  # GENERIC_WRITE
+)
+UNSAFE_USER_WRITE_MASK = (
+    0x00000002  # FILE_WRITE_DATA / FILE_ADD_FILE
+    | 0x00000004  # FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
+    | 0x00000010  # FILE_WRITE_EA
+    | 0x00000040  # FILE_DELETE_CHILD
+    | 0x00000100  # FILE_WRITE_ATTRIBUTES
+    | 0x00010000  # DELETE
+    | 0x00040000  # WRITE_DAC
+    | 0x00080000  # WRITE_OWNER
+    | 0x10000000  # GENERIC_ALL
+    | 0x40000000  # GENERIC_WRITE
+)
+STANDARD_PRINCIPALS = {
+    "S-1-1-0",  # Everyone
+    "S-1-2-0",  # LOCAL
+    "S-1-5-4",  # INTERACTIVE
+    "S-1-5-7",  # ANONYMOUS LOGON
+    "S-1-5-11",  # Authenticated Users
+    "S-1-5-12",  # Restricted
+    USERS_SID,
+    "S-1-5-32-547",  # BUILTIN\Power Users
+}
+ALLOWED_CHILD_PRINCIPALS = {SYSTEM_SID, ADMINISTRATORS_SID, USERS_SID, OWNER_RIGHTS_SID}
+
+
+@dataclass(frozen=True)
+class CloneRuntimeSecurityReport:
+    ready: bool
+    issues: tuple[str, ...]
+    evidence: dict[str, Any]
+
+
+def _system_powershell() -> Path:
+    buffer = ctypes.create_unicode_buffer(32768)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    function = kernel.GetSystemDirectoryW
+    function.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+    function.restype = ctypes.c_uint32
+    length = int(function(buffer, len(buffer)))
+    if not length or length >= len(buffer):
+        raise OSError("Windows system directory is unavailable")
+    executable = Path(buffer.value) / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    if not executable.is_file():
+        raise OSError("inbox Windows PowerShell is unavailable")
+    return executable
+
+
+def _query_acl_facts(paths: list[Path]) -> list[dict[str, Any]]:
+    encoded_paths = base64.b64encode(json.dumps([str(path) for path in paths]).encode("utf-8")).decode("ascii")
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$paths = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('""" + encoded_paths + r"""')) | ConvertFrom-Json
+function Test-AnyReparse([string]$path) {
+    $full = [IO.Path]::GetFullPath($path)
+    $root = [IO.Path]::GetPathRoot($full)
+    $current = $root
+    $relative = $full.Substring($root.Length)
+    foreach ($part in @($relative -split '[\\/]+' | Where-Object { $_ })) {
+        $current = Join-Path $current $part
+        if (-not [IO.File]::Exists($current) -and -not [IO.Directory]::Exists($current)) { return $false }
+        $component = Get-Item -LiteralPath $current -Force
+        if (($component.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $true }
+    }
+    return $false
+}
+$rows = foreach ($path in $paths) {
+    if (Test-AnyReparse $path) {
+        [pscustomobject]@{ path = $path; exists = $true; reparse = $true }
+        continue
+    }
+    if (-not (Test-Path -LiteralPath $path)) {
+        [pscustomobject]@{ path = $path; exists = $false }
+        continue
+    }
+    $item = Get-Item -LiteralPath $path -Force
+    $acl = Get-Acl -LiteralPath $path
+    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    $access = foreach ($rule in $rules) {
+        [pscustomobject]@{
+            sid = $rule.IdentityReference.Value
+            allow = ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow)
+            rights = [int64]$rule.FileSystemRights
+            inherited = [bool]$rule.IsInherited
+            inheritance = [string]$rule.InheritanceFlags
+            propagation = [string]$rule.PropagationFlags
+        }
+    }
+    $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    [pscustomobject]@{
+        path = $item.FullName
+        exists = $true
+        is_directory = [bool]$item.PSIsContainer
+        reparse = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+        protected = [bool]$acl.AreAccessRulesProtected
+        owner_sid = $ownerSid
+        rules = @($access)
+    }
+}
+ConvertTo-Json -InputObject @($rows) -Depth 6 -Compress
+"""
+    command = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    executable = _system_powershell()
+    system_directory = executable.parents[2]
+    windows_directory = system_directory.parent
+    environment = {
+        "SystemRoot": str(windows_directory),
+        "windir": str(windows_directory),
+        "SystemDrive": windows_directory.anchor.rstrip("\\/"),
+        "PATH": str(system_directory),
+        "PSModulePath": str(executable.parent / "Modules"),
+        "TEMP": str(windows_directory / "Temp"),
+        "TMP": str(windows_directory / "Temp"),
+    }
+    result = subprocess.run(
+        [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+        check=False,
+        cwd=str(executable.parent),
+        env=environment,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode:
+        raise OSError("Windows ACL query failed")
+    payload = json.loads(result.stdout)
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list) or len(payload) != len(paths):
+        raise OSError("Windows returned incomplete ACL facts")
+    return payload
+
+
+def _is_inherit_only(rule: dict[str, Any]) -> bool:
+    return "inheritonly" in str(rule.get("propagation", "")).replace("_", "").replace(" ", "").casefold()
+
+
+def _applicable_rules(row: dict[str, Any]) -> list[dict[str, Any]]:
+    return [rule for rule in row.get("rules", []) if not _is_inherit_only(rule)]
+
+
+def _check_parent_acl(row: dict[str, Any], issues: list[str]) -> None:
+    path = str(row.get("path", "Windows system ancestor"))
+    if row.get("reparse"):
+        issues.append(f"{path} is a reparse point")
+    if row.get("is_directory") is not True:
+        issues.append(f"{path} is not a directory")
+    if str(row.get("owner_sid", "")) in STANDARD_PRINCIPALS:
+        issues.append(f"{path} is owned by an unelevated principal")
+    rules = _applicable_rules(row)
+    masks: dict[str, int] = {}
+    for rule in rules:
+        sid = str(rule.get("sid", ""))
+        if sid == CREATOR_OWNER_SID and _is_inherit_only(rule):
+            continue
+        if sid == CREATOR_OWNER_SID:
+            # Creator Owner is safe only when it applies to future children,
+            # never to the ProgramData directory itself.
+            issues.append(f"{path} has an effective Creator Owner ACE")
+            continue
+        if not rule.get("allow") and sid in STANDARD_PRINCIPALS:
+            issues.append(f"{path} has a deny ACE for standard principal {sid}")
+            continue
+        if not rule.get("allow"):
+            continue
+        masks[sid] = masks.get(sid, 0) | int(rule.get("rights", 0))
+    for sid in (SYSTEM_SID, ADMINISTRATORS_SID):
+        if (masks.get(sid, 0) & FULL_CONTROL_MASK) != FULL_CONTROL_MASK:
+            issues.append(f"{path} does not grant full control to {sid}")
+    standard_mask = 0
+    for sid in STANDARD_PRINCIPALS:
+        standard_mask |= masks.get(sid, 0)
+    dangerous_mask = REPLACE_CHILD_MASK
+    for rule in rules:
+        sid = str(rule.get("sid", ""))
+        if (
+            sid not in STANDARD_PRINCIPALS | {SYSTEM_SID, ADMINISTRATORS_SID, CREATOR_OWNER_SID}
+            and rule.get("allow")
+            and not _is_inherit_only(rule)
+            and int(rule.get("rights", 0)) & dangerous_mask
+        ):
+            issues.append(f"{path} grants child-replacement rights to an unclassified principal")
+    if standard_mask & dangerous_mask:
+        issues.append(f"standard users can delete or replace children beneath {path}")
+    if path.casefold() == str(PROGRAM_DATA).casefold() and (masks.get(USERS_SID, 0) & READ_EXECUTE_MASK) != READ_EXECUTE_MASK:
+        issues.append("BUILTIN\\Users lack read/execute on C:\\ProgramData")
+
+
+def _check_child_acl(row: dict[str, Any], issues: list[str]) -> None:
+    path = str(row.get("path", "L-vault runtime path"))
+    if row.get("reparse"):
+        issues.append(f"{path} is a reparse point")
+    if row.get("exists") is not True:
+        issues.append(f"{path} is missing")
+        return
+    if row.get("is_directory") and row.get("protected") is not True:
+        issues.append(f"{path} inherits an unverified DACL")
+    rules = row.get("rules")
+    if not isinstance(rules, list) or not rules:
+        issues.append(f"{path} has no readable DACL")
+        return
+    masks: dict[str, int] = {}
+    owner_deny = 0
+    for rule in rules:
+        sid = str(rule.get("sid", ""))
+        if sid not in ALLOWED_CHILD_PRINCIPALS:
+            issues.append(f"{path} has an unexpected ACE principal {sid}")
+            continue
+        mask = int(rule.get("rights", 0))
+        if sid == OWNER_RIGHTS_SID:
+            if rule.get("allow") or (mask & OWNER_CONTROL_MASK) != OWNER_CONTROL_MASK:
+                issues.append(f"{path} does not deny owner DACL/owner changes")
+            else:
+                owner_deny |= mask
+            continue
+        if not rule.get("allow"):
+            issues.append(f"{path} has an unexpected deny ACE for {sid}")
+            continue
+        masks[sid] = masks.get(sid, 0) | mask
+    for sid in (SYSTEM_SID, ADMINISTRATORS_SID):
+        if masks.get(sid, 0) & FULL_CONTROL_MASK != FULL_CONTROL_MASK:
+            issues.append(f"{path} does not grant full control to {sid}")
+    user_mask = masks.get(USERS_SID, 0)
+    if user_mask & READ_EXECUTE_MASK != READ_EXECUTE_MASK or user_mask & UNSAFE_USER_WRITE_MASK:
+        issues.append(f"{path} does not limit BUILTIN\\Users to read/execute")
+    if (owner_deny & OWNER_CONTROL_MASK) != OWNER_CONTROL_MASK:
+        owner_sid = str(row.get("owner_sid", ""))
+        if owner_sid not in {SYSTEM_SID, ADMINISTRATORS_SID}:
+            issues.append(f"{path} is owned by an unelevated principal without owner-rights protection")
+
+
+def _signature_issues(rows: list[dict[str, Any]], expected_thumbprint: str = CLONE_RUNTIME_SIGNER_THUMBPRINT) -> list[str]:
+    if not re.fullmatch(r"[A-Fa-f0-9]{40}", expected_thumbprint):
+        return ["the L-vault release Authenticode thumbprint is not pinned"]
+    wanted = {str(WORKER).casefold(), str(VSS_HELPER).casefold()}
+    observed = {
+        str(row.get("path", "")).casefold(): row
+        for row in rows
+        if isinstance(row, dict)
+    }
+    issues: list[str] = []
+    for path in sorted(wanted):
+        row = observed.get(path)
+        if row is None:
+            issues.append(f"runtime signature evidence is missing: {path}")
+            continue
+        if str(row.get("status", "")).casefold() != "valid":
+            issues.append(f"runtime Authenticode signature is not valid: {path}")
+        actual = re.sub(r"\s+", "", str(row.get("thumbprint", ""))).upper()
+        if actual != expected_thumbprint.upper():
+            issues.append(f"runtime signer does not match the pinned L-vault publisher: {path}")
+    if set(observed) != wanted:
+        issues.append("Authenticode query returned an unexpected runtime file set")
+    return issues
+
+
+def _query_signature_facts() -> list[dict[str, Any]]:
+    files = [WORKER, VSS_HELPER]
+    encoded_paths = base64.b64encode(json.dumps([str(path) for path in files]).encode("utf-8")).decode("ascii")
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$paths = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('""" + encoded_paths + r"""')) | ConvertFrom-Json
+$rows = foreach ($path in $paths) {
+    $signature = Get-AuthenticodeSignature -LiteralPath $path
+    [pscustomobject]@{
+        path = [IO.Path]::GetFullPath($path)
+        status = [string]$signature.Status
+        thumbprint = if ($signature.SignerCertificate) { [string]$signature.SignerCertificate.Thumbprint } else { '' }
+    }
+}
+ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
+"""
+    command = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    executable = _system_powershell()
+    system_directory = executable.parents[2]
+    windows_directory = system_directory.parent
+    environment = {
+        "SystemRoot": str(windows_directory),
+        "windir": str(windows_directory),
+        "SystemDrive": windows_directory.anchor.rstrip("\\/"),
+        "PATH": str(system_directory),
+        "PSModulePath": str(executable.parent / "Modules"),
+        "TEMP": str(windows_directory / "Temp"),
+        "TMP": str(windows_directory / "Temp"),
+    }
+    result = subprocess.run(
+        [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+        cwd=str(executable.parent),
+        env=environment,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode:
+        raise OSError("Authenticode runtime validation failed")
+    payload = json.loads(result.stdout)
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list) or len(payload) != len(files):
+        raise OSError("Windows returned incomplete Authenticode evidence")
+    return payload
+
+
+def verify_clone_runtime_security() -> CloneRuntimeSecurityReport:
+    """Freshly audit fixed ProgramData ancestry and runtime ACLs, read-only."""
+    if os.name != "nt":
+        return CloneRuntimeSecurityReport(False, ("Windows clone runtime requires Windows",), {})
+    paths = [SYSTEM_DRIVE_ROOT, PROGRAM_DATA, APP_ROOT, RUNTIME_ROOT, RUNTIME_TEMP, STATE_ROOT, WORKER, VSS_HELPER, OWNER_SID]
+    try:
+        rows = _query_acl_facts(paths)
+    except Exception as exc:
+        return CloneRuntimeSecurityReport(False, (f"Windows ACL query failed ({type(exc).__name__})",), {})
+    issues: list[str] = []
+    evidence: dict[str, Any] = {}
+    for row in rows[:2]:
+        if row.get("exists") is not True:
+            issues.append(f"{row.get('path')} is missing")
+        else:
+            _check_parent_acl(row, issues)
+            evidence[f"{row.get('path')}_owner_sid"] = row.get("owner_sid")
+            evidence[f"{row.get('path')}_standard_users_can_replace_child"] = any(
+                rule.get("allow")
+                and not _is_inherit_only(rule)
+                and str(rule.get("sid", "")) in STANDARD_PRINCIPALS
+                and (int(rule.get("rights", 0)) & REPLACE_CHILD_MASK) != 0
+                for rule in row.get("rules", [])
+            )
+    for row in rows[2:]:
+        _check_child_acl(row, issues)
+        evidence[str(row.get("path", "unknown"))] = {
+            "exists": row.get("exists"),
+            "owner_sid": row.get("owner_sid"),
+            "dacl_protected": row.get("protected"),
+            "reparse": row.get("reparse"),
+        }
+    if WORKER.is_file() and VSS_HELPER.is_file():
+        try:
+            issues.extend(_signature_issues(_query_signature_facts()))
+        except Exception as exc:
+            issues.append(f"runtime Authenticode verification failed ({type(exc).__name__})")
+    else:
+        issues.append("the protected clone worker and VSS requester are not both installed")
+    unique_issues = tuple(dict.fromkeys(issues))
+    return CloneRuntimeSecurityReport(not unique_issues, unique_issues, evidence)
+
+
+def require_clone_runtime_security() -> CloneRuntimeSecurityReport:
+    """Raise a stable error if the protected worker runtime cannot be trusted."""
+    report = verify_clone_runtime_security()
+    if not report.ready:
+        raise RuntimeError("; ".join(report.issues))
+    return report

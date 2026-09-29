@@ -86,8 +86,8 @@ automation:
       days:
       - Sunday
     disk_clone:
-      enabled: true
-      name: Bootable Disk Clone
+      enabled: false
+      name: Legacy Bootable Disk Clone
       command: disk-clone-run
       frequency: daily
       time: '03:00'

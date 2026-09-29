@@ -27,6 +27,7 @@ from .disk_clone import (
     windows_powershell_environment,
     windows_powershell_path,
 )
+from .clone_roles import EXPECTED_SIZE_BYTES, DiskRole, PROTECTED_ROLE, SOURCE_ROLE, TARGET_ROLE, matches_role as _matches_disk_role
 from .utils import atomic_write_text
 
 
@@ -35,40 +36,11 @@ DISKGENIUS_VERSION = "6.1.1"
 DISKGENIUS_PUBLISHER = "Qinhuangdao Yizhishu Software Development Co., Ltd."
 CLONE_MODE = "system_migration_hot"
 CLONE_MODE_LABEL = "System Migration · Hot Migration"
-EXPECTED_SIZE_BYTES = 1_000_204_886_016
 SESSION_FILE = "diskgenius_normal_clone_session.json"
 ENROLLMENT_FILE = "diskgenius_clone_enrollment.json"
 ENROLLMENT_SECRET_FILE = "diskgenius_clone_enrollment.secret"
 EFI_GPT_TYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 BASIC_GPT_TYPE = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"
-
-
-@dataclass(frozen=True)
-class DiskRole:
-    name: str
-    model: str
-    serial_suffix: str
-    pnp_device_id: str
-    storage_unique_id: str
-    size_bytes: int
-    bus_type: str
-
-
-SOURCE_ROLE = DiskRole(
-    "source", "KINGSTON SNV2S1000G", "775.",
-    r"SCSI\DISK&VEN_NVME&PROD_KINGSTON_SNV2S10\5&1664D250&0&000000",
-    "eui.00000000000000000026B76866541775", EXPECTED_SIZE_BYTES, "NVMe",
-)
-TARGET_ROLE = DiskRole(
-    "target", "ST1000VM002-1CT162", "4EM2",
-    r"SCSI\DISK&VEN_&PROD_ST1000VM002-1CT1\5&BC4E48B&0&000000",
-    "5000C50074F087A4", EXPECTED_SIZE_BYTES, "SATA",
-)
-PROTECTED_ROLE = DiskRole(
-    "protected", "HGST HTS541010A9E680", "91NS",
-    r"SCSI\DISK&VEN_HGST&PROD_HTS541010A9E680\5&BC4E48B&0&030000",
-    "5000CC8AD6DC50FE", EXPECTED_SIZE_BYTES, "SATA",
-)
 
 
 @dataclass(frozen=True)
@@ -489,15 +461,7 @@ def verify_system_migration_layout(source: DiskIdentity, target: DiskIdentity) -
 
 
 def _matches_role(disk: DiskIdentity, role: DiskRole) -> bool:
-    serial = disk.serial.strip().casefold()
-    return (
-        disk.model.strip().casefold() == role.model.casefold()
-        and serial.endswith(role.serial_suffix.casefold())
-        and disk.pnp_device_id.strip().casefold() == role.pnp_device_id.casefold()
-        and disk.storage_unique_id.strip().casefold() == role.storage_unique_id.casefold()
-        and disk.size_bytes == role.size_bytes
-        and disk.bus_type.casefold() == role.bus_type.casefold()
-    )
+    return _matches_disk_role(disk, role)
 
 
 def _validate_known_kingston_layout(source: DiskIdentity) -> None:

@@ -71,18 +71,12 @@ python -m localvault replica-plan --root <VAULT_ROOT> --destination <REPLICA_ROO
 python -m localvault replica --root <VAULT_ROOT> --destination <REPLICA_ROOT>
 ```
 
-Os nomes e horarios padrao do scheduler sao: Daily Backup 02:00, Weekly Takeout Import 03:00 aos domingos, Verify Weekly 04:00 aos domingos e Bootable Disk Clone 03:00 quando habilitado. Essa última tarefa é o executor offline legado e permanece fail-closed; ela não controla a ação manual Clone do sistema descrita abaixo.
+Os nomes e horários padrão do agendador são: Daily Backup 02:00, Weekly Takeout Import 03:00 aos domingos e Verify Weekly 04:00 aos domingos. A tarefa Legacy Bootable Disk Clone é legada, desabilitada em novas instalações e não define o clone normal de dados.
 
-## Clone do sistema Windows
+## Clone de dados do Windows
 
-Abra **L-vault → Clone do sistema** e escolha **Clone now**. O caminho normal usa DiskGenius 6.1.1 em **Tools → System Migration → Hot Migration**. Não exige Clonezilla, USB, menu BIOS/UEFI ou comandos Linux; não altere a sequência de boot.
+O clone normal está sendo reconstruído dentro do L-vault como um clone de dados não inicializável. Não abra DiskGenius nem Clonezilla e não altere as configurações de boot para esse fluxo.
 
-O papel autorizado da origem é KINGSTON SNV2S1000G / `****775.` (Windows atual, somente leitura). O destino autorizado é ST1000VM002-1CT162 / `****4EM2` e será apagado. O HGST HTS541010A9E680 / `****91NS` contém `E:\LocalVault`; nunca selecione esse disco no DiskGenius. A página mostra os números de disco e volumes atuais após uma inventarização fresca e pede confirmação visual da origem e destino; L-vault repete a validação das identidades persistentes antes da confirmação destrutiva.
+Os papéis físicos autorizados são KINGSTON SNV2S1000G / `****775.` como origem somente leitura; ST1000VM002-1CT162 / `****4EM2` como destino que será apagado; e HGST HTS541010A9E680 / `****91NS` como disco protegido do repositório. A página mantém o clone desabilitado enquanto o helper elevado protegido e o snapshot VSS first-party não estiverem disponíveis e validados. Não use uma ferramenta externa como substituto.
 
-No assistente DiskGenius, mantenha selecionadas as partições padrão de sistema/boot: a ESP Kingston ativa auditada é a partição 2 (100 MiB), e as partições 3–5 são ESPs históricas. Confirme visualmente Kingston como origem e Seagate como destino; deixe desmarcada qualquer opção para alterar a sequência de boot; escolha Hot Migration. Depois da conclusão exibida pelo DiskGenius, feche-o e use **Verificar resultado** em L-vault.
-
-L-vault verifica GPT, uma ESP FAT32, partição Windows NTFS, Windows, arquivos EFI/BCD e o vínculo entre BCD e o Windows migrado. Essa verificação é estrutural e não inicia o Windows clonado. O estado BitLocker da origem é exibido quando o Windows permite consultá-lo; se aparecer como desconhecido, confirme-o no Windows antes de aceitar a gravação. Mantenha a chave de recuperação disponível se o Kingston estiver criptografado.
-
-O modo assistido não lê as linhas selecionadas no DiskGenius. A seleção visual do proprietário e o relato de conclusão do fornecedor permanecem entradas confiáveis. Se a janela de revalidação expirar antes do início, não aceite o aviso de sobrescrita: feche DiskGenius sem iniciar a gravação, registre o cancelamento seguro no L-vault e comece uma sessão nova. Uma falha ou interrupção não é repetida automaticamente.
-
-Os comandos CLI `disk-clone-*` e a tarefa agendada Bootable Disk Clone pertencem ao antigo fluxo offline Clonezilla e continuam separados desta ação manual. Sua opção `disk_clone.enabled` controla apenas o executor legado; não habilita Clonezilla nem altera o fluxo DiskGenius do proprietário. Veja [a implementação e seus limites](docs/diskgenius-normal-clone.md) e [o protótipo offline](docs/disk-clone-offline.md).
+Os comandos `disk-clone-*`, o fluxo DiskGenius e o protótipo Clonezilla são caminhos legados/históricos e não definem o clone normal de dados.

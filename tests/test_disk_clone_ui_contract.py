@@ -7,45 +7,47 @@ BASE = ROOT / "src" / "localvault" / "templates" / "base.html"
 REPLICA = ROOT / "src" / "localvault" / "templates" / "replica.html"
 
 
-def test_disk_clone_ui_shows_the_assisted_diskgenius_path_and_destructive_boundary():
+def test_clone_ui_is_first_party_and_binds_the_authorized_disk_roles():
     html = TEMPLATE.read_text(encoding="utf-8")
-    assert "DiskGenius 6.1.1" in html
-    assert "System Migration" in html
-    assert "Hot Migration" in html
-    assert "Clone now" in html
-    assert "Todos os dados do Seagate serão substituídos" in html
-    assert "O progresso e o resultado aparecem no DiskGenius" in html
-    assert "O DiskGenius informou que a migração foi concluída com sucesso" in html
-    assert "L-vault exclui este disco do mapeamento" in html
-    assert "Clonezilla" not in html
-    assert "BIOS" not in html
-    assert "nonce" not in html.casefold()
-    assert "/dev/sd" not in html
+    for expected in (
+        "{{ clone_mode }}",
+        "source_display.model",
+        "source_display.masked_serial",
+        "target_display.model",
+        "protected_display.model",
+        "ALL DATA ON TARGET WILL BE ERASED",
+        "Bootable",
+        "Clone now",
+        "Type <strong>CLONE</strong>",
+        "Windows inbox VSS, Storage, and NTFS file-copy facilities",
+    ):
+        assert expected in html
+    for implementation_noise in ("DiskGenius", "Clonezilla", "BIOS", "UEFI", "PowerShell", "BitLocker", "nonce", "/dev/sd", "handoff"):
+        assert implementation_noise.casefold() not in html.casefold()
+    assert 'action="/disk-clone/start"' in html
+    assert 'action="/disk-clone/cancel"' in html
+    assert 'action="/disk-clone/recover-vss"' in html
+    assert 'aria-live="polite"' in html
+    assert "fetch(statusUrl" in html
 
 
-def test_replica_and_physical_clone_are_distinct_surfaces():
+def test_replica_and_first_party_disk_clone_are_distinct_surfaces():
     replica = REPLICA.read_text(encoding="utf-8")
     base = BASE.read_text(encoding="utf-8")
     clone = TEMPLATE.read_text(encoding="utf-8")
     assert "Réplica de arquivos" in replica
-    assert "não é um clone bootável" in replica
+    assert "não é um clone de dados do Windows" in replica
+    assert "Clone de dados" in replica
     assert 'href="/disk-clone"' in replica
     assert "Réplica de arquivos" in base
-    assert "Clone do sistema" in clone
+    assert "{{ clone_mode }}" in clone
 
 
-def test_clone_ui_never_claims_a_physical_boot_test_from_structure_alone():
+def test_clone_ui_reports_data_clone_bootability_and_explicit_exclusions():
     html = TEMPLATE.read_text(encoding="utf-8")
-    assert "não inicia o Windows clonado" in html
-    assert "boot físico" in html
-
-
-def test_clone_ui_explains_owner_selection_and_lvault_revalidation():
-    html = TEMPLATE.read_text(encoding="utf-8")
-    assert "Conferi no DiskGenius a origem Kingston e o destino Seagate" in html
-    assert "Revalidar identidade do destino" in html
-    assert "protected_role.model" in html
-    assert "Número de disco" not in html
-    assert "partição 2 (100 MiB)" in html
-    assert "partições 3–5 são históricas" in html
-    assert "fechei o DiskGenius" in html
+    assert "No · this is a data clone" in html
+    assert "pagefile.sys" in html
+    assert "hiberfil.sys" in html
+    assert "swapfile.sys" in html
+    assert "Junctions and mount-point destinations are not traversed" in html
+    assert "unsupported reparse points fail closed" in html
