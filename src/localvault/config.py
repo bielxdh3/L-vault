@@ -76,7 +76,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "daily_backup": {"enabled": True, "name": "Daily Backup", "command": "daily-backup", "frequency": "daily", "time": "02:00", "days": []},
             "weekly_takeout": {"enabled": True, "name": "Weekly Takeout Import", "command": "auto-takeout", "frequency": "weekly", "time": "03:00", "days": ["Sunday"]},
             "verify_weekly": {"enabled": True, "name": "Verify Weekly", "command": "verify", "frequency": "weekly", "time": "04:00", "days": ["Sunday"]},
-            "disk_clone": {"enabled": True, "name": "Bootable Disk Clone", "command": "disk-clone-run", "frequency": "daily", "time": "03:00", "days": [], "start_when_available": False},
+            "disk_clone": {"enabled": False, "name": "Legacy Bootable Disk Clone", "command": "disk-clone-run", "frequency": "daily", "time": "03:00", "days": [], "start_when_available": False},
         },
     },
 }
