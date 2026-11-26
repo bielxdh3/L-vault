@@ -43,3 +43,47 @@ jobs:
             git status --short
             throw "Validation generated repository changes"
           }
+
+  rust-integrity:
+    name: Rust integrity (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: native/integrity
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Check Rust minimum version
+        run: |
+          rust_version="$(rustc --version | awk '{ print $2 }')"
+          IFS=. read -r rust_major rust_minor _ <<< "${rust_version%%-*}"
+          if (( rust_major < 1 || (rust_major == 1 && rust_minor < 88) )); then
+            echo "Rust 1.88.0 or newer is required; found ${rust_version}" >&2
+            exit 1
+          fi
+          echo "Using Rust ${rust_version} (minimum: 1.88.0)"
+
+      - name: Check Rust formatting
+        run: cargo fmt --check
+
+      - name: Run locked Rust tests
+        run: cargo test --locked
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/lvault-integrity-target
+
+      - name: Confirm clean checkout
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git status --short
+            exit 1
+          fi
