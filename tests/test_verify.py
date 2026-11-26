@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from localvault import db
@@ -24,14 +25,14 @@ def _index_file(p, path: Path, data: bytes, *, indexed_digest: str | None = None
         db.upsert_file(conn, sha256=digest, path=path, media_type="photo", size=len(data), source="synthetic")
 
 
-def test_verify_sample_limit_counts_successful_rows_only(tmp_path: Path):
+def test_verify_matches_native_catalog_projection_fixture(tmp_path: Path):
     p = ensure_directories(tmp_path / "vault")
     db.init_db(p.db)
     vault = p.root / "vault" / "synthetic"
     missing = vault / "missing.bin"
-    corrupt = vault / "corrupt.bin"
-    valid = vault / "valid.bin"
-    later_corrupt = vault / "later-corrupt.bin"
+    same_size_mismatch = vault / "same-size-mismatch.bin"
+    matching = vault / "matching.bin"
+    later_missing = vault / "later-missing.bin"
 
     with db.connect(p.db) as conn:
         db.upsert_file(
@@ -42,18 +43,38 @@ def test_verify_sample_limit_counts_successful_rows_only(tmp_path: Path):
             size=16,
             source="synthetic",
         )
-    _index_file(p, corrupt, b"changed", indexed_digest=hashlib.sha256(b"original").hexdigest())
-    _index_file(p, valid, b"valid")
-    _index_file(p, later_corrupt, b"also-changed", indexed_digest=hashlib.sha256(b"later-original").hexdigest())
+    # The indexed bytes are `right`; the present bytes are `wrong`, both five bytes long.
+    _index_file(
+        p,
+        same_size_mismatch,
+        b"wrong",
+        indexed_digest=hashlib.sha256(b"right").hexdigest(),
+    )
+    _index_file(p, matching, b"match")
+    with db.connect(p.db) as conn:
+        db.upsert_file(
+            conn,
+            sha256=hashlib.sha256(b"later missing").hexdigest(),
+            path=later_missing,
+            media_type="photo",
+            size=len(b"later missing"),
+            source="synthetic",
+        )
 
-    report = verify_vault(p, RunReport(source="vault", mode="verify_sample"), sample_limit=1)
+    full_report = verify_vault(p, RunReport(source="vault", mode="verify_full"), sample_limit=None)
+    sample_report = verify_vault(p, RunReport(source="vault", mode="verify_sample"), sample_limit=1)
 
-    assert report.imported_count == 1
-    assert report.failed_count == 2
-    assert report.errors == [
+    expected_errors = [
         {"item_path": str(missing), "error": "Indexed file is missing"},
-        {"item_path": str(corrupt), "error": "SHA-256 mismatch"},
+        {"item_path": str(same_size_mismatch), "error": "SHA-256 mismatch"},
+        {"item_path": str(later_missing), "error": "Indexed file is missing"},
     ]
+    assert full_report.imported_count == 1
+    assert full_report.failed_count == 3
+    assert full_report.errors == expected_errors
+    assert sample_report.imported_count == 1
+    assert sample_report.failed_count == 2
+    assert sample_report.errors == expected_errors[:2]
 
 
 def test_verify_zero_sample_limit_remains_unlimited(tmp_path: Path):
@@ -68,6 +89,25 @@ def test_verify_zero_sample_limit_remains_unlimited(tmp_path: Path):
     assert report.imported_count == 1
     assert report.failed_count == 1
     assert report.errors[0]["error"] == "SHA-256 mismatch"
+
+
+def test_verify_propagates_non_missing_read_errors(tmp_path: Path):
+    p = ensure_directories(tmp_path / "vault")
+    db.init_db(p.db)
+    directory = p.root / "vault" / "synthetic" / "not-a-file"
+    directory.mkdir(parents=True)
+    with db.connect(p.db) as conn:
+        db.upsert_file(
+            conn,
+            sha256="0" * 64,
+            path=directory,
+            media_type="photo",
+            size=0,
+            source="synthetic",
+        )
+
+    with pytest.raises(OSError):
+        verify_vault(p, RunReport(source="vault", mode="verify_full"), sample_limit=None)
 
 
 def test_verify_cli_preserves_full_and_sample_report_modes(tmp_path: Path):
