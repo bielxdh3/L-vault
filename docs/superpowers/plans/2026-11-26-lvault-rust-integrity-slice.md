@@ -6,7 +6,7 @@
 
 **Architecture:** Put a small library crate in `native/integrity` and use RustCrypto `sha2` for SHA-256. The Python package is setuptools-only and has no Rust packaging path, so this slice will not build, discover, or invoke a Rust executable. Python remains the runtime source of truth until a later, separately gated packaging decision.
 
-**Tech Stack:** Existing Python 3.12+ CLI; Rust 1.85+ library using `sha2 = 0.11.2`; synthetic pytest and Cargo tests. The crate version is pinned in its manifest and lockfile. The official [sha2 crate docs](https://docs.rs/crate/sha2/0.11.1) describe the maintained RustCrypto implementation as pure Rust with a portable software backend.
+**Tech Stack:** Existing Python 3.12+ CLI; Rust 1.88+ library using `sha2 = 0.11.2`; synthetic pytest and Cargo tests. The crate version is pinned in its manifest and lockfile. Cargo confirmed that this sha2 release requires Rust 1.88. The official [sha2 crate docs](https://docs.rs/crate/sha2/0.11.2) describe the maintained RustCrypto implementation as pure Rust with a portable software backend.
 
 **Spec:** Current user request; base commit `7a214f1cee0eba481b00f1bf5ea46409e77cd798` on `gptop02/rust-integrity-foundation`.
 
@@ -50,6 +50,20 @@ Checkout before edits: clean at `7a214f1cee0eba481b00f1bf5ea46409e77cd798`. The 
 | JavaScript | 1 | 98 |
 | **Total** | **71** | **20,708** |
 
+Post-change tracked production-source distribution, counted with the same git ls-files extension and path-component method after staging the integrity library source:
+
+| Tracked production-source language | Files | Physical lines |
+|---|---:|---:|
+| Python | 44 | 17,060 |
+| Rust | 6 | 1,278 |
+| PowerShell | 5 | 1,152 |
+| HTML | 14 | 782 |
+| CSS | 2 | 376 |
+| JavaScript | 1 | 98 |
+| **Total** | **72** | **20,746** |
+
+The added Rust integration tests remain excluded because their path contains tests; manifests, lockfiles, documentation, task caches, and evidence are excluded from source counts.
+
 Method: enumerate paths with `git ls-files`; count only `.py`, `.rs`, `.ps1`, `.psm1`, `.cs`, `.c`, `.h`, `.cpp`, `.hpp`, `.js`, `.jsx`, `.ts`, `.tsx`, `.html`, `.css`, `.sh`, `.bash`, `.bat`, `.cmd`, and `.sql` files; exclude any tracked path containing a `tests`, `docs`, or `.github` component. File counts and physical lines are grouped by language; line totals include blank and comment lines. Untracked caches and fixtures are not in the input. The five Rust files at baseline belong to `native/vss_snapshot` and are out of scope.
 
 Baseline commands and results:
@@ -91,17 +105,26 @@ Verified Python contracts: indexed missing paths report `Indexed file is missing
 - `sha256_file(path: impl AsRef<Path>) -> io::Result<String>` returns lowercase SHA-256 hex.
 - `verify_file(path: impl AsRef<Path>, expected_sha256: &str) -> io::Result<bool>` returns false on any exact-string digest mismatch; file-open/read failures remain I/O errors, including `NotFound`.
 
-- [ ] Add an empty `src/lib.rs` scaffold and write `hashes_empty_and_abc_as_lowercase_sha256` (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` and `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`), `hashes_multichunk_fixture_to_python_hashlib_vector` (`b'a'` repeated 2,097,169 times → `c2273a45bd6d19d2714b8279b1fd1123bb746e7f7f6331085fb6ecaa30164546`), `verify_file_returns_mismatch_without_error`, `verify_file_returns_not_found`, and `verify_file_leaves_fixture_unchanged` in `native/integrity/tests/file_verification.rs`.
-- [ ] Run the Cargo test target before adding either public function; expect RED from unresolved `sha256_file` and `verify_file` imports.
-- [ ] Implement a read-only `File::open` streaming loop using a 1 MiB buffer and `sha2::Sha256`; add no CLI, process invocation, file creation, Python binding, or fallback behavior.
-- [ ] Run `cargo fmt --check`, `cargo check --locked`, and `cargo test --locked` for `native/integrity`, with `CARGO_HOME` and `CARGO_TARGET_DIR` under E:.
-- [ ] Run the existing `native/vss_snapshot` formatting/check/test gates without editing that component, then rerun Python compile, focused contracts, and the repository pytest gate once after the implementation.
-- [ ] Recount tracked source files with the baseline methodology, inspect the diff and final Git status, and create one coherent local commit with the exact Codex co-author trailer only if the validations justify it.
-- [ ] Record final review evidence in the task ledger and retain the worktree and evidence for the parent review.
+- [x] Add an empty `src/lib.rs` scaffold and write `hashes_empty_and_abc_as_lowercase_sha256` (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` and `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`), `hashes_multichunk_fixture_to_python_hashlib_vector` (`b'a'` repeated 2,097,169 times → `c2273a45bd6d19d2714b8279b1fd1123bb746e7f7f6331085fb6ecaa30164546`, with a matching `verify_file` result), `verify_file_returns_mismatch_without_error` (wrong, uppercase, and malformed expected values return `false`), `verify_file_returns_not_found` (`ErrorKind::NotFound`), and `verify_file_leaves_fixture_unchanged` (same bytes and directory entries) in `native/integrity/tests/file_verification.rs`.
+- [x] Run the Cargo test target before adding either public function; RED was exit 101 from unresolved sha256_file and verify_file imports. No existing Python behavior bug was changed or claimed.
+- [x] Implement a read-only `File::open` streaming loop using a 1 MiB buffer and `sha2::Sha256`; add no CLI, process invocation, file creation, Python binding, or fallback behavior.
+- [x] Run cargo fmt --check, cargo check --locked, and cargo test --locked for native/integrity, with Cargo caches and build output under E:. Final result: fmt and check exit 0; 5 Rust tests passed.
+- [x] Run the existing native/vss_snapshot format/check/test gates without editing that component; fmt and check exited 0, and its 3 Rust tests passed. Windows Python compile exited 0; the focused integrity/restore/CLI contracts passed: 36 passed, 1 skipped. The repository-wide pytest outcome and E:-only temp-root limitations are recorded below.
+- [x] Recount tracked source files with the baseline method and inspect the staged source changes; the post-change index count is 72 files / 20,746 physical lines.
+- [x] Create one coherent local Task 2 commit with the exact Codex co-author trailer; do not push or publish.
+- [x] Record verification, source counts, and commit evidence in this plan and the task ledger; retain the worktree and evidence for parent review.
+
+## Post-change verification and limits
+
+- The full Windows Python run completed: 431 passed, 5 failed, 2 skipped in 558.42 seconds. Four failures in tests/test_offline_preparation.py were caused by its synthetic signer home inheriting a tmp_path under the repository and tripping the existing outside-repository guard. Rerunning those four tests once with an E-hosted temporary root outside the checkout passed: 4 passed.
+- tests/test_disk_clone.py::test_protected_path_conflict_uses_mount_not_disk_number still fails because its synthetic target mounts E: while tmp_path must also be on E: under the task constraint; the production path-conflict function therefore correctly sees that file as on the target volume. No test or production behavior was changed to hide this conflict.
+- The pre-change full pytest run was incomplete: it showed five failures at 82% but produced no final summary before its bounded stop. The equal failure count is not proof the failing cases are identical.
+- New Rust parity tests followed RED-to-GREEN: the test-only crate failed to compile with unresolved public imports (exit 101), then the implemented crate passed all five tests. No pre-existing behavior bug was fixed.
+- native/vss_snapshot was not edited. No performance benefit was measured or claimed.
 
 ## Sequential migration candidates and retention gates
 
 1. **Read-only catalog/reporting (candidate after this slice):** expose existing indexed file metadata and summary/report calculations as a read-only Rust boundary. Python retains SQLite ownership, schema/migrations, report persistence, CLI, and error formatting. Require exact row-order, count, missing/corrupt, and serialized-report parity using synthetic fixtures before considering opt-in use.
 2. **Recovery planning (candidate after catalog parity):** calculate restore candidates and conflict decisions from a read-only catalog snapshot. Keep destination validation, staging, copy/overwrite/rename, manifests, and all restore writes in Python. Require deterministic plan parity for traversal, links/reparse points, missing/corrupt files, conflicts, and low-space outcomes before any further decision.
 
-Retain Python for SQLite writes/schema, ingest, scheduling, auth/TLS, UI/CLI/report contracts, restore and replica writes, and all clone/VSS behavior unless a later slice demonstrates complete behavioral parity and a trusted, supported packaging path. A future integration must use an exact package-contained artifact with verified build provenance and no path search or fallback; it must retain Python error mapping and be opt-in until all supported-platform gates pass. Gate each candidate on Python 3.12+ Windows compile/full pytest, Rust fmt/check/test on Windows, and portable Rust compile/test on Linux and macOS; run minimum-supported Rust and current stable. Measure equivalent synthetic workloads before making any performance claim. Do not plan a pure-language rewrite.
+Retain Python for SQLite writes/schema, ingest, scheduling, auth/TLS, UI/CLI/report contracts, restore and replica writes, and all clone/VSS behavior unless a later slice demonstrates complete behavioral parity and a trusted, supported packaging path. A future integration must use an exact package-contained artifact with verified build provenance and no path search or fallback; it must retain Python error mapping and be opt-in until all supported-platform gates pass. Gate each candidate on Python 3.12+ Windows compile/full pytest, Rust fmt/check/test on Windows, and portable Rust compile/test on Linux and macOS; run minimum-supported Rust 1.88 and current stable. Measure equivalent synthetic workloads before making any performance claim. Do not plan a pure-language rewrite.
