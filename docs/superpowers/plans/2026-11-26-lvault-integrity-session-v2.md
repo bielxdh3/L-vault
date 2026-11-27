@@ -45,4 +45,12 @@
 - [x] Implement dispatch and the incremental session loop in `native/integrity/src/main.rs`; reject unsupported input with fixed stderr diagnostics and exit code 64, preserve native file errors, and flush each result before reading another frame.
 - [x] Document the command, frame bounds, UTF-8 limitation, clean/truncated EOF rules, response records, and lockstep requirement in `native/integrity/README.md`.
 - [x] Run `cargo fmt --check --manifest-path native/integrity/Cargo.toml` and `cargo test --locked --offline --manifest-path native/integrity/Cargo.toml`; formatting and the complete crate test suite passed, including existing `hash-v1` tests.
-- [ ] Review and commit the verified task with the exact attribution trailer; confirm the commit SHA and trailer, then complete the whole-branch review.
+- [x] Review and commit the verified task with the exact attribution trailer; confirm the commit SHA and trailer, then complete the whole-branch review.
+
+## Review record
+
+- Implementation commit reviewed: `1e6ce8e1d3a737543480eeb1431f51622a6099bb`.
+- Independent review: approved; no critical or important findings.
+- Deferred minor: the lockstep integration tests use blocking `read_line`; a future regression that waits for the next request before replying could leave that test waiting.
+- Validation ran on Windows: `cargo fmt --check --manifest-path native/integrity/Cargo.toml` passed; `cargo test --locked --offline --manifest-path native/integrity/Cargo.toml` passed 17 tests.
+- Linux parity, throughput benchmarking, and remote CI were not run.
