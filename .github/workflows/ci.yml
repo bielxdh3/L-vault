@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - main
+      - gptop02/rust-integrity-foundation
 
 permissions:
   contents: read
