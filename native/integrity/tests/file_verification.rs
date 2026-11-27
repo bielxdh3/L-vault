@@ -3,7 +3,9 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lvault_integrity::{sha256_file, verify_file};
+use lvault_integrity::{
+    CatalogFailureKind, CatalogRecord, sha256_file, verify_catalog_records, verify_file,
+};
 
 static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -128,4 +130,117 @@ fn verify_file_leaves_fixture_unchanged() {
         before_bytes
     );
     assert_eq!(fixtures.entries(), before_entries);
+}
+
+#[test]
+fn catalog_projection_preserves_python_order_and_sample_limit_semantics() {
+    let fixtures = FixtureDir::new();
+    let missing = fixtures.0.join("missing.bin");
+    // The indexed bytes are `right`; the present bytes are `wrong`, both five bytes long.
+    let same_size_mismatch = fixtures.file("same-size-mismatch.bin", b"wrong");
+    let matching = fixtures.file("matching.bin", b"match");
+    let later_missing = fixtures.0.join("later-missing.bin");
+    let records = [
+        CatalogRecord {
+            path: &missing,
+            expected_sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+        },
+        CatalogRecord {
+            path: &same_size_mismatch,
+            expected_sha256: "27042f4e6eca7d0b2a7ee4026df2ecfa51d3339e6d122aa099118ecd8563bad9",
+        },
+        CatalogRecord {
+            path: &matching,
+            expected_sha256: "4945a70fa7f9c13fe1931a3372ac5798140d42eba74d0dd805a4a216ed3a8142",
+        },
+        CatalogRecord {
+            path: &later_missing,
+            expected_sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+        },
+    ];
+
+    let full = verify_catalog_records(records.iter().copied(), None)
+        .expect("verify all readable catalog records");
+
+    assert_eq!(full.matches, 1);
+    assert_eq!(
+        full.failures
+            .iter()
+            .map(|failure| failure.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            CatalogFailureKind::Missing,
+            CatalogFailureKind::DigestMismatch,
+            CatalogFailureKind::Missing,
+        ]
+    );
+    assert_eq!(
+        full.failures
+            .iter()
+            .map(|failure| failure.path)
+            .collect::<Vec<_>>(),
+        vec![
+            missing.as_path(),
+            same_size_mismatch.as_path(),
+            later_missing.as_path()
+        ]
+    );
+
+    let zero_limit = verify_catalog_records(records.iter().copied(), Some(0))
+        .expect("a zero sample limit remains unlimited");
+    assert_eq!(zero_limit.matches, 1);
+    assert_eq!(zero_limit.failures, full.failures);
+
+    let mut visited = Vec::new();
+    let sampled = verify_catalog_records(
+        records
+            .iter()
+            .copied()
+            .enumerate()
+            .inspect(|(index, _)| visited.push(*index))
+            .map(|(_, record)| record),
+        Some(1),
+    )
+    .expect("verify records through the first successful sample");
+
+    assert_eq!(sampled.matches, 1);
+    assert_eq!(
+        sampled
+            .failures
+            .iter()
+            .map(|failure| failure.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            CatalogFailureKind::Missing,
+            CatalogFailureKind::DigestMismatch
+        ]
+    );
+    assert_eq!(
+        sampled
+            .failures
+            .iter()
+            .map(|failure| failure.path)
+            .collect::<Vec<_>>(),
+        vec![missing.as_path(), same_size_mismatch.as_path()]
+    );
+    assert_eq!(visited, [0, 1, 2]);
+}
+
+#[test]
+fn catalog_projection_propagates_non_missing_open_errors_unchanged() {
+    let fixtures = FixtureDir::new();
+    let directory = fixtures.0.join("not-a-file");
+    fs::create_dir(&directory).expect("create synthetic directory fixture");
+
+    let error = verify_catalog_records(
+        [CatalogRecord {
+            path: &directory,
+            expected_sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+        }],
+        None,
+    )
+    .expect_err("an error opening or reading an existing directory must propagate");
+
+    assert_ne!(error.kind(), ErrorKind::NotFound);
+    assert!(error.raw_os_error().is_some());
 }
