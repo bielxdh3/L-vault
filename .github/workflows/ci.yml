@@ -7,6 +7,9 @@ on:
   pull_request:
     branches:
       - main
+      - gptop02/rust-integrity-foundation
+      - gptop02/rust-catalog-projection
+      - gptop02/rust-package-prototype
 
 permissions:
   contents: read
