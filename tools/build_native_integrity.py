@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -110,16 +111,44 @@ def _scratch_root(path: Path, repo: Path) -> Path:
 
 
 def _cargo_registry_source(path: Path, repo: Path) -> Path:
-    resolved = path.expanduser().resolve()
-    if resolved.drive.upper() != "E:":
+    source = path.expanduser()
+    if ".." in source.parts:
+        raise StagingError("Cargo registry source must not contain parent path components")
+    source = source.absolute()
+    if source.drive.upper() != "E:":
         raise StagingError("Cargo registry source must be on E:")
-    if resolved.name.lower() != "registry" or not resolved.is_dir():
+    if source.name.lower() != "registry":
         raise StagingError("Cargo registry source must be an existing registry directory")
-    if resolved == repo or repo in resolved.parents:
+    if source == repo or repo in source.parents:
         raise StagingError("Cargo registry source must be outside the checkout")
-    if any(item.is_symlink() for item in resolved.rglob("*")):
-        raise StagingError("Cargo registry source must not contain symbolic links")
-    return resolved
+
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+    def reject_reparse_point(metadata: os.stat_result) -> None:
+        if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & reparse_point:
+            raise StagingError("Cargo registry source must not contain symbolic links or reparse points")
+
+    current = Path(source.anchor)
+    metadata = current.lstat()
+    reject_reparse_point(metadata)
+    for part in source.parts[1:]:
+        current /= part
+        metadata = current.lstat()
+        reject_reparse_point(metadata)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise StagingError("Cargo registry source must be an existing registry directory")
+
+    def inspect(directory: Path) -> None:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                child = Path(entry.path)
+                metadata = child.lstat()
+                reject_reparse_point(metadata)
+                if stat.S_ISDIR(metadata.st_mode):
+                    inspect(child)
+
+    inspect(source)
+    return source
 
 
 def build(args: argparse.Namespace) -> dict[str, str]:

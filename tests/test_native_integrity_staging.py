@@ -1,9 +1,16 @@
 import hashlib
 import json
+import os
+import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 import uuid
 from pathlib import Path
+
+import pytest
+
+from tools import build_native_integrity
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -169,6 +176,73 @@ def test_rejects_non_host_target_before_creating_scratch(tmp_path: Path) -> None
     assert completed.returncode != 0
     assert "does not match installed Rust host" in completed.stderr
     assert not scratch.exists()
+
+
+def test_rejects_registry_root_reparse_point_before_scanning(tmp_path: Path, monkeypatch) -> None:
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    original_lstat = os.lstat
+    scanned: list[Path] = []
+
+    def lstat(path):
+        result = original_lstat(path)
+        if Path(path) == registry:
+            return SimpleNamespace(
+                st_mode=stat.S_IFLNK,
+                st_file_attributes=getattr(result, "st_file_attributes", 0),
+            )
+        return result
+
+    original_scandir = os.scandir
+
+    def scandir(path):
+        scanned.append(Path(path))
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    monkeypatch.setattr(os, "scandir", scandir)
+
+    with pytest.raises(build_native_integrity.StagingError, match="reparse point"):
+        build_native_integrity._cargo_registry_source(registry, tmp_path / "repo")
+
+    assert scanned == []
+
+
+def test_rejects_descendant_reparse_point_without_traversing_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    registry = tmp_path / "registry"
+    descendant = registry / "cache"
+    descendant.mkdir(parents=True)
+    original_lstat = os.lstat
+    scanned: list[Path] = []
+
+    def lstat(path):
+        result = original_lstat(path)
+        if Path(path) == descendant:
+            return SimpleNamespace(
+                st_mode=result.st_mode,
+                st_file_attributes=(
+                    getattr(result, "st_file_attributes", 0)
+                    | getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                ),
+            )
+        return result
+
+    original_scandir = os.scandir
+
+    def scandir(path):
+        scanned.append(Path(path))
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    monkeypatch.setattr(os, "scandir", scandir)
+
+    with pytest.raises(build_native_integrity.StagingError, match="reparse point"):
+        build_native_integrity._cargo_registry_source(registry, tmp_path / "repo")
+
+    assert registry in scanned
+    assert descendant not in scanned
 
 
 def test_isolates_cargo_home_and_temp_paths_from_parent_environment(
