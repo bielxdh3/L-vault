@@ -4,17 +4,29 @@ import os
 import stat
 import subprocess
 import sys
+import importlib.util
+import tempfile
 from types import SimpleNamespace
 import uuid
 from pathlib import Path
 
 import pytest
 
-from tools import build_native_integrity
-
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 STAGING_ENTRYPOINT = REPOSITORY / "tools" / "build_native_integrity.py"
+_STAGING_SPEC = importlib.util.spec_from_file_location(
+    "build_native_integrity", STAGING_ENTRYPOINT
+)
+assert _STAGING_SPEC is not None and _STAGING_SPEC.loader is not None
+build_native_integrity = importlib.util.module_from_spec(_STAGING_SPEC)
+_STAGING_SPEC.loader.exec_module(build_native_integrity)
+
+
+@pytest.fixture
+def tmp_path() -> Path:
+    """Keep Cargo fixtures on E:, as required by the staging policy."""
+    return Path(tempfile.mkdtemp(prefix="lvault-staging-test-", dir="E:/"))
 
 
 def _run_git(repo: Path, *args: str) -> str:
