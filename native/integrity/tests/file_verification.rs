@@ -159,7 +159,8 @@ fn catalog_projection_preserves_python_order_and_sample_limit_semantics() {
         },
     ];
 
-    let full = verify_catalog_records(records.iter().copied(), None);
+    let full = verify_catalog_records(records.iter().copied(), None)
+        .expect("verify all readable catalog records");
 
     assert_eq!(full.matches, 1);
     assert_eq!(
@@ -185,7 +186,8 @@ fn catalog_projection_preserves_python_order_and_sample_limit_semantics() {
         ]
     );
 
-    let zero_limit = verify_catalog_records(records.iter().copied(), Some(0));
+    let zero_limit = verify_catalog_records(records.iter().copied(), Some(0))
+        .expect("a zero sample limit remains unlimited");
     assert_eq!(zero_limit.matches, 1);
     assert_eq!(zero_limit.failures, full.failures);
 
@@ -198,7 +200,8 @@ fn catalog_projection_preserves_python_order_and_sample_limit_semantics() {
             .inspect(|(index, _)| visited.push(*index))
             .map(|(_, record)| record),
         Some(1),
-    );
+    )
+    .expect("verify records through the first successful sample");
 
     assert_eq!(sampled.matches, 1);
     assert_eq!(
@@ -224,24 +227,20 @@ fn catalog_projection_preserves_python_order_and_sample_limit_semantics() {
 }
 
 #[test]
-fn catalog_projection_keeps_non_missing_read_errors_distinct() {
+fn catalog_projection_propagates_non_missing_open_errors_unchanged() {
     let fixtures = FixtureDir::new();
     let directory = fixtures.0.join("not-a-file");
     fs::create_dir(&directory).expect("create synthetic directory fixture");
 
-    let projection = verify_catalog_records(
+    let error = verify_catalog_records(
         [CatalogRecord {
             path: &directory,
             expected_sha256: "0000000000000000000000000000000000000000000000000000000000000000",
         }],
         None,
-    );
+    )
+    .expect_err("an error opening or reading an existing directory must propagate");
 
-    assert_eq!(projection.matches, 0);
-    assert_eq!(projection.failures.len(), 1);
-    assert_eq!(projection.failures[0].path, directory.as_path());
-    assert!(matches!(
-        projection.failures[0].kind,
-        CatalogFailureKind::IoError(_)
-    ));
+    assert_ne!(error.kind(), ErrorKind::NotFound);
+    assert!(error.raw_os_error().is_some());
 }
