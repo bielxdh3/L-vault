@@ -23,23 +23,28 @@ _STAGING_SPEC.loader.exec_module(build_native_integrity)
 
 
 def _classify_synthetic_drive(root: Path, monkeypatch, drive: str) -> None:
-    path_type = type(root)
-    original_drive_property = path_type.drive
     resolved_root = root.resolve()
-    original_drive = original_drive_property.fget
+    original_drive = build_native_integrity._path_drive
 
     def synthetic_drive(path: Path) -> str:
-        # Use the real property while checking ancestry to avoid recursive drive lookup.
-        path_type.drive = original_drive_property
-        try:
-            if path == resolved_root or path.is_relative_to(resolved_root):
-                return drive
-            return original_drive(path)
-        finally:
-            path_type.drive = synthetic_drive_property
+        if path == resolved_root or path.is_relative_to(resolved_root):
+            return drive
+        return original_drive(path)
 
-    synthetic_drive_property = property(synthetic_drive)
-    monkeypatch.setattr(path_type, "drive", synthetic_drive_property)
+    monkeypatch.setattr(build_native_integrity, "_path_drive", synthetic_drive)
+
+
+def test_synthetic_drive_classification_does_not_rewrite_child_paths(
+    tmp_path: Path, monkeypatch
+) -> None:
+    filesystem_root = str(tmp_path)
+
+    _classify_synthetic_drive(tmp_path, monkeypatch, "E:")
+    child = tmp_path / "synthetic-child"
+
+    assert build_native_integrity._path_drive(child) == "E:"
+    assert str(child) == os.path.join(filesystem_root, "synthetic-child")
+    assert str(child.resolve()) == os.path.join(filesystem_root, "synthetic-child")
 
 
 def _run_git(repo: Path, *args: str) -> str:

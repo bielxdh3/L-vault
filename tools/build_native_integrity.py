@@ -44,6 +44,10 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _path_drive(path: Path) -> str:
+    return path.drive.upper()
+
+
 def _host_target() -> str:
     rustc = shutil.which("rustc")
     if rustc is None:
@@ -103,7 +107,7 @@ def _scratch_root(path: Path, repo: Path) -> Path:
     if os.name != "nt":
         raise StagingError("the local staging proof requires Windows and an E: scratch drive")
     resolved = path.expanduser().resolve()
-    if resolved.drive.upper() != "E:":
+    if _path_drive(resolved) != "E:":
         raise StagingError("scratch root must be on E:")
     if resolved == repo or repo in resolved.parents:
         raise StagingError("scratch root must be outside the checkout")
@@ -115,7 +119,7 @@ def _cargo_registry_source(path: Path, repo: Path) -> Path:
     if ".." in source.parts:
         raise StagingError("Cargo registry source must not contain parent path components")
     source = source.absolute()
-    if source.drive.upper() != "E:":
+    if _path_drive(source) != "E:":
         raise StagingError("Cargo registry source must be on E:")
     if source.name.lower() != "registry":
         raise StagingError("Cargo registry source must be an existing registry directory")
