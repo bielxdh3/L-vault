@@ -7,6 +7,7 @@ import os
 import tempfile
 from email.message import EmailMessage
 from pathlib import Path
+from typing import Callable
 from zipfile import ZipFile
 
 from . import db
@@ -19,7 +20,7 @@ from .utils import sha256_file
 from .verify import verify_vault
 
 
-def run_recovery_test() -> dict[str, object]:
+def run_recovery_test(*, hash_file: Callable[[Path], str] = sha256_file) -> dict[str, object]:
     """Run a bounded recovery drill entirely inside an ephemeral synthetic root."""
     with tempfile.TemporaryDirectory(prefix="localvault-recovery-") as temp_root:
         root = Path(temp_root) / "fixture"
@@ -33,7 +34,7 @@ def run_recovery_test() -> dict[str, object]:
         ingest_gmail_takeout(p, ingest_report, zip_paths=[archive])
 
         verify_report = RunReport(source="vault", mode="verify_full")
-        verify_vault(p, verify_report)
+        verify_vault(p, verify_report, hash_file=hash_file)
         integrity_verified = verify_report.failed_count == 0 and verify_report.imported_count > 0
 
         restore_result = None
@@ -42,7 +43,7 @@ def run_recovery_test() -> dict[str, object]:
         if integrity_verified:
             plan = plan_restore(p, destination, limit=1000)
             restore_result = execute_restore(p, plan)
-            restore_drill_passed = restore_result.status == "completed" and _restore_matches_index(p, destination)
+            restore_drill_passed = restore_result.status == "completed" and _restore_matches_index(p, destination, hash_file=hash_file)
             if not restore_drill_passed:
                 errors.append("Synthetic restore did not match the indexed file contract.")
         else:
@@ -92,7 +93,7 @@ def _write_fixture_zip(path: Path, marker: str = "synthetic") -> Path:
     return path
 
 
-def _restore_matches_index(p, destination: Path) -> bool:
+def _restore_matches_index(p, destination: Path, *, hash_file: Callable[[Path], str] = sha256_file) -> bool:
     with db.connect(p.db) as conn:
         rows = conn.execute("SELECT path,sha256,size FROM files ORDER BY id").fetchall()
     try:
@@ -106,7 +107,7 @@ def _restore_matches_index(p, destination: Path) -> bool:
         except (OSError, RuntimeError, ValueError):
             return False
         target = destination / relative
-        if not target.is_file() or target.stat().st_size != int(row["size"] or 0) or sha256_file(target) != row["sha256"]:
+        if not target.is_file() or target.stat().st_size != int(row["size"] or 0) or hash_file(target) != row["sha256"]:
             return False
     return bool(rows)
 
