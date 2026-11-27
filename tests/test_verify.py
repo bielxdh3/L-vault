@@ -110,6 +110,47 @@ def test_verify_propagates_non_missing_read_errors(tmp_path: Path):
         verify_vault(p, RunReport(source="vault", mode="verify_full"), sample_limit=None)
 
 
+def test_verify_accepts_caller_hash_callable_and_keeps_partial_report_on_error(tmp_path: Path):
+    p = ensure_directories(tmp_path / "vault")
+    db.init_db(p.db)
+    vault = p.root / "vault" / "synthetic"
+    first = vault / "first.bin"
+    fatal = vault / "fatal.bin"
+    _index_file(p, first, b"first", indexed_digest="not-the-digest")
+    _index_file(p, fatal, b"fatal")
+    calls: list[Path] = []
+
+    def injected_hash(path: Path) -> str:
+        calls.append(path)
+        if path == fatal:
+            raise RuntimeError("synthetic hash failure")
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    report = RunReport(source="vault", mode="verify_full")
+    with pytest.raises(RuntimeError, match="synthetic hash failure"):
+        verify_vault(p, report, hash_file=injected_hash)
+
+    assert calls == [first, fatal]
+    assert report.errors == [{"item_path": str(first), "error": "SHA-256 mismatch"}]
+
+
+def test_verify_default_hash_matches_injected_python_hasher(tmp_path: Path):
+    p = ensure_directories(tmp_path / "vault")
+    db.init_db(p.db)
+    vault = p.root / "vault" / "synthetic"
+    _index_file(p, vault / "one.bin", b"one")
+    _index_file(p, vault / "two.bin", b"two")
+
+    default = verify_vault(p, RunReport(source="vault", mode="verify_full"))
+    injected = verify_vault(
+        p,
+        RunReport(source="vault", mode="verify_full"),
+        hash_file=lambda path: hashlib.sha256(path.read_bytes()).hexdigest(),
+    )
+
+    assert default.imported_count == injected.imported_count == 2
+
+
 def test_verify_cli_preserves_full_and_sample_report_modes(tmp_path: Path):
     p = ensure_directories(tmp_path / "vault")
     db.init_db(p.db)
