@@ -109,6 +109,19 @@ def _scratch_root(path: Path, repo: Path) -> Path:
     return resolved
 
 
+def _cargo_registry_source(path: Path, repo: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if resolved.drive.upper() != "E:":
+        raise StagingError("Cargo registry source must be on E:")
+    if resolved.name.lower() != "registry" or not resolved.is_dir():
+        raise StagingError("Cargo registry source must be an existing registry directory")
+    if resolved == repo or repo in resolved.parents:
+        raise StagingError("Cargo registry source must be outside the checkout")
+    if any(item.is_symlink() for item in resolved.rglob("*")):
+        raise StagingError("Cargo registry source must not contain symbolic links")
+    return resolved
+
+
 def build(args: argparse.Namespace) -> dict[str, str]:
     repo = args.repo_root.resolve()
     if not (repo / ".git").exists() and _command(["git", "-C", str(repo), "rev-parse", "--show-toplevel"]).returncode:
@@ -131,11 +144,24 @@ def build(args: argparse.Namespace) -> dict[str, str]:
     cargo = shutil.which(args.cargo)
     if cargo is None:
         raise StagingError(f"Cargo executable not found: {args.cargo}")
+    registry_source = (
+        _cargo_registry_source(args.cargo_registry_source, repo)
+        if args.cargo_registry_source is not None
+        else None
+    )
     scratch.mkdir(parents=True, exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix="lvault-integrity-", dir=scratch)).resolve()
     if run_dir == repo or repo in run_dir.parents:
         raise StagingError("staging output resolved inside the checkout")
     target_dir = run_dir / "cargo-target"
+    cargo_home = run_dir / "cargo-home"
+    temp_dir = run_dir / "temp"
+    tmp_dir = run_dir / "tmp"
+    cargo_home.mkdir()
+    temp_dir.mkdir()
+    tmp_dir.mkdir()
+    if registry_source is not None:
+        shutil.copytree(registry_source, cargo_home / "registry")
     command = [
         cargo,
         "build",
@@ -149,9 +175,16 @@ def build(args: argparse.Namespace) -> dict[str, str]:
         "--target-dir",
         str(target_dir),
     ]
-    environment = os.environ.copy()
-    environment["CARGO_NET_OFFLINE"] = "true"
-    environment["CARGO_TARGET_DIR"] = str(target_dir)
+    environment = {key: value for key, value in os.environ.items() if not key.upper().startswith("CARGO_")}
+    environment.update(
+        {
+            "CARGO_HOME": str(cargo_home),
+            "CARGO_NET_OFFLINE": "true",
+            "CARGO_TARGET_DIR": str(target_dir),
+            "TEMP": str(temp_dir),
+            "TMP": str(tmp_dir),
+        }
+    )
     result = subprocess.run(command, cwd=run_dir, env=environment, capture_output=True, text=True, check=False)
     if result.returncode:
         detail = result.stderr.strip() or result.stdout.strip()
@@ -204,6 +237,11 @@ def main() -> int:
     parser.add_argument("--target", required=True, help="must equal rustc's installed host target")
     parser.add_argument("--scratch-root", required=True, type=Path, help="new or existing E: scratch directory")
     parser.add_argument("--cargo", default="cargo", help="Cargo executable on PATH")
+    parser.add_argument(
+        "--cargo-registry-source",
+        type=Path,
+        help="optional existing E: registry directory to seed the isolated Cargo home",
+    )
     args = parser.parse_args()
     try:
         print(json.dumps(build(args), sort_keys=True))

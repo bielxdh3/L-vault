@@ -27,12 +27,17 @@ def _host_target() -> str:
     return next(line.removeprefix("host: ") for line in completed.stdout.splitlines() if line.startswith("host: "))
 
 
-def _synthetic_repo(root: Path, main_source: str = "fn main() {}\n") -> tuple[Path, str, bytes]:
+def _synthetic_repo(
+    root: Path,
+    main_source: str = "fn main() {}\n",
+    build_script: str | None = None,
+) -> tuple[Path, str, bytes]:
     repo = root / "synthetic-repo"
     package = repo / "native" / "integrity"
     (package / "src").mkdir(parents=True)
     (package / "Cargo.toml").write_text(
-        "[package]\nname = \"lvault-integrity\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
+        "[package]\nname = \"lvault-integrity\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n"
+        + ('build = "build.rs"\n' if build_script else ""),
         encoding="utf-8",
     )
     lockfile = (
@@ -45,6 +50,8 @@ def _synthetic_repo(root: Path, main_source: str = "fn main() {}\n") -> tuple[Pa
     ).encode()
     (package / "Cargo.lock").write_bytes(lockfile)
     (package / "src" / "main.rs").write_text(main_source, encoding="utf-8")
+    if build_script:
+        (package / "build.rs").write_text(build_script, encoding="utf-8")
     (package / ".gitignore").write_text("src/local.rs\n", encoding="utf-8")
 
     _run_git(repo, "init", "--quiet")
@@ -73,20 +80,29 @@ def _synthetic_repo(root: Path, main_source: str = "fn main() {}\n") -> tuple[Pa
     return repo, revision, lockfile
 
 
-def _run_staging(repo: Path, revision: str, scratch: Path, target: str) -> subprocess.CompletedProcess[str]:
+def _run_staging(
+    repo: Path,
+    revision: str,
+    scratch: Path,
+    target: str,
+    registry_source: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        sys.executable,
+        str(STAGING_ENTRYPOINT),
+        "--repo-root",
+        str(repo),
+        "--source-revision",
+        revision,
+        "--target",
+        target,
+        "--scratch-root",
+        str(scratch),
+    ]
+    if registry_source is not None:
+        command.extend(["--cargo-registry-source", str(registry_source)])
     return subprocess.run(
-        [
-            sys.executable,
-            str(STAGING_ENTRYPOINT),
-            "--repo-root",
-            str(repo),
-            "--source-revision",
-            revision,
-            "--target",
-            target,
-            "--scratch-root",
-            str(scratch),
-        ],
+        command,
         capture_output=True,
         text=True,
     )
@@ -153,3 +169,82 @@ def test_rejects_non_host_target_before_creating_scratch(tmp_path: Path) -> None
     assert completed.returncode != 0
     assert "does not match installed Rust host" in completed.stderr
     assert not scratch.exists()
+
+
+def test_isolates_cargo_home_and_temp_paths_from_parent_environment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    build_script = '''
+use std::{env, fs, path::PathBuf};
+
+fn main() {
+    let cargo_home = PathBuf::from(env::var("CARGO_HOME").unwrap());
+    let observed = [
+        env::var("CARGO_HOME").unwrap(),
+        env::var("TEMP").unwrap(),
+        env::var("TMP").unwrap(),
+        cargo_home.join("config.toml").exists().to_string(),
+        cargo_home.join("credentials.toml").exists().to_string(),
+        cargo_home.join("registry").join("synthetic-cache-marker").exists().to_string(),
+        env::var_os("CARGO_REGISTRIES_CRATES_IO_TOKEN").is_some().to_string(),
+    ];
+    fs::write(
+        PathBuf::from(env::var("OUT_DIR").unwrap()).join("staging-env.txt"),
+        observed.join("\\n"),
+    )
+    .unwrap();
+}
+'''
+    repo, revision, _ = _synthetic_repo(tmp_path, build_script=build_script)
+    source_cargo_home = tmp_path / "source-cargo-home"
+    source_cargo_home.mkdir()
+    (source_cargo_home / "config.toml").write_text("[net]\noffline = false\n", encoding="utf-8")
+    (source_cargo_home / "credentials.toml").write_text('token = "synthetic-only"\n', encoding="utf-8")
+    registry_source = source_cargo_home / "registry"
+    registry_source.mkdir()
+    (registry_source / "synthetic-cache-marker").write_text("cached registry data\n", encoding="utf-8")
+    outside_cargo_home = tmp_path / "outside-cargo-home"
+    outside_cargo_home.mkdir()
+    (outside_cargo_home / "config.toml").write_text("[net]\noffline = true\n", encoding="utf-8")
+    (outside_cargo_home / "credentials.toml").write_text('token = "synthetic-only"\n', encoding="utf-8")
+    outside_temp = tmp_path / "outside-temp"
+    outside_tmp = tmp_path / "outside-tmp"
+    outside_temp.mkdir()
+    outside_tmp.mkdir()
+    monkeypatch.setenv("CARGO_HOME", str(outside_cargo_home))
+    monkeypatch.setenv("TEMP", str(outside_temp))
+    monkeypatch.setenv("TMP", str(outside_tmp))
+    monkeypatch.setenv("CARGO_REGISTRIES_CRATES_IO_TOKEN", "synthetic-only")
+    scratch = tmp_path / "scratch"
+
+    completed = _run_staging(repo, revision, scratch, _host_target(), registry_source)
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    manifest_path = Path(result["manifest_path"])
+    run_dir = manifest_path.parent
+    observations = list(
+        (run_dir / "cargo-target" / _host_target() / "release" / "build").glob(
+            "lvault-integrity-*/out/staging-env.txt"
+        )
+    )
+    assert len(observations) == 1
+    (
+        cargo_home,
+        temp,
+        tmp,
+        has_config,
+        has_credentials,
+        has_registry,
+        has_token,
+    ) = observations[0].read_text(encoding="utf-8").splitlines()
+    assert Path(cargo_home) == run_dir / "cargo-home"
+    assert Path(temp) == run_dir / "temp"
+    assert Path(tmp) == run_dir / "tmp"
+    assert Path(cargo_home).is_relative_to(scratch.resolve())
+    assert Path(temp).is_relative_to(scratch.resolve())
+    assert Path(tmp).is_relative_to(scratch.resolve())
+    assert has_config == "false"
+    assert has_credentials == "false"
+    assert has_registry == "true"
+    assert has_token == "false"

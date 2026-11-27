@@ -11,15 +11,19 @@ From the repository root in PowerShell, choose the host target reported by Rust 
 ```powershell
 $target = (rustc -vV | Select-String '^host: ').ToString().Substring(6)
 $scratch = 'E:\WorkTrees\lvault-integrity-scratch'
+$registry = 'E:\WorkTrees\gptop02-lvault-rust-spike\_spike\lvault-integrity\.task-cache\cargo-home\registry'
 py -3.14 tools/build_native_integrity.py `
   --source-revision 6ade1303d5ccf76e3ac9523932d40624ab722162 `
   --target $target `
-  --scratch-root $scratch
+  --scratch-root $scratch `
+  --cargo-registry-source $registry
 ```
 
-The helper creates a unique `lvault-integrity-*` run directory under `$scratch`. It keeps Cargo's target directory there, copies only the resulting `.exe` into `stage`, and writes `provenance.json`. The JSON returned on stdout gives the manifest and staged executable paths.
+The helper creates a unique `lvault-integrity-*` run directory under `$scratch`. Cargo's home, `TEMP`, `TMP`, and target directory all live inside that run directory. Cargo environment variables from the parent are discarded; the helper sets its isolated home, offline mode, target directory, `TEMP`, and `TMP`. It does not read a global Cargo home, config, credentials, or registry token environment variables.
 
-Cargo must already have the locked crate dependencies in its local cache. The helper does not install software or dependencies, does not contact the network, and fails if the offline locked build cannot complete. It does not write build output into the checkout.
+For a crate with registry dependencies, pass `--cargo-registry-source` with an existing `registry` directory on E: outside this checkout. The helper rejects other paths and symbolic links, and copies only that directory into the isolated Cargo home. The example uses a local cache; it does not install or fetch crates. Without this option, the Cargo home starts empty. The helper keeps Cargo's target directory there, copies only the resulting `.exe` into `stage`, and writes `provenance.json`. The JSON returned on stdout gives the manifest and staged executable paths.
+
+The supplied registry directory must already contain the locked crate dependencies. The helper does not install software or dependencies, does not contact the network, and fails if the offline locked build cannot complete. It does not write build output into the checkout.
 
 ## Run the synthetic entry-point tests
 
@@ -31,7 +35,7 @@ $env:PYTHONDONTWRITEBYTECODE = '1'
 py -3.14 -m pytest -q -p no:cacheprovider --basetemp=$testRoot tests/test_native_integrity_staging.py
 ```
 
-The tests cover the source revision and Git tree, lockfile digest, target and PE format, staged executable checksum, offline/locked build flags, clean checkout, rejection of ignored source files, and rejection of non-E: or non-host targets before output is created.
+The tests cover the source revision and Git tree, lockfile digest, target and PE format, staged executable checksum, offline/locked build flags, clean checkout, rejection of ignored source files, rejection of non-E: or non-host targets before output is created, and isolation of Cargo home, temporary paths, and inherited Cargo credentials/config with a synthetic local registry source.
 
 ## Read the provenance limits
 
