@@ -5,7 +5,6 @@ import stat
 import subprocess
 import sys
 import importlib.util
-import tempfile
 from types import SimpleNamespace
 import uuid
 from pathlib import Path
@@ -23,10 +22,24 @@ build_native_integrity = importlib.util.module_from_spec(_STAGING_SPEC)
 _STAGING_SPEC.loader.exec_module(build_native_integrity)
 
 
-@pytest.fixture
-def tmp_path() -> Path:
-    """Keep Cargo fixtures on E:, as required by the staging policy."""
-    return Path(tempfile.mkdtemp(prefix="lvault-staging-test-", dir="E:/"))
+def _classify_synthetic_drive(root: Path, monkeypatch, drive: str) -> None:
+    path_type = type(root)
+    original_drive_property = path_type.drive
+    resolved_root = root.resolve()
+    original_drive = original_drive_property.fget
+
+    def synthetic_drive(path: Path) -> str:
+        # Use the real property while checking ancestry to avoid recursive drive lookup.
+        path_type.drive = original_drive_property
+        try:
+            if path == resolved_root or path.is_relative_to(resolved_root):
+                return drive
+            return original_drive(path)
+        finally:
+            path_type.drive = synthetic_drive_property
+
+    synthetic_drive_property = property(synthetic_drive)
+    monkeypatch.setattr(path_type, "drive", synthetic_drive_property)
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -127,15 +140,44 @@ def _run_staging(
     )
 
 
-def test_stages_locked_host_binary_and_records_local_provenance(tmp_path: Path) -> None:
+def _run_staging_main(
+    repo: Path,
+    revision: str,
+    scratch: Path,
+    target: str,
+    monkeypatch,
+    registry_source: Path | None = None,
+) -> int:
+    command = [
+        str(STAGING_ENTRYPOINT),
+        "--repo-root",
+        str(repo),
+        "--source-revision",
+        revision,
+        "--target",
+        target,
+        "--scratch-root",
+        str(scratch),
+    ]
+    if registry_source is not None:
+        command.extend(["--cargo-registry-source", str(registry_source)])
+    monkeypatch.setattr(sys, "argv", command)
+    return build_native_integrity.main()
+
+
+def test_stages_locked_host_binary_and_records_local_provenance(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _classify_synthetic_drive(tmp_path, monkeypatch, "E:")
     repo, revision, lockfile = _synthetic_repo(tmp_path)
     scratch = tmp_path / "scratch"
     target = _host_target()
 
-    completed = _run_staging(repo, revision, scratch, target)
+    returncode = _run_staging_main(repo, revision, scratch, target, monkeypatch)
+    completed = capsys.readouterr()
 
-    assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout)
+    assert returncode == 0, completed.err
+    result = json.loads(completed.out)
     manifest_path = Path(result["manifest_path"])
     artifact_path = Path(result["artifact_path"])
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -155,16 +197,20 @@ def test_stages_locked_host_binary_and_records_local_provenance(tmp_path: Path) 
     assert _run_git(repo, "status", "--porcelain") == ""
 
 
-def test_rejects_ignored_untracked_crate_source_before_staging(tmp_path: Path) -> None:
+def test_rejects_ignored_untracked_crate_source_before_staging(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _classify_synthetic_drive(tmp_path, monkeypatch, "E:")
     repo, revision, _ = _synthetic_repo(tmp_path, "mod local;\nfn main() { local::run(); }\n")
     package = repo / "native" / "integrity"
     (package / "src" / "local.rs").write_text("pub fn run() {}\n", encoding="utf-8")
     scratch = tmp_path / "scratch"
 
-    completed = _run_staging(repo, revision, scratch, _host_target())
+    returncode = _run_staging_main(repo, revision, scratch, _host_target(), monkeypatch)
+    completed = capsys.readouterr()
 
-    assert completed.returncode != 0
-    assert "differs from the requested source revision" in completed.stderr
+    assert returncode != 0
+    assert "differs from the requested source revision" in completed.err
     assert not scratch.exists()
 
 
@@ -179,18 +225,27 @@ def test_rejects_non_e_scratch_before_creating_output(tmp_path: Path) -> None:
     assert not outside_scratch.exists()
 
 
-def test_rejects_non_host_target_before_creating_scratch(tmp_path: Path) -> None:
+def test_rejects_non_host_target_before_creating_scratch(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     repo, revision, _ = _synthetic_repo(tmp_path)
     scratch = tmp_path / "scratch"
+    _classify_synthetic_drive(tmp_path, monkeypatch, "E:")
 
-    completed = _run_staging(repo, revision, scratch, "not-a-target")
+    returncode = _run_staging_main(
+        repo, revision, scratch, "not-a-target", monkeypatch
+    )
+    completed = capsys.readouterr()
 
-    assert completed.returncode != 0
-    assert "does not match installed Rust host" in completed.stderr
+    assert returncode != 0
+    assert "does not match installed Rust host" in completed.err
     assert not scratch.exists()
 
 
-def test_rejects_registry_root_reparse_point_before_scanning(tmp_path: Path, monkeypatch) -> None:
+def test_rejects_registry_root_reparse_point_before_scanning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _classify_synthetic_drive(tmp_path, monkeypatch, "E:")
     registry = tmp_path / "registry"
     registry.mkdir()
     original_lstat = os.lstat
@@ -223,6 +278,7 @@ def test_rejects_registry_root_reparse_point_before_scanning(tmp_path: Path, mon
 def test_rejects_descendant_reparse_point_without_traversing_it(
     tmp_path: Path, monkeypatch
 ) -> None:
+    _classify_synthetic_drive(tmp_path, monkeypatch, "E:")
     registry = tmp_path / "registry"
     descendant = registry / "cache"
     descendant.mkdir(parents=True)
@@ -258,8 +314,9 @@ def test_rejects_descendant_reparse_point_without_traversing_it(
 
 
 def test_isolates_cargo_home_and_temp_paths_from_parent_environment(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, capsys
 ) -> None:
+    _classify_synthetic_drive(tmp_path, monkeypatch, "E:")
     build_script = '''
 use std::{env, fs, path::PathBuf};
 
@@ -303,10 +360,13 @@ fn main() {
     monkeypatch.setenv("CARGO_REGISTRIES_CRATES_IO_TOKEN", "synthetic-only")
     scratch = tmp_path / "scratch"
 
-    completed = _run_staging(repo, revision, scratch, _host_target(), registry_source)
+    returncode = _run_staging_main(
+        repo, revision, scratch, _host_target(), monkeypatch, registry_source
+    )
+    completed = capsys.readouterr()
 
-    assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout)
+    assert returncode == 0, completed.err
+    result = json.loads(completed.out)
     manifest_path = Path(result["manifest_path"])
     run_dir = manifest_path.parent
     observations = list(
