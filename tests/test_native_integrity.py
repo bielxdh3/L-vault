@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from queue import Queue
@@ -85,11 +86,13 @@ class _SyntheticProcess:
         block_write: bool = False,
         end_after_reply: bool = False,
         hang_on_close: bool = False,
+        exit_code: int | None = None,
     ) -> None:
         self.respond = respond
         self.block_write = block_write
         self.end_after_reply = end_after_reply
         self.hang_on_close = hang_on_close
+        self.exit_code = exit_code
         self.stdout = _SyntheticStdout()
         self.stdin = _SyntheticStdin(self)
         self.write_gate = threading.Event()
@@ -118,7 +121,7 @@ class _SyntheticProcess:
         if self.returncode is None:
             if not self.stdin_closed:
                 raise subprocess.TimeoutExpired("synthetic child", timeout)
-            self.returncode = 1 if self.file_error_seen else 0
+            self.returncode = self.exit_code if self.exit_code is not None else (1 if self.file_error_seen else 0)
         return self.returncode
 
 
@@ -195,12 +198,54 @@ def test_native_file_errors_preserve_os_code_without_echoing_path(
     with NativeIntegrityHashSession(tmp_path / "trusted.exe") as hash_file:
         with pytest.raises(error_type) as failure:
             hash_file(error_path)
-        assert failure.value.errno == expected_errno
+        if sys.platform == "win32" and status == "io" and raw_code != "-":
+            assert failure.value.winerror == int(raw_code)
+        else:
+            assert failure.value.errno == expected_errno
         assert failure.value.filename is None
         assert str(error_path) not in str(failure.value)
         assert hash_file(good_path) == "b" * 64
 
     assert len(process.frames) == 2
+
+
+def test_file_error_escaping_context_preserves_error_and_reaps_expected_exit(tmp_path, monkeypatch):
+    from localvault.native_integrity import NativeIntegrityHashSession
+
+    process = _SyntheticProcess(lambda _frame, index: f"v2\t{index}\tio\t5\n".encode("ascii"))
+    _, native_integrity = _install_process(monkeypatch, process)
+    monkeypatch.setattr(native_integrity, "sys", sys)
+
+    with pytest.raises(OSError, match="native integrity file operation failed") as failure:
+        with NativeIntegrityHashSession(tmp_path / "trusted.exe") as hash_file:
+            hash_file(Path("private path.bin"))
+
+    if sys.platform == "win32":
+        assert isinstance(failure.value, PermissionError)
+        assert failure.value.errno == 13
+        assert failure.value.winerror == 5
+    else:
+        assert failure.value.errno == 5
+    assert process.returncode == 1
+    assert not process.killed
+    assert process.wait_timeouts
+
+
+def test_unexpected_child_exit_after_successful_reply_is_reported(tmp_path, monkeypatch):
+    from localvault.native_integrity import NativeIntegrityHashSession
+
+    process = _SyntheticProcess(
+        lambda _frame, index: f"v2\t{index}\tok\t{'a' * 64}\n".encode("ascii"),
+        exit_code=1,
+    )
+    _install_process(monkeypatch, process)
+
+    with pytest.raises(OSError, match="session exited unsuccessfully"):
+        with NativeIntegrityHashSession(tmp_path / "trusted.exe") as hash_file:
+            assert hash_file(Path("private path.bin")) == "a" * 64
+
+    assert process.returncode == 1
+    assert not process.killed
 
 
 def test_session_counts_utf8_bytes_and_allows_the_maximum_frame(tmp_path, monkeypatch):

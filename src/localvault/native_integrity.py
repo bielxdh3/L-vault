@@ -5,6 +5,7 @@ from os import PathLike, fspath
 from pathlib import Path
 from queue import Full, Queue
 import re
+import sys
 from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired
 from threading import Event, Lock, Thread, current_thread
 from typing import BinaryIO
@@ -183,6 +184,8 @@ class NativeIntegrityHashSession:
                 raise FileNotFoundError(raw_code, message)
             if raw_code is None:
                 raise OSError(message)
+            if sys.platform == "win32":
+                raise OSError(0, message, None, raw_code)
             raise OSError(raw_code, message)
         finally:
             self._operation_lock.release()
