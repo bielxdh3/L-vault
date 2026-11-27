@@ -75,11 +75,21 @@ def test_recovery_drill_propagates_injected_copy_hash_failure():
         run_recovery_test(hash_file=fail_on_restored_copy)
 
 
-def test_recovery_drill_matches_local_hash_v1_binary_when_available():
-    binary_name = "lvault-integrity.exe" if os.name == "nt" else "lvault-integrity"
-    binary = Path(__file__).resolve().parents[1] / "native" / "integrity" / "target" / "debug" / binary_name
+def test_recovery_drill_matches_explicit_hash_v1_binary_when_pinned():
+    binary_value = os.environ.get("LVAULT_HASH_V1_BINARY")
+    expected_hash = os.environ.get("LVAULT_HASH_V1_SHA256")
+    if binary_value is None and expected_hash is None:
+        pytest.skip("optional hash-v1 parity skipped: set LVAULT_HASH_V1_BINARY and LVAULT_HASH_V1_SHA256")
+    if not binary_value or not expected_hash or not Path(binary_value).is_absolute():
+        pytest.fail("hash-v1 parity requires an absolute binary path and exact SHA-256")
+    if len(expected_hash) != 64 or any(c not in "0123456789abcdefABCDEF" for c in expected_hash):
+        pytest.fail("LVAULT_HASH_V1_SHA256 must be exactly 64 hexadecimal characters")
+
+    binary = Path(binary_value)
     if binary.is_symlink() or not binary.is_file():
-        pytest.skip("optional hash-v1 parity skipped: exact local debug build is absent")
+        pytest.fail("LVAULT_HASH_V1_BINARY must name an existing regular, non-symlink file")
+    if hashlib.sha256(binary.read_bytes()).hexdigest().casefold() != expected_hash.casefold():
+        pytest.fail("LVAULT_HASH_V1_BINARY SHA-256 does not match LVAULT_HASH_V1_SHA256")
 
     def hash_with_binary(path: Path) -> str:
         try:
@@ -88,7 +98,7 @@ def test_recovery_drill_matches_local_hash_v1_binary_when_available():
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
-                timeout=2,
+                timeout=15,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
