@@ -253,7 +253,7 @@ def test_rejects_registry_root_reparse_point_before_scanning(
     _classify_synthetic_drive(tmp_path, monkeypatch, "E:")
     registry = tmp_path / "registry"
     registry.mkdir()
-    original_lstat = os.lstat
+    original_lstat = Path.lstat
     scanned: list[Path] = []
 
     def lstat(path):
@@ -271,7 +271,7 @@ def test_rejects_registry_root_reparse_point_before_scanning(
         scanned.append(Path(path))
         return original_scandir(path)
 
-    monkeypatch.setattr(os, "lstat", lstat)
+    monkeypatch.setattr(Path, "lstat", lstat)
     monkeypatch.setattr(os, "scandir", scandir)
 
     with pytest.raises(build_native_integrity.StagingError, match="reparse point"):
@@ -287,7 +287,7 @@ def test_rejects_descendant_reparse_point_without_traversing_it(
     registry = tmp_path / "registry"
     descendant = registry / "cache"
     descendant.mkdir(parents=True)
-    original_lstat = os.lstat
+    original_lstat = Path.lstat
     scanned: list[Path] = []
 
     def lstat(path):
@@ -308,7 +308,7 @@ def test_rejects_descendant_reparse_point_without_traversing_it(
         scanned.append(Path(path))
         return original_scandir(path)
 
-    monkeypatch.setattr(os, "lstat", lstat)
+    monkeypatch.setattr(Path, "lstat", lstat)
     monkeypatch.setattr(os, "scandir", scandir)
 
     with pytest.raises(build_native_integrity.StagingError, match="reparse point"):
@@ -327,7 +327,9 @@ use std::{env, fs, path::PathBuf};
 
 fn main() {
     let cargo_home = PathBuf::from(env::var("CARGO_HOME").unwrap());
+    let out_dir = env::var("OUT_DIR").unwrap();
     let observed = [
+        out_dir.clone(),
         env::var("CARGO_HOME").unwrap(),
         env::var("TEMP").unwrap(),
         env::var("TMP").unwrap(),
@@ -337,7 +339,7 @@ fn main() {
         env::var_os("CARGO_REGISTRIES_CRATES_IO_TOKEN").is_some().to_string(),
     ];
     fs::write(
-        PathBuf::from(env::var("OUT_DIR").unwrap()).join("staging-env.txt"),
+        PathBuf::from(out_dir).join("staging-env.txt"),
         observed.join("\\n"),
     )
     .unwrap();
@@ -374,13 +376,11 @@ fn main() {
     result = json.loads(completed.out)
     manifest_path = Path(result["manifest_path"])
     run_dir = manifest_path.parent
-    observations = list(
-        (run_dir / "cargo-target" / _host_target() / "release" / "build").glob(
-            "lvault-integrity-*/out/staging-env.txt"
-        )
-    )
+    cargo_target = run_dir / "cargo-target"
+    observations = list(run_dir.rglob("staging-env.txt"))
     assert len(observations) == 1
     (
+        out_dir,
         cargo_home,
         temp,
         tmp,
@@ -389,6 +389,8 @@ fn main() {
         has_registry,
         has_token,
     ) = observations[0].read_text(encoding="utf-8").splitlines()
+    assert Path(out_dir) == observations[0].parent
+    assert Path(out_dir).is_relative_to(cargo_target)
     assert Path(cargo_home) == run_dir / "cargo-home"
     assert Path(temp) == run_dir / "temp"
     assert Path(tmp) == run_dir / "tmp"
