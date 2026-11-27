@@ -17,16 +17,21 @@ from localvault.verify import verify_vault
 
 
 _BINARY_ENV = "LVAULT_INTEGRITY_SESSION_EXE"
-_BINARY_SHA256 = "960fb0aa1c4a6984721e1297cec7a1c5372fa60df25248ab3d5b45181736490b"
+_BINARY_SHA256_ENV = "LVAULT_INTEGRITY_SESSION_SHA256"
 
 
 @pytest.fixture
 def pinned_integrity_binary() -> Path:
     value = os.environ.get(_BINARY_ENV)
-    if value is None:
-        pytest.skip(f"optional native integrity integration skipped: set {_BINARY_ENV}")
+    expected_sha256 = os.environ.get(_BINARY_SHA256_ENV)
+    if value is None and expected_sha256 is None:
+        pytest.skip(f"optional native integrity integration skipped: set {_BINARY_ENV} and {_BINARY_SHA256_ENV}")
+    if value is None or expected_sha256 is None:
+        pytest.fail(f"set both {_BINARY_ENV} and {_BINARY_SHA256_ENV}")
     if not value or not Path(value).is_absolute():
         pytest.fail(f"{_BINARY_ENV} must be an absolute executable path")
+    if len(expected_sha256) != 64 or any(char not in "0123456789abcdefABCDEF" for char in expected_sha256):
+        pytest.fail(f"{_BINARY_SHA256_ENV} must be a 64-character SHA-256 digest")
 
     executable = Path(value)
     if not executable.is_file():
@@ -47,7 +52,7 @@ def pinned_integrity_binary() -> Path:
             digest = hashlib.file_digest(artifact, "sha256").hexdigest()
     except OSError as error:
         pytest.fail(f"cannot hash {_BINARY_ENV}: {error}")
-    if digest.casefold() != _BINARY_SHA256:
+    if digest.casefold() != expected_sha256.casefold():
         pytest.fail(f"{_BINARY_ENV} SHA-256 does not match the pinned executable")
     return executable
 
@@ -101,18 +106,30 @@ def test_native_session_matches_python_recovery_and_sampled_verification(
         sample_limit=1,
     )
 
+    native_calls: list[Path] = []
     with NativeIntegrityHashSession(pinned_integrity_binary) as native_hash:
-        native_recovery = run_recovery_test(hash_file=native_hash)
+        def spy_forward(path: Path) -> str:
+            native_calls.append(path)
+            return native_hash(path)
+
+        native_recovery = run_recovery_test(hash_file=spy_forward)
+        assert len(native_calls) == 8
+        recovery_calls = native_calls.copy()
+        native_calls.clear()
         native_sample = verify_vault(
             paths,
             RunReport(source="vault", mode="verify_sample"),
             sample_limit=1,
-            hash_file=native_hash,
+            hash_file=spy_forward,
         )
 
     assert python_recovery["status"] == "passed"
     assert _normalized_recovery(native_recovery) == _normalized_recovery(python_recovery)
     assert _normalized_verification(python_sample) == _normalized_verification(native_sample)
+    assert len(recovery_calls[:4]) == 4  # recovery index verification
+    assert len(recovery_calls[4:]) == 4  # restored file verification
+    assert len(native_calls) == 1
+    assert native_calls[0] == paths.root / "vault" / "synthetic" / "sampled-first.bin"
     assert python_sample.imported_count == 1
     assert python_sample.failed_count == 0
     assert python_sample.errors == []
