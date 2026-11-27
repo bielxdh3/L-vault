@@ -28,7 +28,7 @@ Each callable invocation hashes exactly one path and waits for its reply before 
 
 The client invokes the absolute executable as `hash-session-v2` with `shell=False`. A request contains version byte `0x02`, an unsigned four-byte big-endian UTF-8 byte length, and one path of 1 through 65,536 bytes. Paths are encoded strictly as UTF-8, including Unicode; lossy conversion is not used.
 
-For every request, the client validates the response version, zero-based index, status, digest or raw OS code, and the bounded response line. `ok` returns a lowercase SHA-256 digest. `missing` raises `FileNotFoundError`; `io` raises `OSError`. When the native reply includes a raw OS code, it is preserved in `errno`. Error messages are fixed and do not include the path. Native file errors do not poison a valid session, though `verify_vault` itself propagates the error as it does for its current hash callback.
+For every request, the client validates the response version, zero-based index, status, digest or raw OS code, and the bounded response line. `ok` returns a lowercase SHA-256 digest. `missing` raises `FileNotFoundError`; `io` raises `OSError`. On POSIX, the raw OS code is preserved in `errno`. On Windows, the raw OS code is preserved in `winerror`, while `missing` keeps `errno` set to `ENOENT`. Error messages are fixed and do not include the path. Native file errors do not poison a valid session, though `verify_vault` itself propagates the error as it does for its current hash callback.
 
 Each request has a 15-minute timeout. Session close, process termination waits, and worker joins are also bounded. If the executable is unavailable or speaks a different protocol, the call fails; no alternate hasher is selected.
 

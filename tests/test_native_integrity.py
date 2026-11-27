@@ -175,6 +175,7 @@ def test_session_sends_one_utf8_frame_per_call_and_checks_reply_before_next_call
     [
         ("missing", "2", FileNotFoundError, 2),
         ("missing", "3", FileNotFoundError, 2),
+        ("missing", "5", FileNotFoundError, 2),
         ("io", "13", OSError, 13),
         ("io", "-2147483648", OSError, -2147483648),
         ("io", "-", OSError, None),
