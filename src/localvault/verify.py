@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from . import db
 from .config import VaultPaths
@@ -8,7 +9,14 @@ from .reports import RunReport
 from .utils import sha256_file
 
 
-def verify_vault(p: VaultPaths, report: RunReport, dry_run: bool = False, sample_limit: int | None = None) -> RunReport:
+def verify_vault(
+    p: VaultPaths,
+    report: RunReport,
+    dry_run: bool = False,
+    sample_limit: int | None = None,
+    *,
+    hash_file: Callable[[Path], str] = sha256_file,
+) -> RunReport:
     checked = 0
     with db.connect(p.db) as conn:
         for row in conn.execute("SELECT path,sha256 FROM files ORDER BY id").fetchall():
@@ -18,7 +26,7 @@ def verify_vault(p: VaultPaths, report: RunReport, dry_run: bool = False, sample
             if not path.exists():
                 report.error(path, "Indexed file is missing")
                 continue
-            if sha256_file(path) != row["sha256"]:
+            if hash_file(path) != row["sha256"]:
                 report.error(path, "SHA-256 mismatch")
                 continue
             checked += 1
