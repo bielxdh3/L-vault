@@ -1,6 +1,6 @@
 # Python native integrity session client
 
-`NativeIntegrityHashSession` is an opt-in Python capability for passing a caller-selected trusted absolute `lvault-integrity` executable to `verify_vault` as its `hash_file` callable. The module is not connected to the default hasher, configuration lookup, CLI, packaging, or recovery flow.
+`NativeIntegrityHashSession` is an opt-in capability for passing a caller-selected trusted absolute `lvault-integrity` executable to `verify_vault` as its `hash_file` callable. The default hasher, configuration, packaging, and recovery flow remain unchanged.
 
 ## Usage
 
@@ -23,6 +23,18 @@ with NativeIntegrityHashSession(trusted_executable) as hash_file:
 ```
 
 Each callable invocation hashes exactly one path and waits for its reply before returning. `verify_vault` controls which paths it visits, including its existing sample limit; the client does not queue or prefetch paths. Use the context manager so stdin receives EOF and the child process is closed within bounded waits. If verification raises an exception, a cleanup error does not replace that original exception.
+
+## Verify CLI opt-in
+
+The `verify` command can opt into the persistent Rust session by receiving both an explicit absolute executable path and its SHA-256 pin:
+
+```text
+localvault verify --root E:\LocalVault --sample-limit 1 --native-exe E:\build\lvault-integrity.exe --native-sha256 <64-hex-digest>
+```
+
+Both `--native-exe` and `--native-sha256` are required together. The command rejects malformed pins, non-matching files, relative or non-normalized paths, non-regular files, and paths that traverse symlinks, junctions, or reparse points before starting the executable. It does not search PATH or configuration and does not fall back to Python hashing when native verification is requested. Without either option, the existing Python hasher remains the default.
+
+Native validation, session startup, hashing, and teardown run inside the normal persisted verify report boundary. A startup or teardown error is recorded as a failed report and produces the existing failed-command exit code. Full and sampled verification keep their existing modes, sampling rules, and report format.
 
 ## Protocol and errors
 

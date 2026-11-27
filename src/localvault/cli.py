@@ -1,8 +1,11 @@
 ﻿from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
-import json
+import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -67,6 +70,7 @@ from .gmail_takeout import ingest_gmail_takeout
 from .health import health_snapshot
 from .locks import BackupLock
 from .migrations import migrate_to_takeout_photos
+from .native_integrity import NativeIntegrityHashSession
 from .photos import ingest_photos_takeout, scan_existing_media
 from .recovery import run_recovery_test
 from .replica import ReplicaValidationError, execute_replica, plan_replica
@@ -185,6 +189,33 @@ def finish_cli_command(report: RunReport) -> None:
     print_summary(report)
     if report.status == "failed":
         raise typer.Exit(1)
+
+
+def _validate_native_integrity_executable(executable: Path | None, expected_sha256: str | None) -> Path:
+    if executable is None or expected_sha256 is None:
+        raise ValueError("native executable and SHA-256 pin must be supplied together")
+    if re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256) is None:
+        raise ValueError("native SHA-256 pin must contain exactly 64 hexadecimal characters")
+    if not executable.is_absolute() or ".." in executable.parts:
+        raise ValueError("native integrity executable must be an absolute normalized path")
+
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    try:
+        for component in (executable, *executable.parents):
+            if component.is_symlink() or getattr(component, "is_junction", lambda: False)():
+                raise ValueError("native integrity executable path cannot resolve through a link")
+            component_stat = component.stat(follow_symlinks=False)
+            if getattr(component_stat, "st_file_attributes", 0) & reparse_flag:
+                raise ValueError("native integrity executable path cannot resolve through a reparse point")
+        if not stat.S_ISREG(executable.stat(follow_symlinks=False).st_mode):
+            raise ValueError("native integrity executable must be a regular file")
+        with executable.open("rb") as artifact:
+            actual_sha256 = hashlib.file_digest(artifact, "sha256").hexdigest()
+    except OSError:
+        raise ValueError("native integrity executable cannot be safely inspected") from None
+    if actual_sha256.casefold() != expected_sha256.casefold():
+        raise ValueError("native integrity executable SHA-256 does not match the pin")
+    return executable
 
 
 @app.callback()
@@ -451,9 +482,28 @@ def dedupe(root: Path = root_option(), dry_run: bool = dry_option()):
 
 
 @app.command("verify")
-def verify(root: Path = root_option(), sample_limit: Optional[int] = typer.Option(None, "--sample-limit")):
+def verify(
+    root: Path = root_option(),
+    sample_limit: Optional[int] = typer.Option(None, "--sample-limit"),
+    native_exe: Optional[Path] = typer.Option(None, "--native-exe", help="Explicit native integrity executable; requires --native-sha256."),
+    native_sha256: Optional[str] = typer.Option(None, "--native-sha256", help="Pinned SHA-256 for --native-exe."),
+):
     mode = "verify_full" if sample_limit is None else "verify_sample"
-    finish_cli_command(run_with_report(root, "vault", mode, verify_vault, dry_run=False, sample_limit=sample_limit))
+
+    def work(p, report, dry_run=False):
+        if native_exe is None and native_sha256 is None:
+            return verify_vault(p, report, dry_run=dry_run, sample_limit=sample_limit)
+        executable = _validate_native_integrity_executable(native_exe, native_sha256)
+        with NativeIntegrityHashSession(executable) as hash_file:
+            return verify_vault(
+                p,
+                report,
+                dry_run=dry_run,
+                sample_limit=sample_limit,
+                hash_file=hash_file,
+            )
+
+    finish_cli_command(run_with_report(root, "vault", mode, work, dry_run=False))
 
 
 @app.command("repair-index")
