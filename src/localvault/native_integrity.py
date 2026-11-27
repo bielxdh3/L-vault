@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 from dataclasses import dataclass, field
 from os import PathLike, fspath
 from pathlib import Path
@@ -181,6 +182,10 @@ class NativeIntegrityHashSession:
             if status == "missing":
                 if raw_code is None:
                     raise FileNotFoundError(message)
+                if sys.platform == "win32":
+                    error = FileNotFoundError(errno.ENOENT, message, None, raw_code)
+                    error.errno = errno.ENOENT
+                    raise error
                 raise FileNotFoundError(raw_code, message)
             if raw_code is None:
                 raise OSError(message)
