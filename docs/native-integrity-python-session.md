@@ -1,6 +1,6 @@
 # Python native integrity session client
 
-`NativeIntegrityHashSession` is an opt-in capability for passing a caller-selected trusted absolute `lvault-integrity` executable to `verify_vault` as its `hash_file` callable. The default hasher, configuration, packaging, and recovery flow remain unchanged.
+`NativeIntegrityHashSession` is an opt-in capability for passing a caller-selected trusted absolute `lvault-integrity` executable to `verify_vault` as its `hash_file` callable. The `verify` CLI also exposes this opt-in through explicit flags. The default hasher, configuration, packaging, and recovery flow remain unchanged.
 
 ## Usage
 
@@ -34,6 +34,8 @@ localvault verify --root E:\LocalVault --sample-limit 1 --native-exe E:\build\lv
 
 Both `--native-exe` and `--native-sha256` are required together. The command rejects malformed pins, non-matching files, relative or non-normalized paths, non-regular files, and paths that traverse symlinks, junctions, or reparse points before starting the executable. It does not search PATH or configuration and does not fall back to Python hashing when native verification is requested. Without either option, the existing Python hasher remains the default.
 
+Use only an executable you trust, and control both that file and its containing directory. The CLI checks the path and SHA-256 before launch, but it cannot prevent or detect concurrent replacement between the check and process start; the pin does not guarantee which bytes are executed if another actor can replace the file.
+
 Native validation, session startup, hashing, and teardown run inside the normal persisted verify report boundary. A startup or teardown error is recorded as a failed report and produces the existing failed-command exit code. Full and sampled verification keep their existing modes, sampling rules, and report format.
 
 ## Protocol and errors
@@ -46,4 +48,4 @@ Each request has a 15-minute timeout. Session close, process termination waits, 
 
 ## Scope
 
-This client only reads the explicit paths passed to its callable. It does not modify files. It remains a capability for a trusted caller and does not activate native hashing in application defaults or user-facing commands.
+This client only reads the explicit paths passed to its callable. It does not modify files. Native hashing remains opt-in: the CLI flags do not change the Python default or activate native hashing in other application flows.

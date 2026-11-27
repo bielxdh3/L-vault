@@ -7,8 +7,10 @@ import stat
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from localvault import db
+from localvault.cli import app
 from localvault.config import ensure_directories
 from localvault.native_integrity import NativeIntegrityHashSession
 from localvault.recovery import run_recovery_test
@@ -18,6 +20,7 @@ from localvault.verify import verify_vault
 
 _BINARY_ENV = "LVAULT_INTEGRITY_SESSION_EXE"
 _BINARY_SHA256_ENV = "LVAULT_INTEGRITY_SESSION_SHA256"
+runner = CliRunner()
 
 
 @pytest.fixture
@@ -133,3 +136,51 @@ def test_native_session_matches_python_recovery_and_sampled_verification(
     assert python_sample.imported_count == 1
     assert python_sample.failed_count == 0
     assert python_sample.errors == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the pinned integrity executable is Windows-only")
+def test_verify_cli_with_pinned_native_session_matches_python_sample(
+    pinned_integrity_binary: Path, tmp_path: Path
+):
+    paths = _sampled_fixture(tmp_path)
+    python_sample = verify_vault(
+        paths,
+        RunReport(source="vault", mode="verify_sample"),
+        sample_limit=1,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "verify",
+            "--root",
+            str(paths.root),
+            "--sample-limit",
+            "1",
+            "--native-exe",
+            str(pinned_integrity_binary),
+            "--native-sha256",
+            os.environ[_BINARY_SHA256_ENV],
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Status: ok" in result.output
+    with db.connect(paths.db) as conn:
+        row = conn.execute(
+            "SELECT mode,status,imported_count,failed_count,report_path "
+            "FROM backup_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    native_report = json.loads(Path(row["report_path"]).read_text(encoding="utf-8"))
+    assert row["mode"] == native_report["mode"] == "verify_sample"
+    assert row["status"] == native_report["status"] == "ok"
+    assert (
+        native_report["source"],
+        native_report["mode"],
+        native_report["imported_count"],
+        native_report["failed_count"],
+        tuple((error["item_path"], error["error"]) for error in native_report["errors"]),
+    ) == _normalized_verification(python_sample)
+    assert native_report["imported_count"] == 1
+    assert native_report["failed_count"] == 0
+    assert native_report["errors"] == []
