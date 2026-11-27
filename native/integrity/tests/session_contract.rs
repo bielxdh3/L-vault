@@ -1,8 +1,11 @@
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::ChildStdout;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
 
 const FRAME_VERSION: u8 = 2;
 const MAX_PATH_BYTES: usize = 65_536;
@@ -56,9 +59,27 @@ fn write_frame(input: &mut impl Write, path: &[u8]) {
     input.flush().expect("flush request frame");
 }
 
-fn read_reply(output: &mut impl BufRead) -> String {
-    let mut line = String::new();
-    let bytes = output.read_line(&mut line).expect("read one session reply");
+fn read_reply(child: &mut Child, output: &mut BufReader<ChildStdout>) -> String {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let result = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut line = String::new();
+            let result = output.read_line(&mut line).map(|bytes| (bytes, line));
+            let _ = sender.send(result);
+        });
+        match receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(result) => result.expect("read one session reply"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("session reply exceeded the 5 second deadline");
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("session reply reader stopped without a result");
+            }
+        }
+    });
+    let (bytes, line) = result;
     assert_ne!(
         bytes, 0,
         "session should reply before reading another frame"
@@ -111,13 +132,13 @@ fn session_v2_replies_in_lockstep_and_hashes_space_and_unicode_paths() {
 
     write_frame(&mut input, path_bytes(&first));
     assert_eq!(
-        read_reply(&mut output),
+        read_reply(&mut child, &mut output),
         "v2\t0\tok\tba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n"
     );
 
     write_frame(&mut input, path_bytes(&second));
     assert_eq!(
-        read_reply(&mut output),
+        read_reply(&mut child, &mut output),
         "v2\t1\tok\t2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n"
     );
 
@@ -142,7 +163,7 @@ fn session_v2_accepts_clean_eof_after_one_request() {
 
     write_frame(&mut input, path_bytes(&path));
     assert_eq!(
-        read_reply(&mut output),
+        read_reply(&mut child, &mut output),
         "v2\t0\tok\tba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n"
     );
 
@@ -175,17 +196,17 @@ fn session_v2_preserves_native_io_errors_and_continues_with_later_paths() {
 
     write_frame(&mut input, path_bytes(&missing));
     assert_eq!(
-        read_reply(&mut output),
+        read_reply(&mut child, &mut output),
         format!("v2\t0\tmissing\t{}\n", error_code(&missing_error))
     );
     write_frame(&mut input, path_bytes(&directory));
     assert_eq!(
-        read_reply(&mut output),
+        read_reply(&mut child, &mut output),
         format!("v2\t1\tio\t{}\n", error_code(&directory_error))
     );
     write_frame(&mut input, path_bytes(&good));
     assert_eq!(
-        read_reply(&mut output),
+        read_reply(&mut child, &mut output),
         "v2\t2\tok\tba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n"
     );
 
