@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zipfile import ZipFile, ZipInfo
@@ -27,6 +28,10 @@ from localvault.verify import verify_vault
 runner = CliRunner()
 
 
+def _public_recovery_json(report: dict[str, object]) -> str:
+    return json.dumps(report, ensure_ascii=False, separators=(",", ":"))
+
+
 def test_recovery_command_distinguishes_integrity_and_restore_status():
     result = runner.invoke(app, ["recovery-test"])
 
@@ -43,6 +48,73 @@ def test_recovery_drill_is_repeatable_and_sources_are_synthetic():
 
     assert first["status"] == second["status"] == "passed"
     assert first["restore"]["copied"] == second["restore"]["copied"]
+
+
+def test_recovery_drill_matches_public_report_with_injected_hasher():
+    hashed_paths: list[Path] = []
+
+    def injected_hash(path: Path) -> str:
+        hashed_paths.append(path)
+        return sha256_file(path)
+
+    default_report = run_recovery_test()
+    injected_report = run_recovery_test(hash_file=injected_hash)
+
+    assert _public_recovery_json(injected_report) == _public_recovery_json(default_report)
+    assert any("fixture" in path.parts for path in hashed_paths)
+    assert any("restore" in path.parts for path in hashed_paths)
+
+
+def test_recovery_drill_propagates_injected_copy_hash_failure():
+    def fail_on_restored_copy(path: Path) -> str:
+        if "restore" in path.parts:
+            raise RuntimeError("synthetic copied-fixture hash failure")
+        return sha256_file(path)
+
+    with pytest.raises(RuntimeError, match="synthetic copied-fixture hash failure"):
+        run_recovery_test(hash_file=fail_on_restored_copy)
+
+
+def test_recovery_drill_matches_explicit_hash_v1_binary_when_pinned():
+    binary_value = os.environ.get("LVAULT_HASH_V1_BINARY")
+    expected_hash = os.environ.get("LVAULT_HASH_V1_SHA256")
+    if binary_value is None and expected_hash is None:
+        pytest.skip("optional hash-v1 parity skipped: set LVAULT_HASH_V1_BINARY and LVAULT_HASH_V1_SHA256")
+    if not binary_value or not expected_hash or not Path(binary_value).is_absolute():
+        pytest.fail("hash-v1 parity requires an absolute binary path and exact SHA-256")
+    if len(expected_hash) != 64 or any(c not in "0123456789abcdefABCDEF" for c in expected_hash):
+        pytest.fail("LVAULT_HASH_V1_SHA256 must be exactly 64 hexadecimal characters")
+
+    binary = Path(binary_value)
+    if binary.is_symlink() or not binary.is_file():
+        pytest.fail("LVAULT_HASH_V1_BINARY must name an existing regular, non-symlink file")
+    if hashlib.sha256(binary.read_bytes()).hexdigest().casefold() != expected_hash.casefold():
+        pytest.fail("LVAULT_HASH_V1_BINARY SHA-256 does not match LVAULT_HASH_V1_SHA256")
+
+    def hash_with_binary(path: Path) -> str:
+        try:
+            result = subprocess.run(
+                [str(binary), "hash-v1", str(path)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise RuntimeError("synthetic hash-v1 invocation failed") from None
+        fields = result.stdout.rstrip("\r\n").split("\t")
+        if result.returncode != 0 or len(fields) != 4 or fields[:3] != ["v1", "0", "ok"]:
+            raise RuntimeError("synthetic hash-v1 returned an invalid result")
+        digest = fields[3]
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise RuntimeError("synthetic hash-v1 returned an invalid digest")
+        return digest
+
+    default_report = run_recovery_test()
+    binary_report = run_recovery_test(hash_file=hash_with_binary)
+
+    assert _public_recovery_json(binary_report) == _public_recovery_json(default_report)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows short-name alias behavior only applies on Windows")
