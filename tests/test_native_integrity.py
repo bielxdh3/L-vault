@@ -174,6 +174,7 @@ def test_session_sends_one_utf8_frame_per_call_and_checks_reply_before_next_call
     ("status", "raw_code", "error_type", "expected_errno"),
     [
         ("missing", "2", FileNotFoundError, 2),
+        ("missing", "3", FileNotFoundError, 2),
         ("io", "13", OSError, 13),
         ("io", "-2147483648", OSError, -2147483648),
         ("io", "-", OSError, None),
@@ -198,7 +199,11 @@ def test_native_file_errors_preserve_os_code_without_echoing_path(
     with NativeIntegrityHashSession(tmp_path / "trusted.exe") as hash_file:
         with pytest.raises(error_type) as failure:
             hash_file(error_path)
-        if sys.platform == "win32" and status == "io" and raw_code != "-":
+        if sys.platform == "win32" and status == "missing" and raw_code != "-":
+            assert isinstance(failure.value, FileNotFoundError)
+            assert failure.value.errno == 2
+            assert failure.value.winerror == int(raw_code)
+        elif sys.platform == "win32" and status == "io" and raw_code != "-":
             assert failure.value.winerror == int(raw_code)
         else:
             assert failure.value.errno == expected_errno

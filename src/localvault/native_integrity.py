@@ -181,6 +181,8 @@ class NativeIntegrityHashSession:
             if status == "missing":
                 if raw_code is None:
                     raise FileNotFoundError(message)
+                if sys.platform == "win32":
+                    raise OSError(0, message, None, raw_code)
                 raise FileNotFoundError(raw_code, message)
             if raw_code is None:
                 raise OSError(message)
